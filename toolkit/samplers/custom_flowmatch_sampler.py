@@ -129,7 +129,21 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             timesteps, _ = torch.sort(timesteps, descending=True)
 
             self.timesteps = timesteps.to(device=device)
+                        
+            t_01 = self.timesteps / self.config.num_train_timesteps  # 1000 by default
+            eps = 1e-8
 
+            # Flow-matching "alpha_bar" induced by the path x_t = (1 - t) x0 + t eps
+            snr = ((1.0 - t_01) ** 2) / (t_01 ** 2 + eps)
+            alpha_bar = snr / (1.0 + snr)  # = (1-t)^2 / ((1-t)^2 + t^2)
+
+            self.alphas_cumprod = alpha_bar
+            self.betas = 1.0 - alpha_bar  # not true DDPM betas; handy complement if code expects it
+
+            # Optional: set sigmas so downstream code that expects it doesn't crash
+            # Here we define "sigma" as t itself (matches your add_noise())
+            self.sigmas = torch.cat([t_01, torch.zeros(1, device=device)])
+            
             return timesteps
         elif timestep_type in ['flux_shift', 'lumina2_shift', 'shift']:
             # matches inference dynamic shifting
@@ -190,6 +204,13 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             self.sigmas = sigmas
 
             self.timesteps = timesteps.to(device=device)
+            
+            # Calculate alphas and alphas_cumprod for min_snr_gamma
+            alphas = 1.0 - self.sigmas**2
+            # cumulative product along the noise schedule
+            self.alphas_cumprod = torch.cumprod(alphas, dim=0)
+            self.betas = 1.0 - alphas
+
             return timesteps
 
         elif timestep_type == 'lognorm_blend':
