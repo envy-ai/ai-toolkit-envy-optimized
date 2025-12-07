@@ -376,6 +376,11 @@ class ToolkitModuleMixin:
         if hasattr(self, 'scalar'):
             scale = scale * self.scalar
 
+        weight_device = weight.device
+        if weight.device != down_weight.device:
+            weight = weight.to(down_weight.device)
+        if scale.device != down_weight.device:
+            scale = scale.to(down_weight.device)
         # merge weight
         if self.full_rank:
             weight = weight + multiplier * down_weight * scale
@@ -397,7 +402,7 @@ class ToolkitModuleMixin:
             weight = weight + multiplier * conved * scale
 
         # set weight to org_module
-        org_sd[weight_key] = weight.to(orig_dtype)
+        org_sd[weight_key] = weight.to(weight_device, orig_dtype)
         self.org_module[0].load_state_dict(org_sd)
 
     def setup_lorm(self: Module, state_dict: Optional[Dict[str, Any]] = None):
@@ -718,12 +723,18 @@ class ToolkitNetworkMixin:
         if hasattr(first_module, 'lora_down'):
             device = first_module.lora_down.weight.device
             dtype = first_module.lora_down.weight.dtype
+            if hasattr(first_module.lora_down, '_memory_management_device'):
+                device = first_module.lora_down._memory_management_device
         elif hasattr(first_module, 'lokr_w1'):
             device = first_module.lokr_w1.device
             dtype = first_module.lokr_w1.dtype
+            if hasattr(first_module.lokr_w1, '_memory_management_device'):
+                device = first_module.lokr_w1._memory_management_device
         elif hasattr(first_module, 'lokr_w1_a'):
             device = first_module.lokr_w1_a.device
             dtype = first_module.lokr_w1_a.dtype
+            if hasattr(first_module.lokr_w1_a, '_memory_management_device'):
+                device = first_module.lokr_w1_a._memory_management_device
         else:
             raise ValueError("Unknown module type")
         with torch.no_grad():
