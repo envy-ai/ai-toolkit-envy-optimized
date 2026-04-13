@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, ReactNode } from 'react';
-import { isVideo } from '@/utils/basic';
+import { isVideo, isAudio } from '@/utils/basic';
 
 interface SampleImageCardProps {
   imageUrl: string;
@@ -56,18 +56,6 @@ const SampleImageCard: React.FC<SampleImageCardProps> = ({
     return () => observer.disconnect();
   }, [observerRoot, rootMargin]);
 
-  // Pause video when leaving viewport
-  useEffect(() => {
-    if (!isVideo(imageUrl)) return;
-    const v = videoRef.current;
-    if (!v) return;
-    if (!isVisible && !v.paused) {
-      try {
-        v.pause();
-      } catch {}
-    }
-  }, [isVisible, imageUrl]);
-
   const handleLoad = () => setLoaded(true);
 
   return (
@@ -75,15 +63,28 @@ const SampleImageCard: React.FC<SampleImageCardProps> = ({
       <div ref={cardRef} className="relative w-full cursor-pointer" style={{ paddingBottom: '100%' }} onClick={onClick}>
         <div className="absolute inset-0 rounded-t-lg shadow-md">
           {isVisible ? (
-            isVideo(imageUrl) ? (
+            isAudio(imageUrl) ? (
+              <div className="w-full h-full flex items-center justify-center bg-gray-900">
+                <img
+                  src={`/api/audio/art/${encodeURIComponent(imageUrl)}`}
+                  alt={alt}
+                  className="w-full h-full object-cover"
+                  onError={e => {
+                    (e.target as HTMLImageElement).style.display = 'none';
+                  }}
+                />
+              </div>
+            ) : isVideo(imageUrl) ? (
               <video
                 ref={videoRef}
                 src={`/api/img/${encodeURIComponent(imageUrl)}`}
                 className="w-full h-full object-cover"
                 preload="none"
+                onLoad={handleLoad}
                 playsInline
                 muted
                 loop
+                autoPlay
                 controls={false}
               />
             ) : (
