@@ -1,6 +1,13 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
+  serverExternalPackages: ['macstats', 'osx-temperature-sensor'],
+  webpack: (config, { isServer }) => {
+    if (isServer) {
+      config.externals.push('osx-temperature-sensor', 'macstats');
+    }
+    return config;
+  },
   devIndicators: {
     buildActivity: false,
   },
@@ -10,9 +17,9 @@ const nextConfig: NextConfig = {
   },
   experimental: {
     serverActions: {
-      bodySizeLimit: '100mb',
+      bodySizeLimit: '100gb',
     },
-    middlewareClientMaxBodySize: '100mb',
+    middlewareClientMaxBodySize: '100gb',
   },
 };
 
