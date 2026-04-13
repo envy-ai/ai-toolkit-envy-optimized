@@ -1,0 +1,125 @@
+From 5d149d2b3c6c9e037b9e8eb6496d7057556b32eb Mon Sep 17 00:00:00 2001
+From: envy-ai <177786885+envy-ai@users.noreply.github.com>
+Date: Wed, 21 Jan 2026 11:03:54 -0500
+Subject: [PATCH] inference loras work for qwen image now, so you can run the
+ turbo lora for inference but train w/o it
+
+---
+ .../diffusion_models/qwen_image/qwen_image.py | 89 +++++++++++++++++++
+ 1 file changed, 89 insertions(+)
+
+diff --git a/extensions_built_in/diffusion_models/qwen_image/qwen_image.py b/extensions_built_in/diffusion_models/qwen_image/qwen_image.py
+index 6e6813f..c12be05 100644
+--- a/extensions_built_in/diffusion_models/qwen_image/qwen_image.py
++++ b/extensions_built_in/diffusion_models/qwen_image/qwen_image.py
+@@ -1,4 +1,5 @@
+ import os
++from contextlib import contextmanager
+ from typing import TYPE_CHECKING, List, Optional
+ 
+ import torch
+@@ -52,6 +53,85 @@ scheduler_config = {
+ }
+ 
+ 
++class _PipelineLoraController:
++    def __init__(
++        self,
++        pipeline,
++        adapter_name: Optional[str] = None,
++        lora_path: Optional[str] = None,
++        load_immediately: bool = False,
++    ):
++        self.pipeline = pipeline
++        self.adapter_name = adapter_name
++        self.lora_path = lora_path
++        self._is_loaded = False
++        self._is_active = False
++        if load_immediately:
++            self._load()
++
++    def _load(self):
++        if self._is_loaded or self.lora_path is None:
++            return
++        with _peft_skip_torchao_if_missing_apply_subclass():
++            self.pipeline.load_lora_weights(
++                self.lora_path,
++                adapter_name=self.adapter_name,
++            )
++        if hasattr(self.pipeline, "disable_lora"):
++            self.pipeline.disable_lora()
++        self._is_loaded = True
++
++    @property
++    def is_active(self) -> bool:
++        return self._is_active
++
++    @is_active.setter
++    def is_active(self, value: bool):
++        value = bool(value)
++        if value == self._is_active:
++            return
++        self._is_active = value
++        if value:
++            self._load()
++            if self.adapter_name and hasattr(self.pipeline, "set_adapters"):
++                self.pipeline.set_adapters(self.adapter_name)
++            if hasattr(self.pipeline, "enable_lora"):
++                self.pipeline.enable_lora()
++        else:
++            if hasattr(self.pipeline, "disable_lora"):
++                self.pipeline.disable_lora()
++
++    def force_to(self, device, dtype):
++        # LoRA weights live on the transformer; device moves are handled elsewhere.
++        return
++
++
++@contextmanager
++def _peft_skip_torchao_if_missing_apply_subclass():
++    try:
++        import peft.tuners.lora.model as peft_lora_model
++        import peft.tuners.lora.torchao as peft_lora_torchao
++    except Exception:
++        yield
++        return
++
++    original_dispatch_model = peft_lora_model.dispatch_torchao
++    original_dispatch_torchao = peft_lora_torchao.dispatch_torchao
++
++    def _patched_dispatch_torchao(target, adapter_name, lora_config, **kwargs):
++        if "get_apply_tensor_subclass" not in kwargs:
++            return None
++        return original_dispatch_torchao(target, adapter_name, lora_config, **kwargs)
++
++    peft_lora_model.dispatch_torchao = _patched_dispatch_torchao
++    peft_lora_torchao.dispatch_torchao = _patched_dispatch_torchao
++    try:
++        yield
++    finally:
++        peft_lora_model.dispatch_torchao = original_dispatch_model
++        peft_lora_torchao.dispatch_torchao = original_dispatch_torchao
++
++
+ class QwenImageModel(BaseModel):
+     arch = "qwen_image"
+     _qwen_image_keep_visual = False
+@@ -223,6 +303,15 @@ class QwenImageModel(BaseModel):
+         self.tokenizer = tokenizer  # list of tokenizers
+         self.model = pipe.transformer
+         self.pipeline = pipe
++        if self.model_config.inference_lora_path is not None:
++            self.print_and_status_update("Registering inference lora")
++            adapter_name = "inference"
++            self.assistant_lora = _PipelineLoraController(
++                pipe,
++                adapter_name=adapter_name,
++                lora_path=self.model_config.inference_lora_path,
++                load_immediately=False,
++            )
+         self.print_and_status_update("Model Loaded")
+ 
+     def get_generation_pipeline(self):
+-- 
+2.47.1
+
