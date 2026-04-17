@@ -15,6 +15,7 @@ from toolkit.accelerator import unwrap_model
 from optimum.quanto import freeze
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
 from toolkit.memory_management import MemoryManager
+from toolkit.assistant_lora import load_assistant_lora_from_path
 
 from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 import torch.nn.functional as F
@@ -197,6 +198,37 @@ class NucleusImageModel(BaseModel):
         self.tokenizer = tokenizer  # list of tokenizers
         self.model = pipe.transformer
         self.pipeline = pipe
+
+        if (
+            self.model_config.assistant_lora_path is not None
+            or self.model_config.inference_lora_path is not None
+        ):
+            if (
+                self.model_config.assistant_lora_path is not None
+                and self.model_config.inference_lora_path is not None
+            ):
+                raise ValueError(
+                    "Cannot load both assistant lora and inference lora at the same time"
+                )
+            if self.model_config.lora_path:
+                raise ValueError("Cannot load both assistant lora and lora at the same time")
+
+        if self.model_config.assistant_lora_path is not None:
+            self.print_and_status_update("Loading assistant lora")
+            self.assistant_lora = load_assistant_lora_from_path(
+                self.model_config.assistant_lora_path, self
+            )
+            if self.invert_assistant_lora:
+                self.assistant_lora.multiplier = -1.0
+                self.assistant_lora.is_active = False
+
+        if self.model_config.inference_lora_path is not None:
+            self.print_and_status_update("Loading inference lora")
+            self.assistant_lora = load_assistant_lora_from_path(
+                self.model_config.inference_lora_path, self
+            )
+            self.assistant_lora.is_active = False
+
         self.print_and_status_update("Model Loaded")
 
     def get_generation_pipeline(self):
