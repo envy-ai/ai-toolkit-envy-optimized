@@ -653,6 +653,34 @@ def get_all_snr(noise_scheduler, device):
         all_snr.requires_grad = False
     return all_snr.to(device)
 
+
+def get_snr_for_timesteps(noise_scheduler, timesteps, device):
+    all_snr = get_all_snr(noise_scheduler, device)
+
+    if not hasattr(noise_scheduler, "timesteps"):
+        return all_snr[timesteps.long()]
+
+    schedule_timesteps = noise_scheduler.timesteps
+    if not isinstance(schedule_timesteps, torch.Tensor):
+        schedule_timesteps = torch.tensor(schedule_timesteps, device=device)
+    else:
+        schedule_timesteps = schedule_timesteps.to(device)
+
+    if all_snr.shape[0] > schedule_timesteps.shape[0]:
+        all_snr = all_snr[: schedule_timesteps.shape[0]]
+
+    timestep_values = timesteps.to(device=device, dtype=schedule_timesteps.dtype).flatten()
+    indices = []
+    for timestep in timestep_values:
+        matches = torch.isclose(schedule_timesteps, timestep, atol=1e-5, rtol=1e-5).nonzero(as_tuple=False)
+        if len(matches) > 0:
+            indices.append(matches[0].item())
+        else:
+            indices.append(torch.argmin(torch.abs(schedule_timesteps - timestep)).item())
+
+    index_tensor = torch.tensor(indices, device=device, dtype=torch.long)
+    return all_snr[index_tensor]
+
 class LearnableSNRGamma:
     """
     This is a trainer for learnable snr gamma
@@ -678,8 +706,7 @@ class LearnableSNRGamma:
                 self.buffer.append(loss_chunk.mean().detach())
                 if len(self.buffer) > self.max_buffer_size:
                     self.buffer.pop(0)
-            all_snr = get_all_snr(self.noise_scheduler, loss.device)
-            snr: torch.Tensor = torch.stack([all_snr[t] for t in timesteps]).detach().float().to(loss.device)
+            snr = get_snr_for_timesteps(self.noise_scheduler, timesteps, loss.device).detach().float().to(loss.device)
         base_snrs = snr.clone().detach()
         snr.requires_grad = True
         snr = (snr + self.offset_1) * self.scale + self.offset_2
@@ -725,20 +752,7 @@ def apply_snr_weight(
         fixed=False,
 ):
     # will get it from noise scheduler if exist or will calculate it if not
-    all_snr = get_all_snr(noise_scheduler, loss.device)
-    # step_indices = []
-    # for t in timesteps:
-    #     for i, st in enumerate(noise_scheduler.timesteps):
-    #         if st == t:
-    #             step_indices.append(i)
-    #             break
-    # this breaks on some schedulers
-    # step_indices = [(noise_scheduler.timesteps == t).nonzero().item() for t in timesteps]
-
-    offset = 0
-    if noise_scheduler.timesteps[0] == 1000:
-        offset = 1
-    snr = torch.stack([all_snr[(t - offset).int()] for t in timesteps])
+    snr = get_snr_for_timesteps(noise_scheduler, timesteps, loss.device)
     gamma_over_snr = torch.div(torch.ones_like(snr) * gamma, snr)
     if fixed:
         snr_weight = gamma_over_snr.float().to(loss.device)  # directly using gamma over snr

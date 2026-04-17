@@ -104,6 +104,24 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
     def scale_model_input(self, sample: torch.Tensor, timestep: Union[float, torch.Tensor]) -> torch.Tensor:
         return sample
 
+    def _set_training_schedule_values(
+        self,
+        sigmas: torch.Tensor,
+        device,
+        append_terminal_sigma: float = 0.0,
+    ):
+        sigmas = sigmas.to(dtype=torch.float32, device=device)
+        self.sigmas = torch.cat(
+            [sigmas, torch.tensor([append_terminal_sigma], device=device, dtype=sigmas.dtype)]
+        )
+
+        # Flow matching uses x_t = (1 - sigma) * x0 + sigma * eps. Map that path to a
+        # synthetic alpha_bar that preserves the same SNR for downstream min-SNR logic.
+        signal_sq = (1.0 - self.sigmas) ** 2
+        noise_sq = self.sigmas ** 2
+        self.alphas_cumprod = signal_sq / (signal_sq + noise_sq + 1e-8)
+        self.betas = 1.0 - self.alphas_cumprod
+
     def set_train_timesteps(
         self,
         num_timesteps,
@@ -116,6 +134,10 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         if timestep_type == 'linear' or timestep_type == 'weighted':
             timesteps = torch.linspace(1000, 1, num_timesteps, device=device)
             self.timesteps = timesteps
+            self._set_training_schedule_values(
+                timesteps / self.config.num_train_timesteps,
+                device=device,
+            )
             return timesteps
         elif timestep_type == 'sigmoid':
             # distribute them closer to center. Inference distributes them as a bias toward first
@@ -130,19 +152,10 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
             self.timesteps = timesteps.to(device=device)
                         
-            t_01 = self.timesteps / self.config.num_train_timesteps  # 1000 by default
-            eps = 1e-8
-
-            # Flow-matching "alpha_bar" induced by the path x_t = (1 - t) x0 + t eps
-            snr = ((1.0 - t_01) ** 2) / (t_01 ** 2 + eps)
-            alpha_bar = snr / (1.0 + snr)  # = (1-t)^2 / ((1-t)^2 + t^2)
-
-            self.alphas_cumprod = alpha_bar
-            self.betas = 1.0 - alpha_bar  # not true DDPM betas; handy complement if code expects it
-
-            # Optional: set sigmas so downstream code that expects it doesn't crash
-            # Here we define "sigma" as t itself (matches your add_noise())
-            self.sigmas = torch.cat([t_01, torch.zeros(1, device=device)])
+            self._set_training_schedule_values(
+                self.timesteps / self.config.num_train_timesteps,
+                device=device,
+            )
             
             return timesteps
         elif timestep_type in ['flux_shift', 'lumina2_shift', 'shift']:
@@ -191,25 +204,18 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                 dtype=torch.float32, device=device)
             timesteps = sigmas * self.config.num_train_timesteps
 
+            terminal_sigma = 0.0
             if self.config.invert_sigmas:
                 sigmas = 1.0 - sigmas
                 timesteps = sigmas * self.config.num_train_timesteps
-                sigmas = torch.cat(
-                    [sigmas, torch.ones(1, device=sigmas.device)])
-            else:
-                sigmas = torch.cat(
-                    [sigmas, torch.zeros(1, device=sigmas.device)])
+                terminal_sigma = 1.0
 
             self.timesteps = timesteps.to(device=device)
-            self.sigmas = sigmas
-
-            self.timesteps = timesteps.to(device=device)
-            
-            # Calculate alphas and alphas_cumprod for min_snr_gamma
-            alphas = 1.0 - self.sigmas**2
-            # cumulative product along the noise schedule
-            self.alphas_cumprod = torch.cumprod(alphas, dim=0)
-            self.betas = 1.0 - alphas
+            self._set_training_schedule_values(
+                sigmas,
+                device=device,
+                append_terminal_sigma=terminal_sigma,
+            )
 
             return timesteps
 
@@ -235,6 +241,10 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
             timesteps = timesteps.to(torch.int)
             self.timesteps = timesteps.to(device=device)
+            self._set_training_schedule_values(
+                self.timesteps.to(dtype=torch.float32) / self.config.num_train_timesteps,
+                device=device,
+            )
             return timesteps
         else:
             raise ValueError(f"Invalid timestep type: {timestep_type}")

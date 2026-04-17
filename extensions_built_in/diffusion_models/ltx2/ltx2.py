@@ -271,10 +271,7 @@ class LTX2Model(BaseModel):
             original_dit_ckpt = get_model_state_dict_from_combined_ckpt(
                 combined_state_dict, dit_prefix
             )
-            transformer = convert_ltx2_transformer(
-                original_dit_ckpt, version=self.ltx_version
-            )
-            transformer = transformer.to(dtype)
+            transformer_source_ref = model_path
         else:
             transformer_path = model_path
             transformer_subfolder = "transformer"
@@ -287,14 +284,49 @@ class LTX2Model(BaseModel):
                 if os.path.exists(te_folder_path):
                     base_model_path = model_path
 
-            transformer = LTX2VideoTransformer3DModel.from_pretrained(
-                transformer_path, subfolder=transformer_subfolder, torch_dtype=dtype
+            transformer_source_ref = {
+                "transformer_path": transformer_path,
+                "transformer_subfolder": transformer_subfolder,
+            }
+
+        transformer_cache_path = None
+        transformer = None
+        if self.model_config.quantize:
+            transformer_cache_path = self.get_quantized_module_cache_path(
+                component_name="transformer",
+                qtype=self.model_config.qtype,
+                source_ref=transformer_source_ref,
+                extra_cache_key={
+                    "ltx_version": self.ltx_version,
+                    "quantize_kwargs": self.model_config.quantize_kwargs,
+                    "accuracy_recovery_adapter": self.model_config.accuracy_recovery_adapter,
+                    "target_lora_modules": getattr(self, "target_lora_modules", None),
+                },
             )
+            transformer = self.load_quantized_module_cache(
+                transformer_cache_path, "transformer"
+            )
+        transformer_loaded_from_cache = transformer is not None
+
+        if transformer is None:
+            if combined_state_dict is not None:
+                transformer = convert_ltx2_transformer(
+                    original_dit_ckpt, version=self.ltx_version
+                )
+                transformer = transformer.to(dtype)
+            else:
+                transformer = LTX2VideoTransformer3DModel.from_pretrained(
+                    transformer_path, subfolder=transformer_subfolder, torch_dtype=dtype
+                )
 
         if self.model_config.quantize:
-            self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
-            flush()
+            if not transformer_loaded_from_cache:
+                self.print_and_status_update("Quantizing Transformer")
+                quantize_model(self, transformer)
+                self.save_quantized_module_cache(
+                    transformer, transformer_cache_path, "transformer"
+                )
+                flush()
 
         if (
             self.model_config.layer_offloading
@@ -322,6 +354,41 @@ class LTX2Model(BaseModel):
         flush()
 
         self.print_and_status_update("Loading text encoder")
+        text_encoder_cache_path = None
+        text_encoder = None
+        if (
+            self.model_config.te_name_or_path is not None
+            and self.model_config.te_name_or_path.endswith(".safetensors")
+        ):
+            text_encoder_source_ref = {
+                "te_name_or_path": self.model_config.te_name_or_path,
+                "base_te_path": base_te_path,
+            }
+        elif self.model_config.te_name_or_path is not None:
+            text_encoder_source_ref = self.model_config.te_name_or_path
+        elif self.ltx_te_path is not None:
+            text_encoder_source_ref = self.ltx_te_path
+        else:
+            text_encoder_source_ref = {
+                "name_or_path": self.model_config.name_or_path,
+                "text_encoder_subfolder": "text_encoder",
+            }
+
+        if self.model_config.quantize_te:
+            text_encoder_cache_path = self.get_quantized_module_cache_path(
+                component_name="text_encoder",
+                qtype=self.model_config.qtype_te,
+                source_ref=text_encoder_source_ref,
+                extra_cache_key={
+                    "ltx_version": self.ltx_version,
+                    "comfy_files": self._comfy_te_file,
+                },
+            )
+            text_encoder = self.load_quantized_module_cache(
+                text_encoder_cache_path, "text encoder"
+            )
+        text_encoder_loaded_from_cache = text_encoder is not None
+
         if (
             self.model_config.te_name_or_path is not None
             and self.model_config.te_name_or_path.endswith(".safetensors")
@@ -329,107 +396,115 @@ class LTX2Model(BaseModel):
             # load from comfyui gemma3 checkpoint
             tokenizer = GemmaTokenizerFast.from_pretrained(base_te_path)
 
-            with init_empty_weights():
-                text_encoder = Gemma3ForConditionalGeneration(
-                    Gemma3Config(
-                        **{
-                            "boi_token_index": 255999,
-                            "bos_token_id": 2,
-                            "eoi_token_index": 256000,
-                            "eos_token_id": 106,
-                            "image_token_index": 262144,
-                            "initializer_range": 0.02,
-                            "mm_tokens_per_image": 256,
-                            "model_type": "gemma3",
-                            "pad_token_id": 0,
-                            "text_config": {
-                                "attention_bias": False,
-                                "attention_dropout": 0.0,
-                                "attn_logit_softcapping": None,
-                                "cache_implementation": "hybrid",
-                                "final_logit_softcapping": None,
-                                "head_dim": 256,
-                                "hidden_activation": "gelu_pytorch_tanh",
-                                "hidden_size": 3840,
+            if text_encoder is None:
+                with init_empty_weights():
+                    text_encoder = Gemma3ForConditionalGeneration(
+                        Gemma3Config(
+                            **{
+                                "boi_token_index": 255999,
+                                "bos_token_id": 2,
+                                "eoi_token_index": 256000,
+                                "eos_token_id": 106,
+                                "image_token_index": 262144,
                                 "initializer_range": 0.02,
-                                "intermediate_size": 15360,
-                                "max_position_embeddings": 131072,
-                                "model_type": "gemma3_text",
-                                "num_attention_heads": 16,
-                                "num_hidden_layers": 48,
-                                "num_key_value_heads": 8,
-                                "query_pre_attn_scalar": 256,
-                                "rms_norm_eps": 1e-06,
-                                "rope_local_base_freq": 10000,
-                                "rope_scaling": {"factor": 8.0, "rope_type": "linear"},
-                                "rope_theta": 1000000,
-                                "sliding_window": 1024,
-                                "sliding_window_pattern": 6,
+                                "mm_tokens_per_image": 256,
+                                "model_type": "gemma3",
+                                "pad_token_id": 0,
+                                "text_config": {
+                                    "attention_bias": False,
+                                    "attention_dropout": 0.0,
+                                    "attn_logit_softcapping": None,
+                                    "cache_implementation": "hybrid",
+                                    "final_logit_softcapping": None,
+                                    "head_dim": 256,
+                                    "hidden_activation": "gelu_pytorch_tanh",
+                                    "hidden_size": 3840,
+                                    "initializer_range": 0.02,
+                                    "intermediate_size": 15360,
+                                    "max_position_embeddings": 131072,
+                                    "model_type": "gemma3_text",
+                                    "num_attention_heads": 16,
+                                    "num_hidden_layers": 48,
+                                    "num_key_value_heads": 8,
+                                    "query_pre_attn_scalar": 256,
+                                    "rms_norm_eps": 1e-06,
+                                    "rope_local_base_freq": 10000,
+                                    "rope_scaling": {"factor": 8.0, "rope_type": "linear"},
+                                    "rope_theta": 1000000,
+                                    "sliding_window": 1024,
+                                    "sliding_window_pattern": 6,
+                                    "torch_dtype": "bfloat16",
+                                    "use_cache": True,
+                                    "vocab_size": 262208,
+                                },
                                 "torch_dtype": "bfloat16",
-                                "use_cache": True,
-                                "vocab_size": 262208,
-                            },
-                            "torch_dtype": "bfloat16",
-                            "transformers_version": "4.51.3",
-                            "unsloth_fixed": True,
-                            "vision_config": {
-                                "attention_dropout": 0.0,
-                                "hidden_act": "gelu_pytorch_tanh",
-                                "hidden_size": 1152,
-                                "image_size": 896,
-                                "intermediate_size": 4304,
-                                "layer_norm_eps": 1e-06,
-                                "model_type": "siglip_vision_model",
-                                "num_attention_heads": 16,
-                                "num_channels": 3,
-                                "num_hidden_layers": 27,
-                                "patch_size": 14,
-                                "torch_dtype": "bfloat16",
-                                "vision_use_head": False,
-                            },
-                        }
+                                "transformers_version": "4.51.3",
+                                "unsloth_fixed": True,
+                                "vision_config": {
+                                    "attention_dropout": 0.0,
+                                    "hidden_act": "gelu_pytorch_tanh",
+                                    "hidden_size": 1152,
+                                    "image_size": 896,
+                                    "intermediate_size": 4304,
+                                    "layer_norm_eps": 1e-06,
+                                    "model_type": "siglip_vision_model",
+                                    "num_attention_heads": 16,
+                                    "num_channels": 3,
+                                    "num_hidden_layers": 27,
+                                    "patch_size": 14,
+                                    "torch_dtype": "bfloat16",
+                                    "vision_use_head": False,
+                                },
+                            }
+                        )
                     )
-                )
-            te_state_dict = load_file(self.model_config.te_name_or_path)
-            te_state_dict = convert_comfy_gemma3_to_transformers(te_state_dict)
-            for key in te_state_dict:
-                te_state_dict[key] = te_state_dict[key].to(dtype)
+                te_state_dict = load_file(self.model_config.te_name_or_path)
+                te_state_dict = convert_comfy_gemma3_to_transformers(te_state_dict)
+                for key in te_state_dict:
+                    te_state_dict[key] = te_state_dict[key].to(dtype)
 
-            text_encoder.load_state_dict(te_state_dict, assign=True, strict=True)
-            del te_state_dict
-            flush()
+                text_encoder.load_state_dict(te_state_dict, assign=True, strict=True)
+                del te_state_dict
+                flush()
         elif self.model_config.te_name_or_path is not None:
             # a repo or folder
             tokenizer = GemmaTokenizerFast.from_pretrained(
                 self.model_config.te_name_or_path
             )
-            text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
-                self.model_config.te_name_or_path, dtype=dtype
-            )
+            if text_encoder is None:
+                text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
+                    self.model_config.te_name_or_path, dtype=dtype
+                )
         elif self.ltx_te_path is not None:
             # pull from model specific te
             tokenizer = GemmaTokenizerFast.from_pretrained(self.ltx_te_path)
-            text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
-                self.ltx_te_path, dtype=dtype
-            )
+            if text_encoder is None:
+                text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
+                    self.ltx_te_path, dtype=dtype
+                )
         else:
             # using combo hf repo
             tokenizer = GemmaTokenizerFast.from_pretrained(
                 self.model_config.name_or_path, subfolder="tokenizer"
             )
-            text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
-                self.model_config.name_or_path, subfolder="text_encoder", dtype=dtype
-            )
+            if text_encoder is None:
+                text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
+                    self.model_config.name_or_path, subfolder="text_encoder", dtype=dtype
+                )
 
         # remove the vision tower
         text_encoder.model.vision_tower = None
         flush()
         
         if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing Text Encoder")
-            quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
-            freeze(text_encoder)
-            flush()
+            if not text_encoder_loaded_from_cache:
+                self.print_and_status_update("Quantizing Text Encoder")
+                quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
+                freeze(text_encoder)
+                self.save_quantized_module_cache(
+                    text_encoder, text_encoder_cache_path, "text encoder"
+                )
+                flush()
 
         if (
             self.model_config.layer_offloading

@@ -78,6 +78,7 @@ export default function SimpleJob({
 
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
+  const networkType = jobConfig.config.process[0].network?.type ?? 'lora';
 
   const taggedSampleArr: Record<string, any>[] | null = useMemo(() => {
     if (!modelArch) return null;
@@ -424,14 +425,15 @@ export default function SimpleJob({
           <Card title="Target">
             <SelectInput
               label="Target Type"
-              value={jobConfig.config.process[0].network?.type ?? 'lora'}
+              value={networkType}
               onChange={value => setJobConfig(value, 'config.process[0].network.type')}
               options={[
                 { value: 'lora', label: 'LoRA' },
+                { value: 'dora', label: 'DoRA' },
                 { value: 'lokr', label: 'LoKr' },
               ]}
             />
-            {jobConfig.config.process[0].network?.type == 'lokr' && (
+            {networkType == 'lokr' && (
               <SelectInput
                 label="LoKr Factor"
                 value={`${jobConfig.config.process[0].network?.lokr_factor ?? -1}`}
@@ -445,34 +447,74 @@ export default function SimpleJob({
                 ]}
               />
             )}
-            {jobConfig.config.process[0].network?.type == 'lora' && (
+            {(networkType == 'lora' || networkType == 'dora') && (
               <>
                 <NumberInput
                   label="Linear Rank"
-                  value={jobConfig.config.process[0].network.linear}
+                  value={jobConfig.config.process[0].network?.linear ?? 32}
                   onChange={value => {
-                    console.log('onChange', value);
                     setJobConfig(value, 'config.process[0].network.linear');
-                    setJobConfig(value, 'config.process[0].network.linear_alpha');
+                    if (networkType == 'lora') {
+                      setJobConfig(value, 'config.process[0].network.linear_alpha');
+                    }
                   }}
                   placeholder="eg. 16"
                   min={0}
                   max={1024}
                   required
                 />
-                {disableSections.includes('network.conv') ? null : (
+                {networkType == 'dora' && (
                   <NumberInput
-                    label="Conv Rank"
-                    value={jobConfig.config.process[0].network.conv}
-                    onChange={value => {
-                      console.log('onChange', value);
-                      setJobConfig(value, 'config.process[0].network.conv');
-                      setJobConfig(value, 'config.process[0].network.conv_alpha');
-                    }}
+                    label="Linear Alpha"
+                    value={
+                      jobConfig.config.process[0].network?.linear_alpha ??
+                      jobConfig.config.process[0].network?.linear ??
+                      32
+                    }
+                    onChange={value => setJobConfig(value, 'config.process[0].network.linear_alpha')}
                     placeholder="eg. 16"
                     min={0}
                     max={1024}
+                    required
                   />
+                )}
+                {disableSections.includes('network.conv') ? null : (
+                  <>
+                    <NumberInput
+                      label="Conv Rank"
+                      value={jobConfig.config.process[0].network?.conv ?? 16}
+                      onChange={value => {
+                        const currentConv = jobConfig.config.process[0].network?.conv;
+                        const currentConvAlpha = jobConfig.config.process[0].network?.conv_alpha;
+                        setJobConfig(value, 'config.process[0].network.conv');
+                        if (
+                          networkType == 'lora' &&
+                          (currentConvAlpha === undefined ||
+                            currentConvAlpha === null ||
+                            currentConvAlpha === currentConv)
+                        ) {
+                          setJobConfig(value, 'config.process[0].network.conv_alpha');
+                        }
+                      }}
+                      placeholder="eg. 16"
+                      min={0}
+                      max={1024}
+                    />
+                    {(networkType == 'lora' || networkType == 'dora') && (
+                      <NumberInput
+                        label="Conv Alpha"
+                        value={
+                          jobConfig.config.process[0].network?.conv_alpha ??
+                          jobConfig.config.process[0].network?.conv ??
+                          16
+                        }
+                        onChange={value => setJobConfig(value, 'config.process[0].network.conv_alpha')}
+                        placeholder="eg. 16"
+                        min={0}
+                        max={1024}
+                      />
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -580,7 +622,7 @@ export default function SimpleJob({
                     { value: 'adamw', label: 'AdamW' },
                     { value: 'adamw8bit', label: 'AdamW8Bit' },
                     { value: 'automagic', label: 'Automagic' },
-                    { value: 'prodigyopt', label: 'Prodigy' },
+                    { value: 'prodigy', label: 'Prodigy' },
                     { value: 'prodigy8bit', label: 'Prodigy8Bit' },
                   ]}
                 />
@@ -619,14 +661,15 @@ export default function SimpleJob({
                   />
                 )}
                 <SelectInput
-                  label="Timestep Bias"
+                  label="Content Or Style"
                   className="pt-2"
                   value={jobConfig.config.process[0].train.content_or_style}
                   onChange={value => setJobConfig(value, 'config.process[0].train.content_or_style')}
+                  docKey="train.content_or_style"
                   options={[
                     { value: 'balanced', label: 'Balanced' },
-                    { value: 'content', label: 'High Noise' },
-                    { value: 'style', label: 'Low Noise' },
+                    { value: 'content', label: 'Content' },
+                    { value: 'style', label: 'Style' },
                   ]}
                 />
                 <SelectInput
@@ -640,6 +683,15 @@ export default function SimpleJob({
                     { value: 'wavelet', label: 'Wavelet' },
                     { value: 'stepped', label: 'Stepped Recovery' },
                   ]}
+                />
+                <NumberInput
+                  label="Min SNR Gamma"
+                  className="pt-2"
+                  value={jobConfig.config.process[0].train.min_snr_gamma ?? 5.0}
+                  onChange={value => setJobConfig(value, 'config.process[0].train.min_snr_gamma')}
+                  placeholder="eg. 5.0"
+                  docKey={'train.min_snr_gamma'}
+                  min={0}
                 />
                 {modelArch?.additionalSections?.includes('train.audio_loss_multiplier') && (
                   <NumberInput

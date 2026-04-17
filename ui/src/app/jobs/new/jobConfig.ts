@@ -78,6 +78,7 @@ export const defaultJobConfig: JobConfig = {
           optimizer_params: {
             weight_decay: 1e-4,
           },
+          min_snr_gamma: 5.0,
           unload_text_encoder: false,
           cache_text_embeddings: false,
           lr: 0.0001,
@@ -157,6 +158,14 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
   }
   if (isMac()) {
     jobConfig.config.process[0].device = 'mps';
+  }
+
+  if (jobConfig.config.process[0]?.train?.optimizer === 'prodigyopt') {
+    jobConfig.config.process[0].train.optimizer = 'prodigy';
+  }
+
+  if (jobConfig.config.process[0]?.train?.min_snr_gamma === undefined) {
+    jobConfig.config.process[0].train.min_snr_gamma = 5.0;
   }
 
   return jobConfig;
