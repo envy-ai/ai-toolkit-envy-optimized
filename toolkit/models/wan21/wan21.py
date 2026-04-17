@@ -344,11 +344,33 @@ class Wan21(BaseModel):
     def load_wan_transformer(self, transformer_path, subfolder=None):
         self.print_and_status_update("Loading transformer")
         dtype = self.torch_dtype
-        transformer = WanTransformer3DModel.from_pretrained(
-            transformer_path,
-            subfolder=subfolder,
-            torch_dtype=dtype,
-        ).to(dtype=dtype)
+        transformer_cache_path = None
+        transformer = None
+        if self.model_config.quantize:
+            transformer_cache_path = self.get_quantized_module_cache_path(
+                component_name="transformer",
+                qtype=self.model_config.qtype,
+                source_ref={
+                    "transformer_path": transformer_path,
+                    "transformer_subfolder": subfolder,
+                },
+                extra_cache_key={
+                    "quantize_kwargs": self.model_config.quantize_kwargs,
+                    "accuracy_recovery_adapter": self.model_config.accuracy_recovery_adapter,
+                    "target_lora_modules": getattr(self, "target_lora_modules", None),
+                },
+            )
+            transformer = self.load_quantized_module_cache(
+                transformer_cache_path, "transformer"
+            )
+        transformer_loaded_from_cache = transformer is not None
+
+        if transformer is None:
+            transformer = WanTransformer3DModel.from_pretrained(
+                transformer_path,
+                subfolder=subfolder,
+                torch_dtype=dtype,
+            ).to(dtype=dtype)
 
         if self.model_config.split_model_over_gpus:
             raise ValueError(
@@ -373,9 +395,13 @@ class Wan21(BaseModel):
         flush()
         
         if self.model_config.quantize:
-            self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
-            flush()
+            if not transformer_loaded_from_cache:
+                self.print_and_status_update("Quantizing Transformer")
+                quantize_model(self, transformer)
+                self.save_quantized_module_cache(
+                    transformer, transformer_cache_path, "transformer"
+                )
+                flush()
         
         if self.model_config.layer_offloading and self.model_config.layer_offloading_transformer_percent > 0:
             MemoryManager.attach(
@@ -417,23 +443,44 @@ class Wan21(BaseModel):
         flush()
 
         self.print_and_status_update("Loading UMT5EncoderModel")
-        
-        tokenizer, text_encoder = get_umt5_encoder(
-            model_path=te_path,
-            tokenizer_subfolder="tokenizer",
-            encoder_subfolder="text_encoder",
-            torch_dtype=dtype,
-            comfy_files=self._comfy_te_file
-        )
+        text_encoder_cache_path = None
+        text_encoder = None
+        if self.model_config.quantize_te:
+            text_encoder_cache_path = self.get_quantized_module_cache_path(
+                component_name="text_encoder",
+                qtype=self.model_config.qtype,
+                source_ref=te_path,
+                extra_cache_key={"comfy_files": self._comfy_te_file},
+            )
+            text_encoder = self.load_quantized_module_cache(
+                text_encoder_cache_path, "text encoder"
+            )
+        text_encoder_loaded_from_cache = text_encoder is not None
 
-        text_encoder.to(self.device_torch, dtype=dtype)
-        flush()
+        if text_encoder is None:
+            tokenizer, text_encoder = get_umt5_encoder(
+                model_path=te_path,
+                tokenizer_subfolder="tokenizer",
+                encoder_subfolder="text_encoder",
+                torch_dtype=dtype,
+                comfy_files=self._comfy_te_file
+            )
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(te_path, subfolder="tokenizer")
+
+        if not text_encoder_loaded_from_cache:
+            text_encoder.to(self.device_torch, dtype=dtype)
+            flush()
 
         if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing UMT5EncoderModel")
-            quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
-            freeze(text_encoder)
-            flush()
+            if not text_encoder_loaded_from_cache:
+                self.print_and_status_update("Quantizing UMT5EncoderModel")
+                quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
+                freeze(text_encoder)
+                self.save_quantized_module_cache(
+                    text_encoder, text_encoder_cache_path, "text encoder"
+                )
+                flush()
         
         if self.model_config.layer_offloading and self.model_config.layer_offloading_text_encoder_percent > 0:
             MemoryManager.attach(

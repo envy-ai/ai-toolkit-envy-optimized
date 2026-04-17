@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 import huggingface_hub
 import torch
+from toolkit.assistant_lora import load_assistant_lora_from_path
 from toolkit.config_modules import GenerateImageConfig, ModelConfig
 from toolkit.memory_management.manager import MemoryManager
 from toolkit.metadata import get_meta_for_safetensors
@@ -13,7 +14,6 @@ from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
 )
-from toolkit.dequantize import patch_dequantization_on_save
 from toolkit.accelerator import unwrap_model
 from optimum.quanto import freeze, QTensor
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
@@ -95,21 +95,36 @@ class Flux2Model(BaseModel):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading Mistral")
 
-        text_encoder: Mistral3ForConditionalGeneration = (
-            Mistral3ForConditionalGeneration.from_pretrained(
+        text_encoder_cache_path = None
+        text_encoder = None
+        if self.model_config.quantize_te:
+            text_encoder_cache_path = self.get_quantized_module_cache_path(
+                component_name="text_encoder",
+                qtype=self.model_config.qtype_te,
+                source_ref=MISTRAL_PATH,
+                extra_cache_key={"text_encoder_type": self.flux2_te_type},
+            )
+            text_encoder = self.load_quantized_module_cache(
+                text_encoder_cache_path, "text encoder"
+            )
+
+        if text_encoder is None:
+            text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
                 MISTRAL_PATH,
                 torch_dtype=dtype,
             )
-        )
-        text_encoder.to(self.device_torch, dtype=dtype)
+            text_encoder.to(self.device_torch, dtype=dtype)
 
-        flush()
-
-        if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing Mistral")
-            quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
-            freeze(text_encoder)
             flush()
+
+            if self.model_config.quantize_te:
+                self.print_and_status_update("Quantizing Mistral")
+                quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
+                freeze(text_encoder)
+                self.save_quantized_module_cache(
+                    text_encoder, text_encoder_cache_path, "text encoder"
+                )
+                flush()
 
         if (
             self.model_config.layer_offloading
@@ -124,6 +139,21 @@ class Flux2Model(BaseModel):
         tokenizer = AutoProcessor.from_pretrained(MISTRAL_PATH)
         return text_encoder, tokenizer
 
+    def _resolve_flux_lora_path(self, lora_path: Optional[str]) -> Optional[str]:
+        if lora_path is None:
+            return None
+        if os.path.isdir(lora_path):
+            return os.path.join(lora_path, "pytorch_lora_weights.safetensors")
+        if os.path.exists(lora_path):
+            return lora_path
+
+        self.print_and_status_update(f"Grabbing lora from the hub: {lora_path}")
+        return huggingface_hub.hf_hub_download(
+            repo_id=lora_path,
+            filename="pytorch_lora_weights.safetensors",
+            token=HF_TOKEN,
+        )
+
     def load_model(self):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading Flux2 model")
@@ -132,9 +162,6 @@ class Flux2Model(BaseModel):
         transformer_path = model_path
 
         self.print_and_status_update("Loading transformer")
-        with torch.device("meta"):
-            transformer = Flux2(self.get_flux2_params())
-
         # use local path if provided
         if os.path.exists(os.path.join(transformer_path, self.flux2_te_filename)):
             transformer_path = os.path.join(transformer_path, self.flux2_te_filename)
@@ -147,21 +174,45 @@ class Flux2Model(BaseModel):
                 token=HF_TOKEN,
             )
 
-        transformer_state_dict = load_file(transformer_path, device="cpu")
+        transformer_cache_path = None
+        transformer = None
+        if self.model_config.quantize:
+            transformer_cache_path = self.get_quantized_module_cache_path(
+                component_name="transformer",
+                qtype=self.model_config.qtype,
+                source_ref=transformer_path,
+                extra_cache_key={
+                    "quantize_kwargs": self.model_config.quantize_kwargs,
+                    "accuracy_recovery_adapter": self.model_config.accuracy_recovery_adapter,
+                    "target_lora_modules": getattr(self, "target_lora_modules", None),
+                },
+            )
+            transformer = self.load_quantized_module_cache(
+                transformer_cache_path, "transformer"
+            )
+        transformer_loaded_from_cache = transformer is not None
 
-        # cast to dtype
-        for key in transformer_state_dict:
-            transformer_state_dict[key] = transformer_state_dict[key].to(dtype)
+        if transformer is None:
+            with torch.device("meta"):
+                transformer = Flux2(self.get_flux2_params())
 
-        transformer.load_state_dict(transformer_state_dict, assign=True)
+            transformer_state_dict = load_file(transformer_path, device="cpu")
+
+            # cast to dtype
+            for key in transformer_state_dict:
+                transformer_state_dict[key] = transformer_state_dict[key].to(dtype)
+
+            transformer.load_state_dict(transformer_state_dict, assign=True)
 
         if self.model_config.quantize:
-            # patch the state dict method
-            patch_dequantization_on_save(transformer)
-            # Avoid full-model peak VRAM allocation before quantization.
-            self.print_and_status_update("Keeping transformer on CPU for quantization")
-            self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
+            if not transformer_loaded_from_cache:
+                # Avoid full-model peak VRAM allocation before quantization.
+                self.print_and_status_update("Keeping transformer on CPU for quantization")
+                self.print_and_status_update("Quantizing Transformer")
+                quantize_model(self, transformer)
+                self.save_quantized_module_cache(
+                    transformer, transformer_cache_path, "transformer"
+                )
             flush()
         else:
             transformer.to(self.device_torch, dtype=dtype)
@@ -252,6 +303,43 @@ class Flux2Model(BaseModel):
         self.tokenizer = tokenizer  # list of tokenizers
         self.model = pipe.transformer
         self.pipeline = pipe
+
+        if (
+            self.model_config.assistant_lora_path is not None
+            or self.model_config.inference_lora_path is not None
+        ):
+            if (
+                self.model_config.assistant_lora_path is not None
+                and self.model_config.inference_lora_path is not None
+            ):
+                raise ValueError(
+                    "Cannot load both assistant lora and inference lora at the same time"
+                )
+            if self.model_config.lora_path:
+                raise ValueError("Cannot load both assistant lora and lora at the same time")
+
+        if self.model_config.assistant_lora_path is not None:
+            self.model_config.assistant_lora_path = self._resolve_flux_lora_path(
+                self.model_config.assistant_lora_path
+            )
+            self.print_and_status_update("Loading assistant lora")
+            self.assistant_lora = load_assistant_lora_from_path(
+                self.model_config.assistant_lora_path, self
+            )
+            if self.invert_assistant_lora:
+                self.assistant_lora.multiplier = -1.0
+                self.assistant_lora.is_active = False
+
+        if self.model_config.inference_lora_path is not None:
+            self.model_config.inference_lora_path = self._resolve_flux_lora_path(
+                self.model_config.inference_lora_path
+            )
+            self.print_and_status_update("Loading inference lora")
+            self.assistant_lora = load_assistant_lora_from_path(
+                self.model_config.inference_lora_path, self
+            )
+            self.assistant_lora.is_active = False
+
         self.print_and_status_update("Model Loaded")
 
     def get_generation_pipeline(self):
@@ -267,7 +355,9 @@ class Flux2Model(BaseModel):
             is_guidance_distilled=self.flux2_is_guidance_distilled,
         )
 
-        pipeline = pipeline.to(self.device_torch)
+        pipeline.transformer.to(self.device_torch)
+        pipeline.text_encoder.to("cpu")
+        pipeline.vae.to("cpu")
 
         return pipeline
 

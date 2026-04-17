@@ -580,7 +580,6 @@ export const modelArchs: ModelArch[] = [
         {},
       ],
     },
-    disableSections: ['network.conv'],
     additionalSections: [
       'datasets.multi_control_paths',
       'sample.multi_ctrl_imgs',
@@ -733,7 +732,6 @@ export const modelArchs: ModelArch[] = [
         {},
       ],
     },
-    disableSections: ['network.conv'],
     additionalSections: [
       'datasets.multi_control_paths',
       'sample.multi_ctrl_imgs',
@@ -764,7 +762,6 @@ export const modelArchs: ModelArch[] = [
         {},
       ],
     },
-    disableSections: ['network.conv'],
     additionalSections: [
       'datasets.multi_control_paths',
       'sample.multi_ctrl_imgs',

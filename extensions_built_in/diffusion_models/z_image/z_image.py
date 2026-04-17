@@ -166,9 +166,30 @@ class ZImageModel(BaseModel):
             if os.path.exists(te_folder_path):
                 base_model_path = model_path
 
-        transformer = ZImageTransformer2DModel.from_pretrained(
-            transformer_path, subfolder=transformer_subfolder, torch_dtype=dtype
-        )
+        transformer_cache_path = None
+        transformer = None
+        if self.model_config.quantize and self.model_config.assistant_lora_path is None:
+            transformer_cache_path = self.get_quantized_module_cache_path(
+                component_name="transformer",
+                qtype=self.model_config.qtype,
+                source_ref={
+                    "transformer_path": transformer_path,
+                    "transformer_subfolder": transformer_subfolder,
+                },
+                extra_cache_key={
+                    "quantize_kwargs": self.model_config.quantize_kwargs,
+                    "target_lora_modules": getattr(self, "target_lora_modules", None),
+                },
+            )
+            transformer = self.load_quantized_module_cache(
+                transformer_cache_path, "transformer"
+            )
+        transformer_loaded_from_cache = transformer is not None
+
+        if transformer is None:
+            transformer = ZImageTransformer2DModel.from_pretrained(
+                transformer_path, subfolder=transformer_subfolder, torch_dtype=dtype
+            )
 
         # load assistant lora if specified
         if self.model_config.assistant_lora_path is not None:
@@ -178,9 +199,13 @@ class ZImageModel(BaseModel):
                 self.model_config.qtype = "float8"
 
         if self.model_config.quantize:
-            self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
-            flush()
+            if not transformer_loaded_from_cache:
+                self.print_and_status_update("Quantizing Transformer")
+                quantize_model(self, transformer)
+                self.save_quantized_module_cache(
+                    transformer, transformer_cache_path, "transformer"
+                )
+                flush()
 
         if (
             self.model_config.layer_offloading
@@ -206,9 +231,41 @@ class ZImageModel(BaseModel):
         tokenizer = AutoTokenizer.from_pretrained(
             base_model_path, subfolder="tokenizer", torch_dtype=dtype
         )
-        text_encoder = Qwen3ForCausalLM.from_pretrained(
-            base_model_path, subfolder="text_encoder", torch_dtype=dtype
-        )
+        text_encoder_cache_path = None
+        text_encoder = None
+        if self.model_config.quantize_te:
+            text_encoder_cache_path = self.get_quantized_module_cache_path(
+                component_name="text_encoder",
+                qtype=self.model_config.qtype_te,
+                source_ref={
+                    "base_model_path": base_model_path,
+                    "text_encoder_subfolder": "text_encoder",
+                },
+            )
+            text_encoder = self.load_quantized_module_cache(
+                text_encoder_cache_path, "text encoder"
+            )
+        text_encoder_loaded_from_cache = text_encoder is not None
+
+        if text_encoder is None:
+            text_encoder = Qwen3ForCausalLM.from_pretrained(
+                base_model_path, subfolder="text_encoder", torch_dtype=dtype
+            )
+
+        if self.model_config.quantize_te:
+            if not text_encoder_loaded_from_cache:
+                text_encoder.to(self.device_torch, dtype=dtype)
+                flush()
+                self.print_and_status_update("Quantizing Text Encoder")
+                quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
+                freeze(text_encoder)
+                self.save_quantized_module_cache(
+                    text_encoder, text_encoder_cache_path, "text encoder"
+                )
+                flush()
+        else:
+            text_encoder.to(self.device_torch, dtype=dtype)
+            flush()
 
         if (
             self.model_config.layer_offloading
@@ -219,15 +276,6 @@ class ZImageModel(BaseModel):
                 self.device_torch,
                 offload_percent=self.model_config.layer_offloading_text_encoder_percent,
             )
-
-        text_encoder.to(self.device_torch, dtype=dtype)
-        flush()
-
-        if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing Text Encoder")
-            quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
-            freeze(text_encoder)
-            flush()
 
         self.print_and_status_update("Loading VAE")
         vae = AutoencoderKL.from_pretrained(

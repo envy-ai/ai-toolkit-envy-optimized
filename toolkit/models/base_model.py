@@ -1,5 +1,6 @@
 import copy
 import gc
+import hashlib
 import inspect
 import json
 import random
@@ -18,10 +19,11 @@ from torchvision.transforms import Resize, transforms
 
 from toolkit.clip_vision_adapter import ClipVisionAdapter
 from toolkit.custom_adapter import CustomAdapter
+from toolkit.dequantize import patch_dequantization_on_save
 from toolkit.ip_adapter import IPAdapter
 from toolkit.config_modules import ModelConfig, GenerateImageConfig, ModelArch
 from toolkit.models.decorator import Decorator
-from toolkit.paths import KEYMAPS_ROOT
+from toolkit.paths import KEYMAPS_ROOT, get_path
 from toolkit.prompt_utils import inject_trigger_into_prompt, PromptEmbeds, concat_prompt_embeds
 from toolkit.reference_adapter import ReferenceAdapter
 from toolkit.sd_device_states_presets import empty_preset
@@ -371,6 +373,16 @@ class BaseModel:
         network = self.network
         merge_multiplier = 1.0
         flush()
+        if (
+            self.assistant_lora is None
+            and (
+                self.model_config.assistant_lora_path is not None
+                or self.model_config.inference_lora_path is not None
+            )
+        ):
+            raise RuntimeError(
+                f"assistant/inference LoRA was configured but not loaded for arch '{self.arch}'"
+            )
         # if using assistant, unfuse it
         if self.model_config.assistant_lora_path is not None:
             print_acc("Unloading assistant lora")
@@ -1595,3 +1607,135 @@ class BaseModel:
     def get_model_to_train(self):
         # called to get model to attach LoRAs to. Can be overridden in child classes
         return self.unet
+
+    def _normalize_quantized_cache_value(self, value):
+        if isinstance(value, os.PathLike):
+            value = os.fspath(value)
+
+        if isinstance(value, dict):
+            return {
+                str(key): self._normalize_quantized_cache_value(val)
+                for key, val in sorted(value.items(), key=lambda item: str(item[0]))
+            }
+
+        if isinstance(value, (list, tuple)):
+            return [self._normalize_quantized_cache_value(item) for item in value]
+
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            if isinstance(value, str) and os.path.exists(value):
+                stat = os.stat(value)
+                return {
+                    "path": os.path.abspath(value),
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+            return value
+
+        return repr(value)
+
+    def get_quantized_module_cache_path(
+        self,
+        component_name: str,
+        qtype: str,
+        source_ref=None,
+        extra_cache_key=None,
+    ) -> Optional[str]:
+        if not self.model_config.cache_quantized_models:
+            return None
+        if component_name == "text_encoder":
+            return None
+
+        cache_root = get_path(self.model_config.quantized_model_cache_dir)
+        cache_key_payload = {
+            "schema": 2,
+            "arch": self.arch,
+            "base_model_version": self.get_base_model_version(),
+            "component_name": component_name,
+            "component_qtype": qtype,
+            "dtype": self.dtype,
+            "source_ref": self._normalize_quantized_cache_value(source_ref),
+            "extra_cache_key": self._normalize_quantized_cache_value(extra_cache_key),
+        }
+        cache_key = hashlib.sha256(
+            json.dumps(cache_key_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return os.path.join(cache_root, f"{component_name}-{cache_key}.pt")
+
+    def load_quantized_module_cache(
+        self,
+        cache_path: Optional[str],
+        component_name: str,
+    ):
+        if cache_path is None or not os.path.exists(cache_path):
+            return None
+
+        try:
+            self.print_and_status_update(f"Loading cached quantized {component_name}")
+            try:
+                module = torch.load(cache_path, map_location="cpu", weights_only=False)
+            except TypeError:
+                module = torch.load(cache_path, map_location="cpu")
+            if not hasattr(module, "orig_state_dict"):
+                patch_dequantization_on_save(module)
+            return module
+        except Exception as e:
+            self.print_and_status_update(
+                f"Failed to load cached quantized {component_name}: {e}"
+            )
+            return None
+
+    def save_quantized_module_cache(
+        self,
+        module: torch.nn.Module,
+        cache_path: Optional[str],
+        component_name: str,
+    ):
+        if cache_path is None:
+            return
+
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        tmp_cache_path = cache_path + ".tmp"
+        had_dequant_patch = hasattr(module, "orig_state_dict")
+        orig_state_dict = getattr(module, "orig_state_dict", None)
+
+        try:
+            self.print_and_status_update(f"Caching quantized {component_name}")
+            if had_dequant_patch:
+                delattr(module, "orig_state_dict")
+                module.state_dict = orig_state_dict
+            module.to("cpu")
+            torch.save(module, tmp_cache_path)
+            os.replace(tmp_cache_path, cache_path)
+        except Exception as e:
+            self.print_and_status_update(
+                f"Failed to cache quantized {component_name}: {e}"
+            )
+            if os.path.exists(tmp_cache_path):
+                os.remove(tmp_cache_path)
+        finally:
+            if had_dequant_patch and not hasattr(module, "orig_state_dict"):
+                patch_dequantization_on_save(module)
+
+    def load_or_quantize_module(
+        self,
+        module: torch.nn.Module,
+        *,
+        component_name: str,
+        qtype: str,
+        source_ref=None,
+        extra_cache_key=None,
+        quantize_fn,
+    ):
+        cache_path = self.get_quantized_module_cache_path(
+            component_name=component_name,
+            qtype=qtype,
+            source_ref=source_ref,
+            extra_cache_key=extra_cache_key,
+        )
+        cached_module = self.load_quantized_module_cache(cache_path, component_name)
+        if cached_module is not None:
+            return cached_module
+
+        quantize_fn()
+        self.save_quantized_module_cache(module, cache_path, component_name)
+        return module

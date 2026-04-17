@@ -162,7 +162,7 @@ class LoRMConfig:
         })
 
 
-NetworkType = Literal['lora', 'locon', 'lorm', 'lokr']
+NetworkType = Literal['lora', 'locon', 'lorm', 'lokr', 'dora']
 
 
 class NetworkConfig:
@@ -642,6 +642,10 @@ class ModelConfig:
         self.quantize_te = kwargs.get("quantize_te", self.quantize)
         self.qtype = kwargs.get("qtype", "qfloat8")
         self.qtype_te = kwargs.get("qtype_te", "qfloat8")
+        self.cache_quantized_models = kwargs.get("cache_quantized_models", True)
+        self.quantized_model_cache_dir = kwargs.get(
+            "quantized_model_cache_dir", "models/.quantized_training_cache"
+        )
         self.low_vram = kwargs.get("low_vram", False)
         self.attn_masking = kwargs.get("attn_masking", False)
         if self.attn_masking and not self.is_flux:

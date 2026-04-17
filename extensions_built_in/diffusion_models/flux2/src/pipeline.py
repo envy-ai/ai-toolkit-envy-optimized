@@ -40,6 +40,13 @@ OUTPUT_LAYERS_QWEN3 = [9, 18, 27]
 MAX_LENGTH = 512
 
 
+def _maybe_empty_cuda_cache(device: Optional[torch.device] = None):
+    if device is None:
+        return
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 class Flux2Pipeline(DiffusionPipeline):
     model_cpu_offload_seq = "text_encoder->transformer->vae"
     _callback_tensor_inputs = ["latents", "prompt_embeds"]
@@ -99,6 +106,8 @@ class Flux2Pipeline(DiffusionPipeline):
     ):
         device = device or self._execution_device
         dtype = dtype or self.text_encoder.dtype
+        if self.text_encoder.device != device:
+            self.text_encoder.to(device)
 
         if not isinstance(prompt, list):
             prompt = [prompt]
@@ -154,6 +163,8 @@ class Flux2Pipeline(DiffusionPipeline):
     ):
         device = device or self._execution_device
         dtype = dtype or self.text_encoder.dtype
+        if self.text_encoder.device != device:
+            self.text_encoder.to(device)
 
         if not isinstance(prompt, list):
             prompt = [prompt]
@@ -319,7 +330,7 @@ class Flux2Pipeline(DiffusionPipeline):
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = self._execution_device
+        device = self.transformer.device
 
         # 3. Encode the prompt
 
@@ -347,6 +358,10 @@ class Flux2Pipeline(DiffusionPipeline):
 
             neg_txt, neg_txt_ids = batched_prc_txt(negative_prompt_embeds)
 
+        if self.text_encoder.device.type != "cpu":
+            self.text_encoder.to("cpu")
+            _maybe_empty_cuda_cache(device)
+
         # 4. Prepare latent variables\
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
@@ -373,9 +388,13 @@ class Flux2Pipeline(DiffusionPipeline):
         )
 
         if control_img_list is not None and len(control_img_list) > 0:
+            if self.vae.device != device:
+                self.vae.to(device)
             img_cond_seq, img_cond_seq_ids = encode_image_refs(
                 self.vae, control_img_list
             )
+            self.vae.to("cpu")
+            _maybe_empty_cuda_cache(device)
         else:
             img_cond_seq, img_cond_seq_ids = None, None
 
@@ -438,6 +457,8 @@ class Flux2Pipeline(DiffusionPipeline):
         if output_type == "latent":
             image = latents
         else:
+            if self.vae.device != latents.device:
+                self.vae.to(latents.device)
             latents = latents.to(self.vae.dtype)
             image = self.vae.decode(latents).float()
 

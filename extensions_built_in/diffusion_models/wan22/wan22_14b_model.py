@@ -281,11 +281,32 @@ class Wan2214bModel(Wan21):
 
         self.print_and_status_update("Loading transformer 1")
         dtype = self.torch_dtype
-        transformer_1 = WanTransformer3DModel.from_pretrained(
-            transformer_path_1,
-            subfolder=subfolder_1,
-            torch_dtype=dtype,
-        ).to(dtype=dtype)
+        transformer_1_cache_path = None
+        transformer_1 = None
+        if self.model_config.quantize and self.model_config.accuracy_recovery_adapter is None:
+            transformer_1_cache_path = self.get_quantized_module_cache_path(
+                component_name="transformer_1",
+                qtype=self.model_config.qtype,
+                source_ref={
+                    "transformer_path": transformer_path_1,
+                    "transformer_subfolder": subfolder_1,
+                },
+                extra_cache_key={
+                    "quantize_kwargs": self.model_config.quantize_kwargs,
+                    "target_lora_modules": getattr(self, "target_lora_modules", None),
+                },
+            )
+            transformer_1 = self.load_quantized_module_cache(
+                transformer_1_cache_path, "transformer 1"
+            )
+        transformer_1_loaded_from_cache = transformer_1 is not None
+
+        if transformer_1 is None:
+            transformer_1 = WanTransformer3DModel.from_pretrained(
+                transformer_path_1,
+                subfolder=subfolder_1,
+                torch_dtype=dtype,
+            ).to(dtype=dtype)
 
         flush()
 
@@ -299,9 +320,13 @@ class Wan2214bModel(Wan21):
 
         if self.model_config.quantize and self.model_config.accuracy_recovery_adapter is None:
             # todo handle two ARAs
-            self.print_and_status_update("Quantizing Transformer 1")
-            quantize_model(self, transformer_1)
-            flush()
+            if not transformer_1_loaded_from_cache:
+                self.print_and_status_update("Quantizing Transformer 1")
+                quantize_model(self, transformer_1)
+                self.save_quantized_module_cache(
+                    transformer_1, transformer_1_cache_path, "transformer 1"
+                )
+                flush()
 
         if self.model_config.low_vram:
             self.print_and_status_update("Moving transformer 1 to CPU")
@@ -311,11 +336,32 @@ class Wan2214bModel(Wan21):
 
         self.print_and_status_update("Loading transformer 2")
         dtype = self.torch_dtype
-        transformer_2 = WanTransformer3DModel.from_pretrained(
-            transformer_path_2,
-            subfolder=subfolder_2,
-            torch_dtype=dtype,
-        ).to(dtype=dtype)
+        transformer_2_cache_path = None
+        transformer_2 = None
+        if self.model_config.quantize and self.model_config.accuracy_recovery_adapter is None:
+            transformer_2_cache_path = self.get_quantized_module_cache_path(
+                component_name="transformer_2",
+                qtype=self.model_config.qtype,
+                source_ref={
+                    "transformer_path": transformer_path_2,
+                    "transformer_subfolder": subfolder_2,
+                },
+                extra_cache_key={
+                    "quantize_kwargs": self.model_config.quantize_kwargs,
+                    "target_lora_modules": getattr(self, "target_lora_modules", None),
+                },
+            )
+            transformer_2 = self.load_quantized_module_cache(
+                transformer_2_cache_path, "transformer 2"
+            )
+        transformer_2_loaded_from_cache = transformer_2 is not None
+
+        if transformer_2 is None:
+            transformer_2 = WanTransformer3DModel.from_pretrained(
+                transformer_path_2,
+                subfolder=subfolder_2,
+                torch_dtype=dtype,
+            ).to(dtype=dtype)
 
         flush()
 
@@ -329,9 +375,13 @@ class Wan2214bModel(Wan21):
 
         if self.model_config.quantize and self.model_config.accuracy_recovery_adapter is None:
             # todo handle two ARAs
-            self.print_and_status_update("Quantizing Transformer 2")
-            quantize_model(self, transformer_2)
-            flush()
+            if not transformer_2_loaded_from_cache:
+                self.print_and_status_update("Quantizing Transformer 2")
+                quantize_model(self, transformer_2)
+                self.save_quantized_module_cache(
+                    transformer_2, transformer_2_cache_path, "transformer 2"
+                )
+                flush()
 
         if self.model_config.low_vram:
             self.print_and_status_update("Moving transformer 2 to CPU")
