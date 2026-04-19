@@ -1,6 +1,8 @@
 from fnmatch import fnmatch
 from typing import List, Optional, Union, TYPE_CHECKING
+from types import MethodType
 import torch
+import torch.nn.functional as F
 
 from optimum.quanto.quantize import _quantize_submodule
 from optimum.quanto.tensor import Optimizer, qtype, qtypes
@@ -18,6 +20,8 @@ from huggingface_hub import hf_hub_download
 from toolkit.print import print_acc
 import os
 
+NUCLEUS_MOE_EXPERT_CHUNK_SIZE = int(os.environ.get("AI_TOOLKIT_NUCLEUS_MOE_EXPERT_CHUNK_SIZE", "8"))
+
 if TYPE_CHECKING:
     from toolkit.models.base_model import BaseModel
 
@@ -32,6 +36,245 @@ Q_MODULES = [
     "QConvTranspose2d",
     "QEmbeddingBag",
 ]
+
+
+class QuantizedNucleusMoEWeight:
+    def __init__(
+        self,
+        qweight: torch.Tensor,
+        scale: torch.Tensor,
+        original_dtype: torch.dtype,
+        keep_on_cpu: bool = False,
+    ):
+        self.qweight = qweight
+        self.scale = scale
+        self.original_dtype = original_dtype
+        self.keep_on_cpu = keep_on_cpu
+
+    @classmethod
+    @torch.no_grad()
+    def from_tensor(cls, tensor: torch.Tensor, keep_on_cpu: bool = False):
+        original_dtype = tensor.dtype
+        qweight_chunks = []
+        scale_chunks = []
+
+        # Quantize per expert and per output column. This keeps temporary peak
+        # memory bounded to one expert slice instead of the full packed tensor.
+        for expert_weight in tensor.detach():
+            expert_weight = expert_weight.to(device="cpu", dtype=torch.float32)
+            max_abs = expert_weight.abs().amax(dim=0, keepdim=True)
+            scale = torch.where(
+                max_abs > 0,
+                max_abs / 127.0,
+                torch.ones_like(max_abs),
+            )
+            qweight = torch.round(expert_weight / scale).clamp(-127, 127).to(torch.int8)
+            qweight_chunks.append(qweight.contiguous())
+            scale_chunks.append(scale.contiguous())
+
+        return cls(
+            qweight=torch.stack(qweight_chunks, dim=0).contiguous(),
+            scale=torch.stack(scale_chunks, dim=0).contiguous(),
+            original_dtype=original_dtype,
+            keep_on_cpu=keep_on_cpu,
+        )
+
+    def dequantize(
+        self,
+        expert_idx: Optional[int] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> torch.Tensor:
+        if dtype is None:
+            dtype = self.original_dtype
+        qweight = self.qweight if expert_idx is None else self.qweight[expert_idx]
+        scale = self.scale if expert_idx is None else self.scale[expert_idx]
+        return qweight.to(device=device, dtype=dtype) * scale.to(device=device, dtype=dtype)
+
+    def storage_nbytes(self) -> int:
+        return (
+            self.qweight.numel() * self.qweight.element_size()
+            + self.scale.numel() * self.scale.element_size()
+        )
+
+    def apply_(self, fn):
+        if self.keep_on_cpu:
+            # Low-VRAM Nucleus training cannot afford to move all packed MoE
+            # expert weights to CUDA during Module.to(...). Keep storage on CPU
+            # and copy only the active expert slice inside dequantize().
+            self.scale = fn(self.scale).to("cpu")
+            return self
+
+        self.qweight = fn(self.qweight)
+        self.scale = fn(self.scale)
+        return self
+
+
+def _run_quantized_nucleus_moe_for_loop(
+    self,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    if (
+        num_tokens_per_expert.numel() == self.num_experts
+        and x.shape[0] % self.num_experts == 0
+        and bool(torch.all(num_tokens_per_expert == num_tokens_per_expert[0]).item())
+    ):
+        tokens_per_expert = x.shape[0] // self.num_experts
+        x_per_expert = x.reshape(self.num_experts, tokens_per_expert, x.shape[-1])
+        expert_outputs = []
+        chunk_size = max(1, NUCLEUS_MOE_EXPERT_CHUNK_SIZE)
+
+        for start_idx in range(0, self.num_experts, chunk_size):
+            end_idx = min(start_idx + chunk_size, self.num_experts)
+            expert_slice = slice(start_idx, end_idx)
+            x_chunk = x_per_expert[expert_slice]
+
+            gate_up_proj = self.gate_up_proj.dequantize(
+                expert_slice,
+                device=x.device,
+                dtype=x.dtype,
+            )
+            gate_up = torch.bmm(x_chunk, gate_up_proj)
+            del gate_up_proj
+
+            gate, up = gate_up.chunk(2, dim=-1)
+            hidden_chunk = F.silu(gate) * up
+            del gate_up, gate, up
+
+            down_proj = self.down_proj.dequantize(
+                expert_slice,
+                device=x.device,
+                dtype=x.dtype,
+            )
+            expert_outputs.append(torch.bmm(hidden_chunk, down_proj))
+            del hidden_chunk, down_proj
+
+        return torch.cat(expert_outputs, dim=0).reshape(x.shape[0], -1)
+
+    num_tokens_per_expert_list = num_tokens_per_expert.tolist()
+    num_real_tokens = sum(num_tokens_per_expert_list)
+    num_padding = x.shape[0] - num_real_tokens
+    x_per_expert = torch.split(
+        x[:num_real_tokens],
+        split_size_or_sections=num_tokens_per_expert_list,
+        dim=0,
+    )
+
+    expert_outputs = []
+    for expert_idx, x_expert in enumerate(x_per_expert):
+        gate_up_proj = self.gate_up_proj.dequantize(
+            expert_idx,
+            device=x_expert.device,
+            dtype=x_expert.dtype,
+        )
+        gate_up = torch.matmul(x_expert, gate_up_proj)
+        gate, up = gate_up.chunk(2, dim=-1)
+        down_proj = self.down_proj.dequantize(
+            expert_idx,
+            device=x_expert.device,
+            dtype=x_expert.dtype,
+        )
+        out_expert = torch.matmul(F.silu(gate) * up, down_proj)
+        expert_outputs.append(out_expert)
+
+    out = torch.cat(expert_outputs, dim=0)
+    if num_padding > 0:
+        out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+    return out
+
+
+def _apply_quantized_nucleus_moe(self, fn, recurse=True):
+    try:
+        result = self._nucleus_moe_orig_apply(fn, recurse=recurse)
+    except TypeError:
+        result = self._nucleus_moe_orig_apply(fn)
+
+    if isinstance(self.gate_up_proj, QuantizedNucleusMoEWeight):
+        self.gate_up_proj.apply_(fn)
+    if isinstance(self.down_proj, QuantizedNucleusMoEWeight):
+        self.down_proj.apply_(fn)
+    return result
+
+
+def _is_nucleus_moe_experts_module(module: torch.nn.Module) -> bool:
+    return (
+        module.__class__.__name__ == "SwiGLUExperts"
+        and hasattr(module, "gate_up_proj")
+        and hasattr(module, "down_proj")
+        and isinstance(module.gate_up_proj, torch.nn.Parameter)
+        and isinstance(module.down_proj, torch.nn.Parameter)
+        and module.gate_up_proj.ndim == 3
+        and module.down_proj.ndim == 3
+    )
+
+
+def quantize_nucleus_moe_experts(
+    model: torch.nn.Module,
+    keep_on_cpu: bool = False,
+) -> int:
+    quantized_count = 0
+    for module in model.modules():
+        if not _is_nucleus_moe_experts_module(module):
+            continue
+
+        gate_up_proj = module._parameters.pop("gate_up_proj")
+        down_proj = module._parameters.pop("down_proj")
+        module.gate_up_proj = QuantizedNucleusMoEWeight.from_tensor(
+            gate_up_proj,
+            keep_on_cpu=keep_on_cpu,
+        )
+        module.down_proj = QuantizedNucleusMoEWeight.from_tensor(
+            down_proj,
+            keep_on_cpu=keep_on_cpu,
+        )
+        module.use_grouped_mm = False
+        module._run_experts_for_loop = MethodType(
+            _run_quantized_nucleus_moe_for_loop,
+            module,
+        )
+        if not hasattr(module, "_nucleus_moe_orig_apply"):
+            module._nucleus_moe_orig_apply = module._apply
+            module._apply = MethodType(_apply_quantized_nucleus_moe, module)
+
+        del gate_up_proj
+        del down_proj
+        quantized_count += 1
+
+    return quantized_count
+
+
+def move_nucleus_moe_quantized_weights(
+    model: torch.nn.Module,
+    device: Union[str, torch.device],
+    dtype: Optional[torch.dtype] = None,
+    non_blocking: bool = True,
+) -> int:
+    moved_count = 0
+    device = torch.device(device)
+
+    for module in model.modules():
+        for attr_name in ("gate_up_proj", "down_proj"):
+            packed_weight = getattr(module, attr_name, None)
+            if not isinstance(packed_weight, QuantizedNucleusMoEWeight):
+                continue
+
+            packed_weight.keep_on_cpu = False
+            packed_weight.qweight = packed_weight.qweight.to(
+                device=device,
+                non_blocking=non_blocking,
+            )
+
+            scale_kwargs = {
+                "device": device,
+                "non_blocking": non_blocking,
+            }
+            if dtype is not None:
+                scale_kwargs["dtype"] = dtype
+            packed_weight.scale = packed_weight.scale.to(**scale_kwargs)
+            moved_count += 1
+
+    return moved_count
 
 torchao_qtypes = {
     # "int4": Int4WeightOnlyConfig(),
@@ -141,6 +384,7 @@ def quantize_model(
 
     # patch the state dict method
     patch_dequantization_on_save(model_to_quantize)
+    keep_nucleus_moe_on_cpu = bool(getattr(base_model.model_config, "low_vram", False))
 
     if base_model.model_config.accuracy_recovery_adapter is not None:
         from toolkit.config_modules import NetworkConfig
@@ -289,6 +533,12 @@ def quantize_model(
             weights=quantization_type,
             exclude=lora_exclude_modules
         )
+        raw_expert_count = quantize_nucleus_moe_experts(
+            model_to_quantize,
+            keep_on_cpu=keep_nucleus_moe_on_cpu,
+        )
+        if raw_expert_count > 0:
+            print_acc(f" - quantized {raw_expert_count} Nucleus MoE expert modules")
     else:
         # quantize model the original way without an accuracy recovery adapter
         # move and quantize only certain pieces at a time.
@@ -303,9 +553,14 @@ def quantize_model(
         base_model.print_and_status_update(
             f" - quantizing {len(all_blocks)} transformer blocks"
         )
+        raw_expert_count = 0
         for block in tqdm(all_blocks):
             block.to(base_model.device_torch, dtype=base_model.torch_dtype, non_blocking=True)
             quantize(block, weights=quantization_type)
+            raw_expert_count += quantize_nucleus_moe_experts(
+                block,
+                keep_on_cpu=keep_nucleus_moe_on_cpu,
+            )
             freeze(block)
             block.to("cpu", non_blocking=True)
 
@@ -314,4 +569,10 @@ def quantize_model(
         base_model.print_and_status_update(" - quantizing extras")
         # model_to_quantize.to(base_model.device_torch, dtype=base_model.torch_dtype)
         quantize(model_to_quantize, weights=quantization_type)
+        raw_expert_count += quantize_nucleus_moe_experts(
+            model_to_quantize,
+            keep_on_cpu=keep_nucleus_moe_on_cpu,
+        )
+        if raw_expert_count > 0:
+            print_acc(f" - quantized {raw_expert_count} Nucleus MoE expert modules")
         freeze(model_to_quantize)
