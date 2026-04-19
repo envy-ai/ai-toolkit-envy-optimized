@@ -1,3 +1,4 @@
+from sympy import python
 import torch
 
 
@@ -97,6 +98,10 @@ def get_optimizer(
     elif lower_type == 'automagic':
         from toolkit.optimizers.automagic import Automagic
         optimizer = Automagic(params, lr=float(learning_rate), **optimizer_params)
+    elif lower_type.startswith("rose"): 
+        from rose import Rose 
+        print(f"Using Rose optimizer, lr: {learning_rate:.2e}")
+        optimizer = Rose(params, lr=learning_rate, **optimizer_params)
     else:
         raise ValueError(f'Unknown optimizer type {optimizer_type}')
     return optimizer

@@ -624,6 +624,7 @@ export default function SimpleJob({
                     { value: 'automagic', label: 'Automagic' },
                     { value: 'prodigy', label: 'Prodigy' },
                     { value: 'prodigy8bit', label: 'Prodigy8Bit' },
+                    { value: 'rose', label: 'Rose' },
                   ]}
                 />
                 <NumberInput

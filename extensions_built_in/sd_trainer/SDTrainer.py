@@ -343,6 +343,20 @@ class SDTrainer(BaseSDTrainProcess):
                     # keep legacy usage for now. 
                     self.sd.text_encoder_to("cpu")
                 flush()
+
+                if self.model_config.quantize and self.model_config.low_vram:
+                    from toolkit.util.quantize import move_nucleus_moe_quantized_weights
+
+                    moved_count = move_nucleus_moe_quantized_weights(
+                        self.sd.unet,
+                        self.device_torch,
+                        dtype=self.sd.torch_dtype,
+                    )
+                    if moved_count > 0:
+                        print_acc(
+                            f"Promoted {moved_count} Nucleus MoE quantized tensors to {self.device_torch}"
+                        )
+                    flush()
         
         if self.train_config.blank_prompt_preservation and self.cached_blank_embeds is None:
             # make sure we have this if not unloading

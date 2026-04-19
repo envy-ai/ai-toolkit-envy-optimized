@@ -15,6 +15,7 @@ from toolkit.lorm import extract_conv, extract_linear, count_parameters
 from toolkit.metadata import add_model_hash_to_meta
 from toolkit.paths import KEYMAPS_ROOT
 from toolkit.saving import get_lora_keymap_from_model_keymap
+from toolkit.lora_key_format import internal_key_to_peft_key, peft_key_to_internal_key
 from optimum.quanto import QBytesTensor
 
 if TYPE_CHECKING:
@@ -558,12 +559,7 @@ class ToolkitNetworkMixin:
                 # lokr needs alpha
                 if key.endswith('.alpha') and self.network_type.lower() != "lokr":
                     continue
-                new_key = key
-                new_key = new_key.replace('lora_down', 'lora_A')
-                new_key = new_key.replace('lora_up', 'lora_B')
-                # replace all $$ with .
-                new_key = new_key.replace('$$', '.')
-                new_save_dict[new_key] = value
+                new_save_dict[internal_key_to_peft_key(key)] = value
 
             save_dict = new_save_dict
         
@@ -644,19 +640,10 @@ class ToolkitNetworkMixin:
                 # no alpha
                 if load_key.endswith('.alpha') and self.network_type.lower() != "lokr":
                     continue
-                load_key = load_key.replace('lora_A', 'lora_down')
-                load_key = load_key.replace('lora_B', 'lora_up')
-                # replace all . with $$
-                load_key = load_key.replace('.', '$$')
-                load_key = load_key.replace('$$lora_down$$', '.lora_down.')
-                load_key = load_key.replace('$$lora_up$$', '.lora_up.')
-                
-                # patch lokr, not sure why we need to but whatever
-                if self.network_type.lower() == "lokr":
-                    load_key = load_key.replace('$$lokr_w1', '.lokr_w1')
-                    load_key = load_key.replace('$$lokr_w2', '.lokr_w2')
-                    if load_key.endswith('$$alpha'):
-                        load_key = load_key[:-7] + '.alpha'
+                load_key = peft_key_to_internal_key(
+                    load_key,
+                    network_type=self.network_type,
+                )
             
             if self.network_type.lower() == "lokr":
                 # lora_transformer_transformer_blocks_7_attn_to_v.lokr_w1 to lycoris_transformer_blocks_7_attn_to_v.lokr_w1
