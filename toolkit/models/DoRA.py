@@ -133,6 +133,25 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         weight_norm = torch.linalg.norm(weight, dim=1)
         return weight_norm
 
+    def get_dora_scale(self, scaled_lora_weight):
+        # DoRA explicitly treats the adapted weight norm as detached. Keeping
+        # this under no_grad avoids building a graph through full base weights.
+        with torch.no_grad():
+            weight = self.get_orig_weight()
+            weight = weight.to(
+                scaled_lora_weight.device,
+                dtype=scaled_lora_weight.dtype,
+            )
+            weight_norm = self._get_weight_norm(
+                weight,
+                scaled_lora_weight.detach(),
+            )
+        weight_norm = weight_norm.to(
+            self.magnitude.device,
+            dtype=self.magnitude.dtype,
+        )
+        return self.magnitude / weight_norm
+
     def apply_dora(self, x, scaled_lora_weight):
         # ref https://github.com/huggingface/peft/blob/1e6d1d73a0850223b0916052fd8d2382a90eae5a/src/peft/tuners/lora/layer.py#L192
         # lora weight is already scaled
@@ -140,13 +159,6 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         # magnitude = self.lora_magnitude_vector[active_adapter]
         weight = self.get_orig_weight()
         weight = weight.to(scaled_lora_weight.device, dtype=scaled_lora_weight.dtype)
-        weight_norm = self._get_weight_norm(weight, scaled_lora_weight)
-        # see section 4.3 of DoRA (https://arxiv.org/abs/2402.09353)
-        # "[...] we suggest treating ||V +∆V ||_c in
-        # Eq. (5) as a constant, thereby detaching it from the gradient
-        # graph. This means that while ||V + ∆V ||_c dynamically
-        # reflects the updates of ∆V , it won’t receive any gradient
-        # during backpropagation"
-        weight_norm = weight_norm.detach()
+        dora_scale = self.get_dora_scale(scaled_lora_weight)
         dora_weight = transpose(weight + scaled_lora_weight, False)
-        return (self.magnitude / weight_norm - 1).view(1, -1) * F.linear(x.to(dora_weight.dtype), dora_weight)
+        return (dora_scale - 1).view(1, -1) * F.linear(x.to(dora_weight.dtype), dora_weight)

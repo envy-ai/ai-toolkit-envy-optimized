@@ -294,6 +294,7 @@ class ToolkitModuleMixin:
         lora_input = x.to(self.lora_down.weight.dtype)
         lora_output = self._call_forward(lora_input)
         multiplier = self.network_ref().torch_multiplier
+        is_scalar_multiplier = multiplier.numel() == 1
 
         lora_output_batch_size = lora_output.size(0)
         multiplier_batch_size = multiplier.size(0)
@@ -307,6 +308,21 @@ class ToolkitModuleMixin:
 
         if self.__class__.__name__ == "DoRAModule":
             # ref https://github.com/huggingface/peft/blob/1e6d1d73a0850223b0916052fd8d2382a90eae5a/src/peft/tuners/lora/layer.py#L417
+            lora_weight = self.lora_up.weight @ self.lora_down.weight
+            # scale it here
+            # todo handle our batch split scalers for slider training. For now take the mean of them
+            scale = multiplier.mean()
+            scaled_lora_weight = lora_weight * scale
+            if is_scalar_multiplier:
+                dora_scale = self.get_dora_scale(scaled_lora_weight)
+                dora_scale = dora_scale.to(
+                    org_forwarded.device,
+                    dtype=org_forwarded.dtype,
+                )
+                dora_scale_shape = [1] * (org_forwarded.ndim - 1) + [-1]
+                return (org_forwarded + scaled_lora_output) * dora_scale.view(
+                    *dora_scale_shape
+                )
             # x = dropout(x)
             # todo this wont match the dropout applied to the lora
             if isinstance(self.dropout, nn.Dropout) or isinstance(self.dropout, nn.Identity):
@@ -316,11 +332,6 @@ class ToolkitModuleMixin:
                 lx = torch.nn.functional.dropout(x, p=self.dropout)
             else:
                 lx = x
-            lora_weight = self.lora_up.weight @ self.lora_down.weight
-            # scale it here
-            # todo handle our batch split scalers for slider training. For now take the mean of them
-            scale = multiplier.mean()
-            scaled_lora_weight = lora_weight * scale
             scaled_lora_output = scaled_lora_output + self.apply_dora(lx, scaled_lora_weight).to(org_forwarded.dtype)
 
         try:

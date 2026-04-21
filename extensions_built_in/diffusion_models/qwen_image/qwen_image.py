@@ -1,4 +1,5 @@
 import os
+import weakref
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Optional
 
@@ -59,27 +60,133 @@ class _PipelineLoraController:
         pipeline,
         adapter_name: Optional[str] = None,
         lora_path: Optional[str] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
         load_immediately: bool = False,
     ):
         self.pipeline = pipeline
         self.adapter_name = adapter_name
         self.lora_path = lora_path
+        self.device = device
+        self.dtype = dtype
         self._is_loaded = False
         self._is_active = False
+        self._adapter_offload_device = None
+        self._adapter_offload_dtype = None
         if load_immediately:
             self._load()
+
+    def _patch_transformer_to_for_adapter_offload(self):
+        if not hasattr(self.pipeline, "transformer"):
+            return
+        transformer = self.pipeline.transformer
+        if getattr(transformer, "_aitk_qwen_lora_to_is_patched", False):
+            return
+
+        original_to = transformer.to
+        controller_ref = weakref.ref(self)
+
+        def wrapped_to(*args, **kwargs):
+            result = original_to(*args, **kwargs)
+            controller = controller_ref()
+            if controller is not None:
+                controller._offload_adapter_if_needed()
+            return result
+
+        transformer.to = wrapped_to
+        transformer._aitk_qwen_lora_to_is_patched = True
+
+    def _move_transformer_to_target(self):
+        if self.device is None or not hasattr(self.pipeline, "transformer"):
+            return
+        kwargs = {"device": self.device}
+        if self.dtype is not None:
+            kwargs["dtype"] = self.dtype
+        self.pipeline.transformer.to(**kwargs)
+
+    @staticmethod
+    def _move_parameter_to(parameter, device, dtype):
+        kwargs = {"device": device}
+        if dtype is not None and (
+            parameter.data.is_floating_point() or parameter.data.is_complex()
+        ):
+            kwargs["dtype"] = dtype
+        with torch.no_grad():
+            parameter.data = parameter.data.to(**kwargs)
+            if parameter.grad is not None:
+                parameter.grad.data = parameter.grad.data.to(**kwargs)
+
+    @staticmethod
+    def _move_module_or_parameter_to(value, device, dtype):
+        if isinstance(value, torch.nn.Parameter):
+            _PipelineLoraController._move_parameter_to(value, device, dtype)
+            return True
+        if hasattr(value, "to"):
+            kwargs = {"device": device}
+            if dtype is not None:
+                kwargs["dtype"] = dtype
+            value.to(**kwargs)
+            return True
+        return False
+
+    def _move_adapter_to(self, device, dtype):
+        if self.adapter_name is None or not hasattr(self.pipeline, "transformer"):
+            return False
+        if not hasattr(self.pipeline.transformer, "modules"):
+            return False
+
+        moved = False
+        adapter_layer_attrs = (
+            "lora_A",
+            "lora_B",
+            "lora_embedding_A",
+            "lora_embedding_B",
+            "lora_magnitude_vector",
+            "lora_dropout",
+        )
+        for module in self.pipeline.transformer.modules():
+            for attr_name in adapter_layer_attrs:
+                adapter_layers = getattr(module, attr_name, None)
+                if adapter_layers is None:
+                    continue
+                try:
+                    adapter_layer = adapter_layers[self.adapter_name]
+                except (KeyError, TypeError, AttributeError):
+                    continue
+                moved = (
+                    self._move_module_or_parameter_to(adapter_layer, device, dtype)
+                    or moved
+                )
+        return moved
+
+    def _offload_adapter_if_needed(self):
+        if (
+            self._is_loaded
+            and not self._is_active
+            and self._adapter_offload_device is not None
+        ):
+            self._move_adapter_to(
+                self._adapter_offload_device,
+                self._adapter_offload_dtype,
+            )
 
     def _load(self):
         if self._is_loaded or self.lora_path is None:
             return
-        with _peft_skip_torchao_if_missing_apply_subclass():
+        self._move_transformer_to_target()
+        with (
+            _peft_skip_torchao_if_missing_apply_subclass(),
+            _quanto_skip_missing_base_weight_load(),
+        ):
             self.pipeline.load_lora_weights(
                 self.lora_path,
                 adapter_name=self.adapter_name,
+                low_cpu_mem_usage=False,
             )
         if hasattr(self.pipeline, "disable_lora"):
             self.pipeline.disable_lora()
         self._is_loaded = True
+        self._patch_transformer_to_for_adapter_offload()
 
     @property
     def is_active(self) -> bool:
@@ -92,7 +199,11 @@ class _PipelineLoraController:
             return
         self._is_active = value
         if value:
+            self._adapter_offload_device = None
+            self._adapter_offload_dtype = None
             self._load()
+            if self._is_loaded and self.device is not None:
+                self._move_adapter_to(self.device, self.dtype)
             if self.adapter_name and hasattr(self.pipeline, "set_adapters"):
                 self.pipeline.set_adapters(self.adapter_name)
             if hasattr(self.pipeline, "enable_lora"):
@@ -102,7 +213,19 @@ class _PipelineLoraController:
                 self.pipeline.disable_lora()
 
     def force_to(self, device, dtype):
-        # LoRA weights live on the transformer; device moves are handled elsewhere.
+        target_device = torch.device(device)
+        if self._is_loaded and not self._is_active and target_device.type == "cpu":
+            self._adapter_offload_device = target_device
+            self._adapter_offload_dtype = dtype
+            if self._move_adapter_to(target_device, dtype):
+                return
+
+        self.device = target_device
+        self.dtype = dtype
+        if self._is_loaded:
+            self._move_transformer_to_target()
+            if self._is_active:
+                self._move_adapter_to(self.device, self.dtype)
         return
 
 
@@ -130,6 +253,60 @@ def _peft_skip_torchao_if_missing_apply_subclass():
     finally:
         peft_lora_model.dispatch_torchao = original_dispatch_model
         peft_lora_torchao.dispatch_torchao = original_dispatch_torchao
+
+
+@contextmanager
+def _quanto_skip_missing_base_weight_load():
+    try:
+        from optimum.quanto.nn.qmodule import QModuleMixin
+    except Exception:
+        yield
+        return
+
+    original_load_from_state_dict = QModuleMixin._load_from_state_dict
+
+    def _patched_load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        weight_name = prefix + "weight"
+        weight_prefix = weight_name + "."
+        if getattr(self, "weight_qtype", None) is not None and weight_name not in state_dict:
+            has_serialized_weight = any(
+                key.startswith(weight_prefix) for key in state_dict.keys()
+            )
+            if not has_serialized_weight:
+                return super(QModuleMixin, self)._load_from_state_dict(
+                    state_dict,
+                    prefix,
+                    local_metadata,
+                    False,
+                    missing_keys,
+                    unexpected_keys,
+                    error_msgs,
+                )
+        return original_load_from_state_dict(
+            self,
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
+    QModuleMixin._load_from_state_dict = _patched_load_from_state_dict
+    try:
+        yield
+    finally:
+        QModuleMixin._load_from_state_dict = original_load_from_state_dict
 
 
 class QwenImageModel(BaseModel):
@@ -360,7 +537,8 @@ class QwenImageModel(BaseModel):
 
         flush()
         # just to make sure everything is on the right device and dtype
-        text_encoder[0].to(self.device_torch)
+        text_encoder_device = "cpu" if self.low_vram else self.device_torch
+        text_encoder[0].to(text_encoder_device)
         text_encoder[0].requires_grad_(False)
         text_encoder[0].eval()
         flush()
@@ -373,14 +551,18 @@ class QwenImageModel(BaseModel):
         self.pipeline = pipe
         if self.model_config.inference_lora_path is not None:
             self.print_and_status_update("Registering inference lora")
-            adapter_name = "inference"
-            self.assistant_lora = _PipelineLoraController(
-                pipe,
-                adapter_name=adapter_name,
-                lora_path=self.model_config.inference_lora_path,
-                load_immediately=False,
-            )
+            self._load_inference_lora()
         self.print_and_status_update("Model Loaded")
+
+    def _load_inference_lora(self):
+        self.assistant_lora = _PipelineLoraController(
+            self.pipeline,
+            adapter_name="inference",
+            lora_path=self.model_config.inference_lora_path,
+            device=self.device_torch,
+            dtype=self.torch_dtype,
+            load_immediately=False,
+        )
 
     def get_generation_pipeline(self):
         scheduler = QwenImageModel.get_train_scheduler()
@@ -455,6 +637,138 @@ class QwenImageModel(BaseModel):
         ).images[0]
         return img
 
+    def _get_qwen_prompt_text(self, prompt: List[str], image=None):
+        template = self.pipeline.prompt_template_encode
+        return (
+            [template.format(prompt_item) for prompt_item in prompt],
+            self.pipeline.prompt_template_encode_start_idx,
+        )
+
+    def _get_qwen_prompt_embeds_without_lm_head(
+        self,
+        prompt: str | List[str],
+        image=None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        device = device or self.device_torch
+        dtype = dtype or self.pipeline.text_encoder.dtype
+
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+        txt, drop_idx = self._get_qwen_prompt_text(prompt, image=image)
+
+        processor = getattr(self, "processor", None)
+        if processor is None:
+            model_inputs = self.pipeline.tokenizer(
+                txt,
+                max_length=self.pipeline.tokenizer_max_length + drop_idx,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+            ).to(device)
+        else:
+            model_inputs = processor(
+                text=txt,
+                images=image,
+                padding=True,
+                return_tensors="pt",
+            ).to(device)
+
+        text_encoder_model = getattr(
+            self.pipeline.text_encoder, "model", self.pipeline.text_encoder
+        )
+        text_encoder_kwargs = {
+            "input_ids": model_inputs.input_ids,
+            "attention_mask": model_inputs.attention_mask,
+            "output_hidden_states": True,
+            "use_cache": False,
+        }
+        for key in (
+            "pixel_values",
+            "pixel_values_videos",
+            "image_grid_thw",
+            "video_grid_thw",
+            "mm_token_type_ids",
+            "second_per_grid_ts",
+        ):
+            value = getattr(model_inputs, key, None)
+            if value is not None:
+                text_encoder_kwargs[key] = value
+
+        encoder_hidden_states = text_encoder_model(**text_encoder_kwargs)
+        hidden_states = encoder_hidden_states.hidden_states[-1]
+        split_hidden_states = self.pipeline._extract_masked_hidden(
+            hidden_states, model_inputs.attention_mask
+        )
+        split_hidden_states = [
+            hidden_state[drop_idx:] for hidden_state in split_hidden_states
+        ]
+        attn_mask_list = [
+            torch.ones(
+                hidden_state.size(0), dtype=torch.long, device=hidden_state.device
+            )
+            for hidden_state in split_hidden_states
+        ]
+        max_seq_len = max(hidden_state.size(0) for hidden_state in split_hidden_states)
+        prompt_embeds = torch.stack(
+            [
+                torch.cat(
+                    [
+                        hidden_state,
+                        hidden_state.new_zeros(
+                            max_seq_len - hidden_state.size(0), hidden_state.size(1)
+                        ),
+                    ]
+                )
+                for hidden_state in split_hidden_states
+            ]
+        )
+        encoder_attention_mask = torch.stack(
+            [
+                torch.cat([mask, mask.new_zeros(max_seq_len - mask.size(0))])
+                for mask in attn_mask_list
+            ]
+        )
+
+        prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+        return prompt_embeds, encoder_attention_mask
+
+    def _encode_qwen_prompt_without_lm_head(
+        self,
+        prompt: str | List[str],
+        image=None,
+        device: torch.device | None = None,
+        num_images_per_prompt: int = 1,
+        max_sequence_length: int = 1024,
+    ):
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+        batch_size = len(prompt)
+
+        prompt_embeds, prompt_embeds_mask = self._get_qwen_prompt_embeds_without_lm_head(
+            prompt,
+            image=image,
+            device=device,
+        )
+        prompt_embeds = prompt_embeds[:, :max_sequence_length]
+        _, seq_len, _ = prompt_embeds.shape
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(
+            batch_size * num_images_per_prompt, seq_len, -1
+        )
+
+        if prompt_embeds_mask is not None:
+            prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
+            prompt_embeds_mask = prompt_embeds_mask.repeat(
+                1, num_images_per_prompt, 1
+            )
+            prompt_embeds_mask = prompt_embeds_mask.view(
+                batch_size * num_images_per_prompt, seq_len
+            )
+            if prompt_embeds_mask.all():
+                prompt_embeds_mask = None
+
+        return prompt_embeds, prompt_embeds_mask
+
     def get_noise_prediction(
         self,
         latent_model_input: torch.Tensor,
@@ -511,8 +825,8 @@ class QwenImageModel(BaseModel):
     def get_prompt_embeds(self, prompt: str) -> PromptEmbeds:
         if self.pipeline.text_encoder.device != self.device_torch:
             self.pipeline.text_encoder.to(self.device_torch)
-        
-        prompt_embeds, prompt_embeds_mask = self.pipeline.encode_prompt(
+
+        prompt_embeds, prompt_embeds_mask = self._encode_qwen_prompt_without_lm_head(
             prompt,
             device=self.device_torch,
             num_images_per_prompt=1,
@@ -566,6 +880,8 @@ class QwenImageModel(BaseModel):
         new_sd = {}
         for key, value in state_dict.items():
             new_key = key.replace("diffusion_model.", "transformer.")
+            if new_key.startswith("transformer_blocks."):
+                new_key = f"transformer.{new_key}"
             new_sd[new_key] = value
         return new_sd
 
