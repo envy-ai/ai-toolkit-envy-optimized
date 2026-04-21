@@ -40,6 +40,7 @@ class Prodigy8bitStateTests(unittest.TestCase):
 
         self.assertEqual(state_dict["state"][0]["s"]["_type"], "Auto8bitTensor")
         self.assertIsInstance(state_dict["state"][0]["s"]["state"], dict)
+        self.assertTrue(torch.is_tensor(state_dict["state"][0]["exp_avg_sq"]))
         self.assertIsInstance(optimizer.state[param]["s"], Auto8bitTensor)
 
     def test_state_dict_does_not_break_next_step(self):
@@ -60,6 +61,23 @@ class Prodigy8bitStateTests(unittest.TestCase):
             param.grad = torch.ones_like(param)
             optimizer.step()
         self.assertIsInstance(optimizer.state[param]["exp_avg"], Auto8bitTensor)
+
+    def test_second_moment_keeps_small_nonzero_gradients(self):
+        param = torch.nn.Parameter(torch.zeros(4))
+        optimizer = Prodigy8bit([param])
+
+        with patch(
+            "toolkit.optimizers.prodigy_8bit.copy_stochastic",
+            lambda target, source: target.copy_(source),
+        ):
+            param.grad = torch.tensor([1.0, 1e-2, 1e-4, 1e-6])
+            optimizer.step()
+
+        exp_avg_sq = optimizer.state[param]["exp_avg_sq"]
+        if isinstance(exp_avg_sq, Auto8bitTensor):
+            exp_avg_sq = exp_avg_sq.to(torch.float32)
+
+        self.assertTrue(torch.all(exp_avg_sq > 0))
 
     def test_loads_serialized_auto8bit_state(self):
         param = torch.nn.Parameter(torch.ones(2, 3))
