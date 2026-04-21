@@ -1642,6 +1642,9 @@ class BaseModel:
         source_ref=None,
         extra_cache_key=None,
     ) -> Optional[str]:
+        # Temporarily bypass loading/writing cached quantized modules.
+        return None
+
         if not self.model_config.cache_quantized_models:
             return None
         if component_name == "text_encoder":

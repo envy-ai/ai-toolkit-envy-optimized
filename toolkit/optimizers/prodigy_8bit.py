@@ -48,7 +48,8 @@ class Prodigy8bit(Optimizer):
             than PyTorch's builtin version, the auto-detection won't work.
     """
 
-    _AUTO8BIT_STATE_KEYS = ("s", "p0", "exp_avg", "exp_avg_sq")
+    _AUTO8BIT_STATE_KEYS = ("s", "p0", "exp_avg")
+    _FP32_STATE_KEYS = ("exp_avg_sq",)
 
     def __init__(self, params, lr=1.0,
                  betas=(0.9, 0.999), beta3=None,
@@ -114,6 +115,15 @@ class Prodigy8bit(Optimizer):
             return tuple(value["state"]["quantized"].shape)
         return None
 
+    @staticmethod
+    def _state_shape(value):
+        shape = Prodigy8bit._auto8bit_shape(value)
+        if shape is not None:
+            return shape
+        if torch.is_tensor(value):
+            return tuple(value.shape)
+        return None
+
     def state_dict(self):
         state_dict = super().state_dict()
         serialized_state = {}
@@ -127,6 +137,14 @@ class Prodigy8bit(Optimizer):
                         "_type": "Auto8bitTensor",
                         "state": value.state_dict(),
                     }
+            for state_key in self._FP32_STATE_KEYS:
+                value = param_state.get(state_key)
+                if isinstance(value, Auto8bitTensor):
+                    param_state[state_key] = value.to(torch.float32)
+                elif self._is_serialized_auto8bit(value):
+                    param_state[state_key] = Auto8bitTensor(value["state"]).to(
+                        torch.float32
+                    )
             serialized_state[param_id] = param_state
 
         state_dict["state"] = serialized_state
@@ -152,6 +170,25 @@ class Prodigy8bit(Optimizer):
                     "Loaded optimizer.pt is not a Prodigy8bit state. "
                     "Remove optimizer.pt or resume with optimizer='prodigy'."
                 )
+            for state_key in self._FP32_STATE_KEYS:
+                if state_key not in param_state:
+                    continue
+                value = param_state[state_key]
+                if isinstance(value, Auto8bitTensor):
+                    param_state[state_key] = value.to(torch.float32)
+                    continue
+                if self._is_serialized_auto8bit(value):
+                    param_state[state_key] = Auto8bitTensor(value["state"]).to(
+                        torch.float32
+                    )
+                    continue
+                if torch.is_tensor(value):
+                    param_state[state_key] = value.to(torch.float32)
+                    continue
+                raise ValueError(
+                    "Loaded optimizer.pt is not a Prodigy8bit state. "
+                    "Remove optimizer.pt or resume with optimizer='prodigy'."
+                )
             normalized_state[param_id] = param_state
 
         state_dict["state"] = normalized_state
@@ -160,9 +197,9 @@ class Prodigy8bit(Optimizer):
         for group in self.param_groups:
             for param in group["params"]:
                 param_state = self.state[param]
-                for state_key in self._AUTO8BIT_STATE_KEYS:
+                for state_key in self._AUTO8BIT_STATE_KEYS + self._FP32_STATE_KEYS:
                     value = param_state.get(state_key)
-                    shape = self._auto8bit_shape(value)
+                    shape = self._state_shape(value)
                     if shape is not None and shape != tuple(param.shape):
                         raise ValueError(
                             "Loaded Prodigy8bit optimizer state has parameter "
@@ -261,8 +298,7 @@ class Prodigy8bit(Optimizer):
                     state['exp_avg'] = Auto8bitTensor(
                         torch.zeros_like(p_fp32.data).detach())
                     # Exponential moving average of squared gradient values
-                    state['exp_avg_sq'] = Auto8bitTensor(
-                        torch.zeros_like(p_fp32.data).detach())
+                    state['exp_avg_sq'] = torch.zeros_like(p_fp32.data).detach()
 
                 exp_avg = state['exp_avg'].to(torch.float32)
                 exp_avg_sq = state['exp_avg_sq'].to(torch.float32)
@@ -288,7 +324,7 @@ class Prodigy8bit(Optimizer):
 
                 # update state with stochastic rounding
                 state['exp_avg'] = Auto8bitTensor(exp_avg)
-                state['exp_avg_sq'] = Auto8bitTensor(exp_avg_sq)
+                state['exp_avg_sq'] = exp_avg_sq.detach()
                 state['s'] = Auto8bitTensor(s)
                 state['p0'] = Auto8bitTensor(p0)
 
