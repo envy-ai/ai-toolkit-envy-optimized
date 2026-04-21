@@ -279,7 +279,7 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
             if self.network_type.lower() != "lokr" or not self.use_old_lokr_format:
                 self.peft_format = True
 
-        if self.peft_format:
+        if self.peft_format and not self.is_assistant_adapter:
             # no alpha for peft
             self.alpha = self.lora_dim
             alpha = self.alpha
@@ -591,5 +591,4 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                 all_params.append({"lr": unet_lr, "params": list(self.unet_conv_out.parameters())})
 
         return all_params
-
 

@@ -88,6 +88,23 @@ class QwenImageEditPlusModel(QwenImageModel):
 
         return pipeline
 
+    def _get_qwen_prompt_text(self, prompt: List[str], image=None):
+        img_prompt_template = "Picture {}: <|vision_start|><|image_pad|><|vision_end|>"
+        if isinstance(image, list):
+            base_img_prompt = ""
+            for i, _ in enumerate(image):
+                base_img_prompt += img_prompt_template.format(i + 1)
+        elif image is not None:
+            base_img_prompt = img_prompt_template.format(1)
+        else:
+            base_img_prompt = ""
+
+        template = self.pipeline.prompt_template_encode
+        return (
+            [template.format(base_img_prompt + prompt_item) for prompt_item in prompt],
+            self.pipeline.prompt_template_encode_start_idx,
+        )
+
     def generate_single_image(
         self,
         pipeline: QwenImageEditPlusCustomPipeline,
@@ -186,7 +203,7 @@ class QwenImageEditPlusModel(QwenImageModel):
                     control_images[i], size=(height, width), mode="bilinear"
                 )
 
-        prompt_embeds, prompt_embeds_mask = self.pipeline.encode_prompt(
+        prompt_embeds, prompt_embeds_mask = self._encode_qwen_prompt_without_lm_head(
             prompt,
             image=control_images,
             device=self.device_torch,

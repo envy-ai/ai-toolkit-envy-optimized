@@ -48,6 +48,8 @@ class Prodigy8bit(Optimizer):
             than PyTorch's builtin version, the auto-detection won't work.
     """
 
+    _AUTO8BIT_STATE_KEYS = ("s", "p0", "exp_avg", "exp_avg_sq")
+
     def __init__(self, params, lr=1.0,
                  betas=(0.9, 0.999), beta3=None,
                  eps=1e-8, weight_decay=0, decouple=True,
@@ -99,6 +101,75 @@ class Prodigy8bit(Optimizer):
     @property
     def supports_flat_params(self):
         return True
+
+    @staticmethod
+    def _is_serialized_auto8bit(value):
+        return isinstance(value, dict) and value.get("_type") == "Auto8bitTensor"
+
+    @staticmethod
+    def _auto8bit_shape(value):
+        if isinstance(value, Auto8bitTensor):
+            return tuple(value.quantized.shape)
+        if Prodigy8bit._is_serialized_auto8bit(value):
+            return tuple(value["state"]["quantized"].shape)
+        return None
+
+    def state_dict(self):
+        state_dict = super().state_dict()
+        serialized_state = {}
+
+        for param_id, param_state in state_dict["state"].items():
+            param_state = dict(param_state)
+            for state_key in self._AUTO8BIT_STATE_KEYS:
+                value = param_state.get(state_key)
+                if isinstance(value, Auto8bitTensor):
+                    param_state[state_key] = {
+                        "_type": "Auto8bitTensor",
+                        "state": value.state_dict(),
+                    }
+            serialized_state[param_id] = param_state
+
+        state_dict["state"] = serialized_state
+
+        return state_dict
+
+    def load_state_dict(self, state_dict):
+        state_dict = dict(state_dict)
+        normalized_state = {}
+
+        for param_id, param_state in state_dict.get("state", {}).items():
+            param_state = dict(param_state)
+            for state_key in self._AUTO8BIT_STATE_KEYS:
+                if state_key not in param_state:
+                    continue
+                value = param_state[state_key]
+                if isinstance(value, Auto8bitTensor):
+                    continue
+                if self._is_serialized_auto8bit(value):
+                    param_state[state_key] = Auto8bitTensor(value["state"])
+                    continue
+                raise ValueError(
+                    "Loaded optimizer.pt is not a Prodigy8bit state. "
+                    "Remove optimizer.pt or resume with optimizer='prodigy'."
+                )
+            normalized_state[param_id] = param_state
+
+        state_dict["state"] = normalized_state
+        super().load_state_dict(state_dict)
+
+        for group in self.param_groups:
+            for param in group["params"]:
+                param_state = self.state[param]
+                for state_key in self._AUTO8BIT_STATE_KEYS:
+                    value = param_state.get(state_key)
+                    shape = self._auto8bit_shape(value)
+                    if shape is not None and shape != tuple(param.shape):
+                        raise ValueError(
+                            "Loaded Prodigy8bit optimizer state has parameter "
+                            f"shape {shape}, but the current parameter shape is "
+                            f"{tuple(param.shape)}. Remove optimizer.pt to reset "
+                            "optimizer state."
+                        )
 
     def step_hook(self):
         if not self.is_stochastic_rounding_accumulation:

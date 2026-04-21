@@ -191,7 +191,7 @@ class QwenImageEditModel(QwenImageModel):
                 control_images, size=(height, width), mode="bilinear"
             )
 
-        prompt_embeds, prompt_embeds_mask = self.pipeline.encode_prompt(
+        prompt_embeds, prompt_embeds_mask = self._encode_qwen_prompt_without_lm_head(
             prompt,
             image=control_images,
             device=self.device_torch,
