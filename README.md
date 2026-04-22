@@ -3,6 +3,31 @@
 AI Toolkit is an easy to use all in one training suite for diffusion models. I try to support all the latest models on consumer grade hardware. Image and video models. It can be run as a GUI or CLI. It is designed to be easy to use but still have every feature imaginable. Free and open source.
 
 
+## Differences in This Fork
+
+This fork is optimized for advanced LoRA/DoRA training on newer transformer image models, especially Qwen Image 2512 and related low-VRAM workflows. Compared with the main AI Toolkit branch, it adds:
+
+- **Expanded DoRA support**: DoRA is available as a training target in more places, including the simple job UI, with fixes for quantized model weights and lower-memory training.
+- **Improved inference LoRA handling**: better support for loading assistant or inference LoRAs for previews/sampling without interfering with the LoRA being trained.
+- **Qwen Image memory optimizations**: lower-VRAM prompt embedding, safer text embedding cache restore behavior, and reduced GPU memory spikes around cached latents and text embeddings. 
+- **Quantization improvements**: better handling for TorchAO/Quanto quantized models, including Nucleus mixture-of-experts quantization support and safer quantized save/load paths.
+- **Optimizer stability fixes**: Prodigy8Bit has improved checkpoint serialization and numerical stability for small gradients.
+- **Training UI additions**: DoRA selection, clearer content/style controls, Min SNR Gamma, Prodigy/Prodigy8Bit naming cleanup, and an experimental Rose optimizer option.
+- **Utility scripts**: helpers for resizing LoRA/DoRA checkpoints, extracting LoRAs from Hugging Face model differences, and marking stuck training jobs as stopped.
+
+### What this means for you
+
+- Qwen Image can now train in 6-bit quantization, with no layer swapping, on a video card with 24+ gigs of ram.
+- An inference LoRA can now be loaded for Qwen Image so turbo can be used for inference, for a massive speed boost. In the advanced configuration yaml, under model:, add the following
+
+```
+  inference_lora_path: "/path/to/qwen-image-lightning-lora.safetensors"  # Remember to adjust your CFG to 1 and set inference to 4-8 steps depending on the lora
+```
+- ERNIE training works on 24 gigabytes of vram at 8 bit with no layer swapping.
+- Nucleus training works on 24 gigabytes of vram at 8 bit with no layer swapping, and is extremely fast.
+- SNR gamma works for flowmatch (most modern models) and is set to 5 by default.
+- You can select DoRA as a training option, and it works for modern models.
+- You can use Prodigy8Bit without getting pure noise. You can also select it, but remember to set your LR to 1 if you do.
 
 ## Supported Models
 
@@ -536,4 +561,3 @@ _Last updated: 2026-03-31 18:10 UTC_
 </p>
 
 ---
-
