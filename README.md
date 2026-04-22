@@ -20,9 +20,10 @@ This fork is optimized for advanced LoRA/DoRA training on newer transformer imag
 - Qwen Image can now train in 6-bit quantization, with no layer swapping, on a video card with 24+ gigs of ram.
 - An inference LoRA can now be loaded for Qwen Image so turbo can be used for inference, for a massive speed boost. In the advanced configuration yaml, under model:, add the following
 
-```
+'''
   inference_lora_path: "/path/to/qwen-image-lightning-lora.safetensors"  # Remember to adjust your CFG to 1 and set inference to 4-8 steps depending on the lora
-```
+'''
+
 - ERNIE training works on 24 gigabytes of vram at 8 bit with no layer swapping.
 - Nucleus training works on 24 gigabytes of vram at 8 bit with no layer swapping, and is extremely fast.
 - SNR gamma works for flowmatch (most modern models) and is set to 5 by default.
