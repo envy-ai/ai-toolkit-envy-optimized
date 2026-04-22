@@ -1455,63 +1455,61 @@ class BaseModel:
         self.device_state = None
 
     def set_device_state(self, state):
-        if state['vae']['training']:
-            self.vae.train()
-        else:
-            self.vae.eval()
-        self.vae.to(state['vae']['device'])
-        if state['unet']['training']:
-            self.unet.train()
-        else:
-            self.unet.eval()
-        self.unet.to(state['unet']['device'])
-        if state['unet']['requires_grad']:
-            self.unet.requires_grad_(True)
-        else:
-            self.unet.requires_grad_(False)
+        module_states = []
+
+        def add_module_state(module, module_state, apply_requires_grad=True):
+            module_states.append((module, module_state, apply_requires_grad))
+
+        add_module_state(self.vae, state['vae'], apply_requires_grad=False)
+        add_module_state(self.unet, state['unet'])
+
         if isinstance(self.text_encoder, list):
             for i, encoder in enumerate(self.text_encoder):
                 if isinstance(state['text_encoder'], list):
-                    if state['text_encoder'][i]['training']:
-                        encoder.train()
-                    else:
-                        encoder.eval()
-                    encoder.to(state['text_encoder'][i]['device'])
-                    encoder.requires_grad_(
-                        state['text_encoder'][i]['requires_grad'])
+                    add_module_state(encoder, state['text_encoder'][i])
                 else:
-                    if state['text_encoder']['training']:
-                        encoder.train()
-                    else:
-                        encoder.eval()
-                    encoder.to(state['text_encoder']['device'])
-                    encoder.requires_grad_(
-                        state['text_encoder']['requires_grad'])
+                    add_module_state(encoder, state['text_encoder'])
         else:
-            if state['text_encoder']['training']:
-                self.text_encoder.train()
-            else:
-                self.text_encoder.eval()
-            self.text_encoder.to(state['text_encoder']['device'])
-            self.text_encoder.requires_grad_(
-                state['text_encoder']['requires_grad'])
+            add_module_state(self.text_encoder, state['text_encoder'])
 
         if self.adapter is not None:
-            self.adapter.to(state['adapter']['device'])
-            self.adapter.requires_grad_(state['adapter']['requires_grad'])
-            if state['adapter']['training']:
-                self.adapter.train()
-            else:
-                self.adapter.eval()
+            add_module_state(self.adapter, state['adapter'])
 
         if self.refiner_unet is not None:
-            self.refiner_unet.to(state['refiner_unet']['device'])
-            self.refiner_unet.requires_grad_(
-                state['refiner_unet']['requires_grad'])
-            if state['refiner_unet']['training']:
-                self.refiner_unet.train()
+            add_module_state(self.refiner_unet, state['refiner_unet'])
+
+        def is_cpu_state(module_state):
+            return torch.device(module_state['device']).type == 'cpu'
+
+        def apply_module_state(module, module_state, apply_requires_grad=True):
+            if module_state['training']:
+                module.train()
             else:
-                self.refiner_unet.eval()
+                module.eval()
+            module.to(module_state['device'])
+            if apply_requires_grad:
+                module.requires_grad_(module_state['requires_grad'])
+
+        cpu_states = [
+            module_state
+            for module_state in module_states
+            if is_cpu_state(module_state[1])
+        ]
+        non_cpu_states = [
+            module_state
+            for module_state in module_states
+            if not is_cpu_state(module_state[1])
+        ]
+
+        for module_state in cpu_states:
+            apply_module_state(*module_state)
+
+        if cpu_states and non_cpu_states:
+            flush()
+
+        for module_state in non_cpu_states:
+            apply_module_state(*module_state)
+
         flush()
 
     def set_device_state_preset(self, device_state_preset: DeviceStatePreset):

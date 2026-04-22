@@ -139,6 +139,28 @@ class FakeModule:
         self.name = name
 
 
+class FakeDeviceStateModule:
+    def __init__(self, name, recorder):
+        self.name = name
+        self.recorder = recorder
+        self.training = False
+        self.requires_grad = None
+
+    def train(self):
+        self.training = True
+
+    def eval(self):
+        self.training = False
+
+    def to(self, device):
+        self.recorder.append((self.name, torch.device(device).type))
+        return self
+
+    def requires_grad_(self, value):
+        self.requires_grad = value
+        return self
+
+
 class FakePipelineTransformer:
     def __init__(self):
         self.device = torch.device("cpu")
@@ -300,6 +322,45 @@ class QwenPromptMemoryTests(unittest.TestCase):
 
         self.assertNotIn("vae", process.accelerator.prepared)
         self.assertIn("unet", process.accelerator.prepared)
+
+    def test_base_model_restore_offloads_cpu_modules_before_cuda_modules(self):
+        moves = []
+        model = BaseModel.__new__(BaseModel)
+        model.vae = FakeDeviceStateModule("vae", moves)
+        model.unet = FakeDeviceStateModule("unet", moves)
+        model.text_encoder = FakeDeviceStateModule("text_encoder", moves)
+        model.adapter = None
+        model.refiner_unet = None
+
+        BaseModel.set_device_state(
+            model,
+            {
+                "vae": {
+                    "training": False,
+                    "device": torch.device("cpu"),
+                    "requires_grad": False,
+                },
+                "unet": {
+                    "training": True,
+                    "device": torch.device("cuda"),
+                    "requires_grad": True,
+                },
+                "text_encoder": {
+                    "training": False,
+                    "device": torch.device("cpu"),
+                    "requires_grad": False,
+                },
+            },
+        )
+
+        self.assertEqual(
+            moves,
+            [
+                ("vae", "cpu"),
+                ("text_encoder", "cpu"),
+                ("unet", "cuda"),
+            ],
+        )
 
     def test_qwen_inference_lora_registers_diffusers_loader_controller(self):
         model = QwenImageModel.__new__(QwenImageModel)
