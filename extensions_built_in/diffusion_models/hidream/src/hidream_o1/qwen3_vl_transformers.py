@@ -170,6 +170,7 @@ def eager_attention_forward(
     attention_mask: Optional[torch.Tensor],
     scaling: float,
     dropout: float = 0.0,
+    is_causal: bool = False,
     **kwargs: Unpack[TransformersKwargs],
 ):
     key_states = repeat_kv(key, module.num_key_value_groups)
@@ -179,6 +180,15 @@ def eager_attention_forward(
     if attention_mask is not None:
         causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         attn_weights = attn_weights + causal_mask
+    elif is_causal:
+        q_len = query.shape[-2]
+        k_len = key_states.shape[-2]
+        causal_mask = torch.ones(
+            q_len, k_len, dtype=torch.bool, device=query.device
+        ).triu(diagonal=k_len - q_len + 1)
+        attn_weights = attn_weights.masked_fill(
+            causal_mask, torch.finfo(attn_weights.dtype).min
+        )
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
         query.dtype
