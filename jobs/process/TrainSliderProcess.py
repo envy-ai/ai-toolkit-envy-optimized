@@ -234,7 +234,7 @@ class TrainSliderProcess(BaseSDTrainProcess):
     @torch.no_grad()
     def get_adapter_images(self, batch: Union[None, 'DataLoaderBatchDTO']):
 
-        img_ext_list = ['.jpg', '.jpeg', '.png', '.webp']
+        img_ext_list = ['.jpg', '.jpeg', '.png', '.webp', '.jxl']
         adapter_folder_path = self.slider_config.adapter_img_dir
         adapter_images = []
         # loop through images

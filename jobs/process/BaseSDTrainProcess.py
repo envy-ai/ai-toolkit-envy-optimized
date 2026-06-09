@@ -38,6 +38,7 @@ from toolkit.lycoris_special import LycorisSpecialNetwork
 from toolkit.models.decorator import Decorator
 from toolkit.network_mixins import Network
 from toolkit.optimizer import get_optimizer
+from toolkit.optimizers.optimizer_utils import move_optimizer_state_to_device
 from toolkit.paths import CONFIG_ROOT
 from toolkit.progress_bar import ToolkitProgressBar
 from toolkit.reference_adapter import ReferenceAdapter
@@ -74,6 +75,22 @@ from toolkit.util.get_model import get_model_class
 from toolkit.basic import flush
 
 
+def _normalize_network_config(network_config, process_config):
+    if network_config is None:
+        return None
+
+    normalized_config = copy.deepcopy(network_config)
+    network_kwargs = copy.deepcopy(normalized_config.get('network_kwargs') or {})
+
+    for key in ('only_if_contains', 'ignore_if_contains'):
+        process_value = process_config.get(key, None)
+        if process_value is not None and not network_kwargs.get(key):
+            network_kwargs[key] = copy.deepcopy(process_value)
+
+    normalized_config['network_kwargs'] = network_kwargs
+    return normalized_config
+
+
 class BaseSDTrainProcess(BaseTrainProcess):
 
     def __init__(self, process_id: int, job, config: OrderedDict, custom_pipeline=None):
@@ -102,7 +119,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.device_torch = self.accelerator.device
         network_config = self.get_conf('network', None)
         if network_config is not None:
-            self.network_config = NetworkConfig(**network_config)
+            self.network_config = NetworkConfig(
+                **_normalize_network_config(network_config, config)
+            )
         else:
             self.network_config = None
         self.train_config = TrainConfig(**self.get_conf('train', {}))
@@ -264,6 +283,15 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
         return generate_image_config_list
+
+    def sample_with_optimizer_state_offload(self, step=None, is_first=False):
+        move_optimizer_state_to_device(self.optimizer, 'cpu')
+        try:
+            self.sample(step, is_first=is_first)
+        finally:
+            flush()
+            move_optimizer_state_to_device(self.optimizer, self.device_torch)
+            flush()
 
     def sample(self, step=None, is_first=False):
         if not self.accelerator.is_main_process:
@@ -2067,14 +2095,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         if self.has_first_sample_requested and self.step_num <= 1 and not self.train_config.disable_sampling:
             print_acc("Generating first sample from first sample config")
-            self.sample(0, is_first=True)
+            self.sample_with_optimizer_state_offload(0, is_first=True)
 
         # sample first
         if self.train_config.skip_first_sample or self.train_config.disable_sampling:
             print_acc("Skipping first sample due to config setting")
         elif self.step_num <= 1 or self.train_config.force_first_sample:
             print_acc("Generating baseline samples before training")
-            self.sample(self.step_num)
+            self.sample_with_optimizer_state_offload(self.step_num)
         
         if self.accelerator.is_local_main_process:
             self.progress_bar = ToolkitProgressBar(
@@ -2317,7 +2345,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         # print above the progress bar
                         if self.train_config.free_u:
                             self.sd.pipeline.disable_freeu()
-                        self.sample(self.step_num)
+                        self.sample_with_optimizer_state_offload(self.step_num)
                         if self.train_config.unload_text_encoder:
                             # make sure the text encoder is unloaded
                             self.sd.text_encoder_to('cpu')
@@ -2400,7 +2428,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if self.train_config.free_u:
             self.sd.pipeline.disable_freeu()
         if not self.train_config.disable_sampling:
-            self.sample(self.step_num)
+            self.sample_with_optimizer_state_offload(self.step_num)
             self.logger.commit(step=self.step_num)
         print_acc("")
         if self.accelerator.is_main_process:

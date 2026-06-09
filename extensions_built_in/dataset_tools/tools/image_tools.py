@@ -8,7 +8,7 @@ Step: Type = Literal['caption', 'caption_short', 'create_mask', 'contrast_stretc
 
 img_manipulation_steps = ['contrast_stretch']
 
-img_ext = ['.jpg', '.jpeg', '.png', '.webp']
+img_ext = ['.jpg', '.jpeg', '.png', '.webp', '.jxl']
 
 if TYPE_CHECKING:
     from .llava_utils import LLaVAImageProcessor

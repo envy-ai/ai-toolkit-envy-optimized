@@ -184,7 +184,7 @@ class NetworkConfig:
         self.linear_alpha: float = kwargs.get('linear_alpha', self.alpha)
         self.conv_alpha: float = kwargs.get('conv_alpha', self.conv)
         self.dropout: Union[float, None] = kwargs.get('dropout', None)
-        self.network_kwargs: dict = kwargs.get('network_kwargs', {})
+        self.network_kwargs: dict = kwargs.get('network_kwargs') or {}
 
         self.lorm_config: Union[LoRMConfig, None] = None
         lorm = kwargs.get('lorm', None)

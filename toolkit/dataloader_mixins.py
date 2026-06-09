@@ -66,7 +66,7 @@ transforms_dict = {
     'RandomEqualize': transforms.RandomEqualize(p=0.2),
 }
 
-img_ext_list = ['.jpg', '.jpeg', '.png', '.webp']
+img_ext_list = ['.jpg', '.jpeg', '.png', '.webp', '.jxl']
 
 
 def standardize_images(images):

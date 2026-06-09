@@ -215,6 +215,64 @@ class Auto8bitTensor:
         return f"Auto8bitTensor({self.dequantize()})"
 
 
+def _unwrap_optimizer(optimizer):
+    seen = set()
+    current = optimizer
+    while hasattr(current, "optimizer") and id(current) not in seen:
+        seen.add(id(current))
+        current = current.optimizer
+    return current
+
+
+def _move_optimizer_state_value_to_device(value, device, non_blocking=False):
+    if isinstance(value, Auto8bitTensor):
+        value.quantized = value.quantized.to(device=device, non_blocking=non_blocking)
+        if torch.is_tensor(value.scale):
+            value.scale = value.scale.to(device=device, non_blocking=non_blocking)
+        return value
+    if torch.is_tensor(value):
+        return value.to(device=device, non_blocking=non_blocking)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            value[key] = _move_optimizer_state_value_to_device(
+                item, device, non_blocking=non_blocking
+            )
+        return value
+    if isinstance(value, list):
+        for idx, item in enumerate(value):
+            value[idx] = _move_optimizer_state_value_to_device(
+                item, device, non_blocking=non_blocking
+            )
+        return value
+    if isinstance(value, tuple):
+        return tuple(
+            _move_optimizer_state_value_to_device(
+                item, device, non_blocking=non_blocking
+            )
+            for item in value
+        )
+    return value
+
+
+def move_optimizer_state_to_device(optimizer, device, non_blocking=False):
+    if optimizer is None:
+        return
+
+    device = torch.device(device)
+    optimizer = _unwrap_optimizer(optimizer)
+    state = getattr(optimizer, "state", None)
+    if state is None:
+        return
+
+    for param_state in state.values():
+        _move_optimizer_state_value_to_device(
+            param_state, device, non_blocking=non_blocking
+        )
+
+    if device.type == "cpu" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def stochastic_grad_accummulation(param):
     if hasattr(param, "_accum_grad"):
         grad_fp32 = param._accum_grad.clone().to(torch.float32)

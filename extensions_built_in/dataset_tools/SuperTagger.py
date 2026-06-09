@@ -16,7 +16,7 @@ from .tools.caption import default_long_prompt, default_short_prompt, default_re
 from jobs.process import BaseExtensionProcess
 from .tools.sync_tools import get_img_paths
 
-img_ext = ['.jpg', '.jpeg', '.png', '.webp']
+img_ext = ['.jpg', '.jpeg', '.png', '.webp', '.jxl']
 
 
 def flush():
