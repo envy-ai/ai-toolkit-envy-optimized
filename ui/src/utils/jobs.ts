@@ -50,6 +50,22 @@ export const deleteJob = (jobID: string) => {
   });
 };
 
+export const saveJobNow = (jobID: string) => {
+  return new Promise<void>((resolve, reject) => {
+    apiClient
+      .get(`/api/jobs/${jobID}/save_now`)
+      .then(res => res.data)
+      .then(data => {
+        console.log('Job set to save on next step:', data);
+        resolve();
+      })
+      .catch(error => {
+        console.error('Error setting job to save on next step:', error);
+        reject(error);
+      });
+  });
+};
+
 export const markJobAsStopped = (jobID: string) => {
   return new Promise<void>((resolve, reject) => {
     apiClient
@@ -81,10 +97,6 @@ export const getAvaliableJobActions = (job: Job) => {
   // can resume if more steps were added
   if (job.status === 'completed' && (jobConfig.config.process[0].train?.steps || 0) > job.step && !isStopping) {
     canStart = true;
-  }
-  if (job.job_type !== 'train') {
-    // for non-train jobs, allow editing unless it's currently running
-    canEdit = false;
   }
   return { canDelete, canEdit, canStop, canStart, canRemoveFromQueue };
 };

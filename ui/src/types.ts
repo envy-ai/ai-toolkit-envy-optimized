@@ -71,6 +71,7 @@ export interface NetworkConfig {
   network_kwargs: {
     ignore_if_contains: string[];
   };
+  transformer_only?: boolean;
 }
 
 export interface SaveConfig {
@@ -150,6 +151,7 @@ export interface TrainConfig {
   do_differential_guidance?: boolean;
   differential_guidance_scale?: number;
   audio_loss_multiplier?: number;
+  max_loss?: number | null;
 }
 
 export interface QuantizeKwargsConfig {
@@ -270,6 +272,8 @@ export interface CaptionProcessConfig {
     caption_prompt?: string;
     max_res?: number;
     max_new_tokens?: number;
+    fixed_caption?: string;
+    caption_extension?: string;
   }
 }
 

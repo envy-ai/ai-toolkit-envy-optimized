@@ -425,11 +425,14 @@ class QwenImageModel(BaseModel):
                 )
                 flush()
 
-        if self.model_config.layer_offloading and self.model_config.layer_offloading_transformer_percent > 0:
+        if (
+            self.model_config.layer_offloading
+            and self.model_config.layer_offloading_transformer_percent > 0
+        ):
             MemoryManager.attach(
                 transformer,
                 self.device_torch,
-                offload_percent=self.model_config.layer_offloading_transformer_percent
+                offload_percent=self.model_config.layer_offloading_transformer_percent,
             )
 
         if self.model_config.low_vram:
@@ -485,11 +488,14 @@ class QwenImageModel(BaseModel):
             text_encoder.to(self.device_torch, dtype=dtype)
             flush()
 
-        if self.model_config.layer_offloading and self.model_config.layer_offloading_text_encoder_percent > 0:
+        if (
+            self.model_config.layer_offloading
+            and self.model_config.layer_offloading_text_encoder_percent > 0
+        ):
             MemoryManager.attach(
                 text_encoder,
                 self.device_torch,
-                offload_percent=self.model_config.layer_offloading_text_encoder_percent
+                offload_percent=self.model_config.layer_offloading_text_encoder_percent,
             )
 
         self.print_and_status_update("Loading VAE")
@@ -919,3 +925,35 @@ class QwenImageModel(BaseModel):
         latents = latents.squeeze(2)  # remove the frame count dimension
 
         return latents
+
+    def decode_latents(self, latents: torch.Tensor, device=None, dtype=None):
+        if device is None:
+            device = self.vae_device_torch
+        if dtype is None:
+            dtype = self.vae_torch_dtype
+
+        if self.vae.device == torch.device("cpu"):
+            self.vae.to(device)
+
+        latents = latents.to(device, dtype=dtype)
+
+        # add frame count dim for wan vae
+        latents = latents.unsqueeze(2)
+
+        latents_mean = (
+            torch.tensor(self.vae.config.latents_mean)
+            .view(1, self.vae.config.z_dim, 1, 1, 1)
+            .to(latents.device, latents.dtype)
+        )
+        latents_std = (
+            torch.tensor(self.vae.config.latents_std)
+            .view(1, self.vae.config.z_dim, 1, 1, 1)
+            .to(latents.device, latents.dtype)
+        )
+        latents = latents * latents_std + latents_mean
+
+        images = self.vae.decode(latents).sample
+
+        images = images.squeeze(2)  # remove the frame count dimension
+
+        return images.to(device, dtype=dtype)
