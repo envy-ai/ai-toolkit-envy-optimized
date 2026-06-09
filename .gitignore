@@ -174,6 +174,7 @@ cython_debug/
 !/config/_PUT_YOUR_CONFIGS_HERE).txt
 /output/*
 !/output/.gitkeep
+/output_backups
 /extensions/*
 !/extensions/example
 /temp
