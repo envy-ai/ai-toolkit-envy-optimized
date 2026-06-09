@@ -189,21 +189,6 @@ def predict_velocity(
         dim=1,
     )
 
-    # llm features: image region is zero
-    llm_full = torch.cat(
-        [
-            llm_features,
-            torch.zeros(
-                b,
-                num_image_tokens,
-                llm_features.shape[-1],
-                device=device,
-                dtype=llm_features.dtype,
-            ),
-        ],
-        dim=1,
-    )
-
     # indicator: real text -> 3, image -> 2, text pad -> 0
     indicator = torch.zeros(b, seq_len, dtype=torch.long, device=device)
     indicator[:, :num_text_tokens] = text_mask_long * LLM_TOKEN_INDICATOR
@@ -234,7 +219,7 @@ def predict_velocity(
     model_t = 1.0 - t
 
     out = transformer(
-        llm_features=llm_full,
+        llm_features=llm_features,
         x=x,
         t=model_t,
         position_ids=position_ids,

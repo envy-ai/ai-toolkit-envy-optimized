@@ -40,6 +40,7 @@ from toolkit.unloader import unload_text_encoder
 from PIL import Image
 from torchvision.transforms import functional as TF
 from toolkit.basic import flush
+from toolkit.optimizers.optimizer_utils import move_optimizer_state_to_device
 
 
 adapter_transforms = transforms.Compose([
@@ -109,6 +110,16 @@ class SDTrainer(BaseSDTrainProcess):
         else:
             raise ValueError(f"Unknown guidance loss target type {type(self.train_config.guidance_loss_target)}")
 
+    def _run_with_optimizer_state_offload(self, func):
+        if getattr(self, "optimizer", None) is None:
+            return func()
+        move_optimizer_state_to_device(self.optimizer, "cpu")
+        try:
+            return func()
+        finally:
+            flush()
+            move_optimizer_state_to_device(self.optimizer, self.device_torch)
+            flush()
 
     def before_model_load(self):
         pass
@@ -243,26 +254,31 @@ class SDTrainer(BaseSDTrainProcess):
         if self.is_caching_text_embeddings:
             # make sure model is on cpu for this part so we don't oom.
             self.sd.unet.to('cpu')
-        
+
+        def cache_unconditional_embeds():
+            with torch.no_grad():
+                kwargs = {}
+                if self.sd.encode_control_in_text_embeddings:
+                    # just do a blank image for unconditionals
+                    control_image = torch.zeros((1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype)
+                    if self.sd.has_multiple_control_images:
+                        control_image = [control_image]
+
+                    kwargs['control_images'] = control_image
+                return self.sd.encode_prompt(
+                    [self.train_config.unconditional_prompt],
+                    long_prompts=self.do_long_prompts,
+                    **kwargs
+                ).to(
+                    self.device_torch,
+                    dtype=self.sd.torch_dtype
+                ).detach()
+
         # cache unconditional embeds (blank prompt)
-        with torch.no_grad():
-            kwargs = {}
-            if self.sd.encode_control_in_text_embeddings:
-                # just do a blank image for unconditionals
-                control_image = torch.zeros((1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype)
-                if self.sd.has_multiple_control_images:
-                    control_image = [control_image]
-                
-                kwargs['control_images'] = control_image
-            self.unconditional_embeds = self.sd.encode_prompt(
-                [self.train_config.unconditional_prompt],
-                long_prompts=self.do_long_prompts,
-                **kwargs
-            ).to(
-                self.device_torch,
-                dtype=self.sd.torch_dtype
-            ).detach()
-        
+        self.unconditional_embeds = self._run_with_optimizer_state_offload(
+            cache_unconditional_embeds
+        )
+
         if self.train_config.do_prior_divergence:
             self.do_prior_prediction = True
         # move vae to device if we did not cache latents
@@ -306,64 +322,73 @@ class SDTrainer(BaseSDTrainProcess):
         # handle unload text encoder
         if self.train_config.unload_text_encoder or self.is_caching_text_embeddings:
             print_acc("Caching embeddings and unloading text encoder")
-            with torch.no_grad():
-                if self.train_config.train_text_encoder:
-                    raise ValueError("Cannot unload text encoder if training text encoder")
-                # cache embeddings
-                self.sd.text_encoder_to(self.device_torch)
-                encode_kwargs = {}
-                if self.sd.encode_control_in_text_embeddings:
-                    # just do a blank image for unconditionals
-                    control_image = torch.zeros((1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype)
-                    if self.sd.has_multiple_control_images:
-                        control_image = [control_image]
-                    encode_kwargs['control_images'] = control_image
-                self.cached_blank_embeds = self.sd.encode_prompt("", **encode_kwargs)
-                if self.trigger_word is not None:
-                    self.cached_trigger_embeds = self.sd.encode_prompt(self.trigger_word, **encode_kwargs)
-                if self.train_config.diff_output_preservation:
-                    self.diff_output_preservation_embeds = self.sd.encode_prompt(self.train_config.diff_output_preservation_class)
-                
-                self.cache_sample_prompts()
-                
-                print_acc("\n***** UNLOADING TEXT ENCODER *****")
-                if self.is_caching_text_embeddings:
-                    print_acc("Embeddings cached to disk. We dont need the text encoder anymore")
-                else:
-                    print_acc("This will train only with a blank prompt or trigger word, if set")
-                    print_acc("If this is not what you want, remove the unload_text_encoder flag")
-                print_acc("***********************************")
-                print_acc("")
 
-                # unload the text encoder
-                if self.is_caching_text_embeddings:
-                    unload_text_encoder(self.sd)
-                else:
-                    # todo once every model is tested to work, unload properly. Though, this will all be merged into one thing.
-                    # keep legacy usage for now. 
-                    self.sd.text_encoder_to("cpu")
-                flush()
+            def cache_and_unload_text_encoder():
+                with torch.no_grad():
+                    if self.train_config.train_text_encoder:
+                        raise ValueError("Cannot unload text encoder if training text encoder")
+                    # cache embeddings
+                    self.sd.text_encoder_to(self.device_torch)
+                    encode_kwargs = {}
+                    if self.sd.encode_control_in_text_embeddings:
+                        # just do a blank image for unconditionals
+                        control_image = torch.zeros((1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype)
+                        if self.sd.has_multiple_control_images:
+                            control_image = [control_image]
+                        encode_kwargs['control_images'] = control_image
+                    self.cached_blank_embeds = self.sd.encode_prompt("", **encode_kwargs)
+                    if self.trigger_word is not None:
+                        self.cached_trigger_embeds = self.sd.encode_prompt(self.trigger_word, **encode_kwargs)
+                    if self.train_config.diff_output_preservation:
+                        self.diff_output_preservation_embeds = self.sd.encode_prompt(self.train_config.diff_output_preservation_class)
 
-                if self.model_config.quantize and self.model_config.low_vram:
-                    from toolkit.util.quantize import move_nucleus_moe_quantized_weights
+                    self.cache_sample_prompts()
 
-                    moved_count = move_nucleus_moe_quantized_weights(
-                        self.sd.unet,
-                        self.device_torch,
-                        dtype=self.sd.torch_dtype,
-                    )
-                    if moved_count > 0:
-                        print_acc(
-                            f"Promoted {moved_count} Nucleus MoE quantized tensors to {self.device_torch}"
-                        )
+                    print_acc("\n***** UNLOADING TEXT ENCODER *****")
+                    if self.is_caching_text_embeddings:
+                        print_acc("Embeddings cached to disk. We dont need the text encoder anymore")
+                    else:
+                        print_acc("This will train only with a blank prompt or trigger word, if set")
+                        print_acc("If this is not what you want, remove the unload_text_encoder flag")
+                    print_acc("***********************************")
+                    print_acc("")
+
+                    # unload the text encoder
+                    if self.is_caching_text_embeddings:
+                        unload_text_encoder(self.sd)
+                    else:
+                        # todo once every model is tested to work, unload properly. Though, this will all be merged into one thing.
+                        # keep legacy usage for now.
+                        self.sd.text_encoder_to("cpu")
                     flush()
+
+            self._run_with_optimizer_state_offload(cache_and_unload_text_encoder)
+
+            if self.model_config.quantize and self.model_config.low_vram:
+                from toolkit.util.quantize import move_nucleus_moe_quantized_weights
+
+                moved_count = move_nucleus_moe_quantized_weights(
+                    self.sd.unet,
+                    self.device_torch,
+                    dtype=self.sd.torch_dtype,
+                )
+                if moved_count > 0:
+                    print_acc(
+                        f"Promoted {moved_count} Nucleus MoE quantized tensors to {self.device_torch}"
+                    )
+                flush()
         
         if self.train_config.blank_prompt_preservation and self.cached_blank_embeds is None:
             # make sure we have this if not unloading
-            self.cached_blank_embeds = self.sd.encode_prompt("").to(
-                self.device_torch,
-                dtype=self.sd.torch_dtype
-            ).detach()
+            def cache_blank_prompt_preservation_embeds():
+                return self.sd.encode_prompt("").to(
+                    self.device_torch,
+                    dtype=self.sd.torch_dtype
+                ).detach()
+
+            self.cached_blank_embeds = self._run_with_optimizer_state_offload(
+                cache_blank_prompt_preservation_embeds
+            )
         
         if self.train_config.diffusion_feature_extractor_path is not None:
             vae = self.sd.vae

@@ -261,7 +261,8 @@ class Ideogram4Model(BaseModel):
         vae = AutoEncoder(AutoEncoderParams())
         vae.load_state_dict(vae_sd)
         del vae_sd
-        vae.to(self.vae_device_torch, dtype=dtype)
+        vae_device = "cpu" if self.model_config.low_vram else self.vae_device_torch
+        vae.to(vae_device, dtype=dtype)
         vae.eval()
         vae.requires_grad_(False)
         return vae
@@ -418,28 +419,36 @@ class Ideogram4Model(BaseModel):
         # deferred to the model call, so caching a prompt only stores its real
         # length -- important for the long structured (JSON) captions.
         features_list = []
-        for p in prompt:
-            messages = [{"role": "user", "content": [{"type": "text", "text": p}]}]
-            text = self.tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False
-            )
-            ids = self.tokenizer(
-                text,
-                add_special_tokens=False,
-                truncation=True,
-                max_length=self.max_text_length,
-            )["input_ids"]
-            if len(ids) == 0:
-                ids = [self.tokenizer.eos_token_id or 0]
+        try:
+            for p in prompt:
+                messages = [{"role": "user", "content": [{"type": "text", "text": p}]}]
+                text = self.tokenizer.apply_chat_template(
+                    messages, add_generation_prompt=True, tokenize=False
+                )
+                ids = self.tokenizer(
+                    text,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=self.max_text_length,
+                )["input_ids"]
+                if len(ids) == 0:
+                    ids = [self.tokenizer.eos_token_id or 0]
 
-            token_ids = torch.tensor([ids], dtype=torch.long, device=device)
-            attention_mask = torch.ones_like(token_ids)
-            pos_2d = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0).to(torch.long)
+                token_ids = torch.tensor([ids], dtype=torch.long, device=device)
+                attention_mask = torch.ones_like(token_ids)
+                pos_2d = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0).to(torch.long)
 
-            features = get_qwen3_vl_features(
-                self.text_encoder, token_ids, attention_mask, pos_2d
-            )  # (1, Lt, D)
-            features_list.append(features[0].to(self.torch_dtype))
+                features = get_qwen3_vl_features(
+                    self.text_encoder, token_ids, attention_mask, pos_2d
+                )  # (1, Lt, D)
+                if self.model_config.low_vram:
+                    features_list.append(features[0].to("cpu", dtype=self.torch_dtype))
+                else:
+                    features_list.append(features[0].to(self.torch_dtype))
+        finally:
+            if self.model_config.low_vram:
+                self.text_encoder.to("cpu")
+                flush()
 
         return AdvancedPromptEmbeds(text_embeds=features_list)
 
@@ -457,40 +466,50 @@ class Ideogram4Model(BaseModel):
             device = self.vae_device_torch
         if dtype is None:
             dtype = self.vae_torch_dtype
-        if self.vae.device == torch.device("cpu"):
-            self.vae.to(self.vae_device_torch)
+        try:
+            if self.vae.device == torch.device("cpu"):
+                self.vae.to(self.vae_device_torch)
 
-        if isinstance(image_list, list):
-            images = torch.stack(image_list, dim=0)
-        else:
-            images = image_list
-        images = images.to(device, dtype=dtype)
+            if isinstance(image_list, list):
+                images = torch.stack(image_list, dim=0)
+            else:
+                images = image_list
+            images = images.to(device, dtype=dtype)
 
-        ae_channels = self.vae.params.z_channels
-        moments = self.vae.encoder(images)
-        mean = moments[:, :ae_channels]
+            ae_channels = self.vae.params.z_channels
+            moments = self.vae.encoder(images)
+            mean = moments[:, :ae_channels]
 
-        patched = patchify_latents(mean, self.patch_size)
-        shift = self._latent_shift.to(patched.device, patched.dtype)
-        scale = self._latent_scale.to(patched.device, patched.dtype)
-        latents = (patched - shift) / scale
-        return latents.to(device, dtype=dtype)
+            patched = patchify_latents(mean, self.patch_size)
+            shift = self._latent_shift.to(patched.device, patched.dtype)
+            scale = self._latent_scale.to(patched.device, patched.dtype)
+            latents = (patched - shift) / scale
+            return latents.to(device, dtype=dtype)
+        finally:
+            if self.model_config.low_vram:
+                self.vae.to("cpu")
+                flush()
 
     def decode_latents(self, latents: torch.Tensor, device=None, dtype=None):
         if device is None:
             device = self.vae_device_torch
         if dtype is None:
             dtype = self.vae_torch_dtype
-        if self.vae.device == torch.device("cpu"):
-            self.vae.to(self.vae_device_torch)
+        try:
+            if self.vae.device == torch.device("cpu"):
+                self.vae.to(self.vae_device_torch)
 
-        latents = latents.to(device, dtype=dtype)
-        shift = self._latent_shift.to(device, dtype)
-        scale = self._latent_scale.to(device, dtype)
-        patched = latents * scale + shift
-        z = unpatchify_latents(patched, self.patch_size)
-        images = self.vae.decoder(z)
-        return images
+            latents = latents.to(device, dtype=dtype)
+            shift = self._latent_shift.to(device, dtype)
+            scale = self._latent_scale.to(device, dtype)
+            patched = latents * scale + shift
+            z = unpatchify_latents(patched, self.patch_size)
+            images = self.vae.decoder(z)
+            return images
+        finally:
+            if self.model_config.low_vram:
+                self.vae.to("cpu")
+                flush()
 
     # ------------------------------------------------------------------
     # Saving / misc

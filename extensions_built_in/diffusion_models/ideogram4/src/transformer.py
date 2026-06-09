@@ -344,7 +344,10 @@ class Ideogram4Transformer2DModel(nn.Module):
         """Velocity prediction.
 
         Args:
-          llm_features: (B, L, llm_features_dim) Qwen3-VL conditioning features.
+          llm_features: (B, L, llm_features_dim) or (B, Lt, llm_features_dim)
+            Qwen3-VL conditioning features. When Lt < L, features are interpreted
+            as the leading text/padding tokens only; image-token LLM contribution
+            is known-zero and is skipped to reduce peak memory.
           x: (B, L, in_channels) noise tokens.
           t: (B,) or (B, L) flow-matching time in [0, 1].
           position_ids: (B, L, 3) (t, h, w) positions for MRoPE.
@@ -369,7 +372,6 @@ class Ideogram4Transformer2DModel(nn.Module):
             (indicator == OUTPUT_IMAGE_INDICATOR).to(x.dtype).unsqueeze(-1)
         )
 
-        llm_features = llm_features * llm_token_mask
         x = x * output_image_mask
 
         x = self.input_proj(x) * output_image_mask
@@ -381,10 +383,23 @@ class Ideogram4Transformer2DModel(nn.Module):
             t_cond = t_cond.unsqueeze(1)
         adaln_input = F.silu(self.adaln_proj(t_cond))
 
-        llm_features = self.llm_cond_norm(llm_features)
-        llm_features = self.llm_cond_proj(llm_features) * llm_token_mask
+        llm_seq_len = llm_features.shape[1]
+        if llm_seq_len > seq_len:
+            raise ValueError(
+                f"llm_features sequence length {llm_seq_len} exceeds packed sequence length {seq_len}"
+            )
 
-        h = x + llm_features
+        llm_mask = llm_token_mask[:, :llm_seq_len]
+        llm_hidden = self.llm_cond_norm(llm_features * llm_mask)
+        llm_hidden = self.llm_cond_proj(llm_hidden) * llm_mask
+
+        if llm_seq_len == seq_len:
+            h = x + llm_hidden
+        else:
+            h = torch.cat(
+                [x[:, :llm_seq_len] + llm_hidden, x[:, llm_seq_len:]],
+                dim=1,
+            )
 
         image_indicator_embedding = self.embed_image_indicator(
             (indicator == OUTPUT_IMAGE_INDICATOR).to(torch.long)
