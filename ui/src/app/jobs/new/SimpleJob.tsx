@@ -82,6 +82,7 @@ export default function SimpleJob({
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
   const networkType = jobConfig.config.process[0].network?.type ?? 'lora';
+  const showNetworkConv = networkType == 'dora' || !disableSections.includes('network.conv');
 
   const taggedSampleArr: Record<string, any>[] | null = useMemo(() => {
     if (!modelArch) return null;
@@ -518,7 +519,7 @@ export default function SimpleJob({
                     required
                   />
                 )}
-                {disableSections.includes('network.conv') ? null : (
+                {showNetworkConv ? (
                   <>
                     <NumberInput
                       label="Conv Rank"
@@ -555,7 +556,7 @@ export default function SimpleJob({
                       />
                     )}
                   </>
-                )}
+                ) : null}
               </>
             )}
           </Card>
@@ -1364,6 +1365,20 @@ export default function SimpleJob({
                 </FormGroup>
               </div>
             </div>
+            <TextInput
+              label="Inference LoRA Path"
+              value={jobConfig.config.process[0].model.inference_lora_path ?? ''}
+              docKey="config.process[0].model.inference_lora_path"
+              onChange={value => {
+                if (value.trim() === '') {
+                  setJobConfig(undefined, 'config.process[0].model.inference_lora_path');
+                } else {
+                  setJobConfig(value, 'config.process[0].model.inference_lora_path');
+                }
+              }}
+              placeholder="output/krea2_raw_to_turbo_r256.safetensors"
+              className="pt-2"
+            />
             <div className="pt-2 mb-2 flex items-center justify-between">
               <label className="block text-xs text-gray-300">
                 Sample Prompts ({jobConfig.config.process[0].sample.samples.length})

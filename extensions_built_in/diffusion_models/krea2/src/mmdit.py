@@ -9,14 +9,15 @@ velocity on the image tokens.
 Differences from the reference (all training-driven, numerically equivalent):
   - ``torch.compile`` decorators are dropped (they fight gradient checkpointing,
     LoRA module swapping and variable shapes during training).
-  - Attention uses a plain ``F.scaled_dot_product_attention`` instead of forcing
-    the cuDNN SDPA backend, so it works across dtypes / masks / backward.
+  - Attention keeps masks in key-padding form and uses CUDA cuDNN SDPA when
+    available, falling back to default SDPA on unsupported devices/builds.
   - ``enable_gradient_checkpointing`` / ``disable_gradient_checkpointing`` and a
     per-block ``torch.utils.checkpoint`` wrapper are added (gated on
     ``torch.is_grad_enabled()`` so eval/sampling never pays for it).
 """
 
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -24,8 +25,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.checkpoint import checkpoint
+
+try:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+except Exception:
+    SDPBackend = None
+    sdpa_kernel = None
+
+_CUDNN_ATTENTION = (
+    getattr(SDPBackend, "CUDNN_ATTENTION", None) if SDPBackend is not None else None
+)
 
 
 def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
@@ -56,7 +66,18 @@ def attention(
     scale: float | None = None,
     gqa: bool = False,
 ) -> Tensor:
-    with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+    context = nullcontext()
+    if q.is_cuda and sdpa_kernel is not None and _CUDNN_ATTENTION is not None:
+        context = sdpa_kernel(_CUDNN_ATTENTION)
+
+    try:
+        with context:
+            x = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask, scale=scale, enable_gqa=gqa
+            )
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            raise
         x = F.scaled_dot_product_attention(
             q, k, v, attn_mask=mask, scale=scale, enable_gqa=gqa
         )
@@ -64,8 +85,8 @@ def attention(
 
 
 def _mask(mask: Tensor) -> Tensor:
-    """Expand a (B, L) key-padding mask into a (B, 1, L, L) attention mask."""
-    return mask.unsqueeze(1).unsqueeze(2) * mask.unsqueeze(1).unsqueeze(3)
+    """Expand a (B, L) key-padding mask into SDPA's broadcastable mask shape."""
+    return mask[:, None, None, :].bool()
 
 
 def temb(

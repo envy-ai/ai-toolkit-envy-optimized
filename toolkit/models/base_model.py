@@ -169,6 +169,7 @@ class BaseModel:
         self.is_transformer = False
 
         self.sample_prompts_cache = None
+        self.generation_cpu_offload_modules = set()
         
         self.accuracy_recovery_adapter: Union[None, 'LoRASpecialNetwork'] = None
         self.is_multistage = False
@@ -1536,6 +1537,13 @@ class BaseModel:
         if device_state_preset in ['generate']:
             active_modules = ['vae', 'unet',
                               'text_encoder', 'adapter', 'refiner_unet']
+            cpu_modules = getattr(self, 'generation_cpu_offload_modules', set())
+            if cpu_modules:
+                active_modules = [
+                    module_name
+                    for module_name in active_modules
+                    if module_name not in cpu_modules
+                ]
 
         state = copy.deepcopy(empty_preset)
         # vae

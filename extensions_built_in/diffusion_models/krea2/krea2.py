@@ -40,6 +40,7 @@ from toolkit.accelerator import unwrap_model
 from toolkit.metadata import get_meta_for_safetensors
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
 from toolkit.memory_management import MemoryManager
+from toolkit.assistant_lora import load_assistant_lora_from_path
 
 from .src.mmdit import (
     DoubleSharedModulation,
@@ -145,7 +146,9 @@ class Krea2Model(BaseModel):
         )
         self.is_flow_matching = True
         self.is_transformer = True
-        self.target_lora_modules = ["SingleStreamDiT"]
+        self.target_lora_modules = [SingleStreamDiT.__name__]
+        if self.model_config.low_vram:
+            self.generation_cpu_offload_modules = {"vae", "unet", "text_encoder"}
 
         self.patch_size = KREA2_MMDIT_CONFIG["patch"]
         self.vae_scale_factor = 8  # Qwen-Image VAE is f8
@@ -288,7 +291,11 @@ class Krea2Model(BaseModel):
         flush()
 
         vae = self._load_vae()
-        vae.to(self.vae_device_torch, dtype=self.vae_torch_dtype)
+        if self.model_config.low_vram:
+            self.print_and_status_update("Keeping VAE on CPU")
+            vae.to("cpu", dtype=self.vae_torch_dtype)
+        else:
+            vae.to(self.vae_device_torch, dtype=self.vae_torch_dtype)
 
         self.noise_scheduler = Krea2Model.get_train_scheduler()
 
@@ -298,7 +305,18 @@ class Krea2Model(BaseModel):
         self.processor = processor
         self.model = transformer
         self.pipeline = Krea2Pipeline(self)
+        if self.model_config.inference_lora_path is not None:
+            self.print_and_status_update("Loading inference lora")
+            self._load_inference_lora()
         self.print_and_status_update("Model Loaded")
+
+    def _load_inference_lora(self):
+        self.assistant_lora = load_assistant_lora_from_path(
+            self.model_config.inference_lora_path, self
+        )
+        self.assistant_lora.is_active = False
+        self.assistant_lora.force_to("cpu", getattr(self, "torch_dtype", torch.float32))
+        flush()
 
     # ------------------------------------------------------------------
     # Generation (training previews)
@@ -337,6 +355,16 @@ class Krea2Model(BaseModel):
     # ------------------------------------------------------------------
     # Training hooks
     # ------------------------------------------------------------------
+    def _offload_transformer_for_low_vram_prompt_encoding(self):
+        if not self.model_config.low_vram:
+            return
+        model = getattr(self, "model", None)
+        if model is None:
+            return
+        if getattr(model, "device", torch.device("cpu")) != torch.device("cpu"):
+            model.to("cpu")
+            flush()
+
     def get_noise_prediction(
         self,
         latent_model_input: torch.Tensor,  # (B, 16, h, w)
@@ -372,28 +400,38 @@ class Krea2Model(BaseModel):
         if isinstance(prompt, str):
             prompt = [prompt]
 
+        self._offload_transformer_for_low_vram_prompt_encoding()
+
         if self.text_encoder.device == torch.device("cpu"):
             self.text_encoder.to(self.device_torch)
 
-        # Encode each prompt at its natural length and store one (L, 12*2560)
-        # tensor per batch item. The (L, 12, 2560) stack is flattened to 2D so the
-        # toolkit's batching reads the list length (not the seq length) as the
-        # batch size; predict_velocity restores the layer axis. Padding to the
-        # batch max is deferred to the model call so caches stay small and any
-        # prompts can share a batch.
         features_list = []
-        for p in prompt:
-            features = encode_krea_prompt(
-                self.text_encoder,
-                self.tokenizer,
-                self.processor,
-                p,
-                max_length=self.max_text_length,
-                select_layers=SELECT_LAYERS,
-            )
-            # (L, n, d) -> (L, n*d)
-            features = features.reshape(features.shape[0], -1)
-            features_list.append(features.to(self.torch_dtype))
+        try:
+            # Encode each prompt at its natural length and store one (L, 12*2560)
+            # tensor per batch item. The (L, 12, 2560) stack is flattened to 2D so the
+            # toolkit's batching reads the list length (not the seq length) as the
+            # batch size; predict_velocity restores the layer axis. Padding to the
+            # batch max is deferred to the model call so caches stay small and any
+            # prompts can share a batch.
+            for p in prompt:
+                features = encode_krea_prompt(
+                    self.text_encoder,
+                    self.tokenizer,
+                    self.processor,
+                    p,
+                    max_length=self.max_text_length,
+                    select_layers=SELECT_LAYERS,
+                )
+                # (L, n, d) -> (L, n*d)
+                features = features.reshape(features.shape[0], -1)
+                features = features.to(self.torch_dtype)
+                if self.model_config.low_vram:
+                    features = features.to("cpu")
+                features_list.append(features)
+        finally:
+            if self.model_config.low_vram:
+                self.text_encoder.to("cpu")
+                flush()
 
         return AdvancedPromptEmbeds(text_embeds=features_list)
 
@@ -418,30 +456,35 @@ class Krea2Model(BaseModel):
         if dtype is None:
             dtype = self.vae_torch_dtype
 
-        if self.vae.device == torch.device("cpu"):
-            self.vae.to(device)
-        self.vae.eval()
-        self.vae.requires_grad_(False)
+        try:
+            if self.vae.device == torch.device("cpu"):
+                self.vae.to(device)
+            self.vae.eval()
+            self.vae.requires_grad_(False)
 
-        image_list = [image.to(device, dtype=dtype) for image in image_list]
-        images = torch.stack(image_list).to(device, dtype=dtype)
+            image_list = [image.to(device, dtype=dtype) for image in image_list]
+            images = torch.stack(image_list).to(device, dtype=dtype)
 
-        # AutoencoderKLQwenImage is a video VAE: add a frame dim.
-        images = images.unsqueeze(2)
-        latents = self.vae.encode(images).latent_dist.sample()
+            # AutoencoderKLQwenImage is a video VAE: add a frame dim.
+            images = images.unsqueeze(2)
+            latents = self.vae.encode(images).latent_dist.sample()
 
-        latents_mean = (
-            torch.tensor(self.vae.config.latents_mean)
-            .view(1, self.vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
-        )
-        latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(
-            1, self.vae.config.z_dim, 1, 1, 1
-        ).to(latents.device, latents.dtype)
+            latents_mean = (
+                torch.tensor(self.vae.config.latents_mean)
+                .view(1, self.vae.config.z_dim, 1, 1, 1)
+                .to(latents.device, latents.dtype)
+            )
+            latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(
+                1, self.vae.config.z_dim, 1, 1, 1
+            ).to(latents.device, latents.dtype)
 
-        latents = (latents - latents_mean) * latents_std
-        latents = latents.squeeze(2)  # drop frame dim
-        return latents.to(device, dtype=dtype)
+            latents = (latents - latents_mean) * latents_std
+            latents = latents.squeeze(2)  # drop frame dim
+            return latents.to(device, dtype=dtype)
+        finally:
+            if self.model_config.low_vram:
+                self.vae.to("cpu")
+                flush()
 
     def decode_latents(self, latents: torch.Tensor, device=None, dtype=None):
         if device is None:
@@ -449,36 +492,41 @@ class Krea2Model(BaseModel):
         if dtype is None:
             dtype = self.vae_torch_dtype
 
-        if self.vae.device == torch.device("cpu"):
-            self.vae.to(device)
-
-        latents = latents.to(device, dtype=dtype)
-        latents = latents.unsqueeze(2)  # add frame dim
-
-        latents_mean = (
-            torch.tensor(self.vae.config.latents_mean)
-            .view(1, self.vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
-        )
-        latents_std = (
-            torch.tensor(self.vae.config.latents_std)
-            .view(1, self.vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
-        )
-        latents = latents * latents_std + latents_mean
-
-        # Full-resolution decode spikes VRAM; tile it when low on VRAM (decode
-        # only -- encode stays untiled).
-        tiled = self.model_config.low_vram
-        if tiled:
-            self.vae.enable_tiling()
         try:
-            images = self.vae.decode(latents).sample
-        finally:
+            if self.vae.device == torch.device("cpu"):
+                self.vae.to(device)
+
+            latents = latents.to(device, dtype=dtype)
+            latents = latents.unsqueeze(2)  # add frame dim
+
+            latents_mean = (
+                torch.tensor(self.vae.config.latents_mean)
+                .view(1, self.vae.config.z_dim, 1, 1, 1)
+                .to(latents.device, latents.dtype)
+            )
+            latents_std = (
+                torch.tensor(self.vae.config.latents_std)
+                .view(1, self.vae.config.z_dim, 1, 1, 1)
+                .to(latents.device, latents.dtype)
+            )
+            latents = latents * latents_std + latents_mean
+
+            # Full-resolution decode spikes VRAM; tile it when low on VRAM (decode
+            # only -- encode stays untiled).
+            tiled = self.model_config.low_vram
             if tiled:
-                self.vae.disable_tiling()
-        images = images.squeeze(2)  # drop frame dim
-        return images.to(device, dtype=dtype)
+                self.vae.enable_tiling()
+            try:
+                images = self.vae.decode(latents).sample
+            finally:
+                if tiled:
+                    self.vae.disable_tiling()
+            images = images.squeeze(2)  # drop frame dim
+            return images.to(device, dtype=dtype)
+        finally:
+            if self.model_config.low_vram:
+                self.vae.to("cpu")
+                flush()
 
     # ------------------------------------------------------------------
     # Saving / bookkeeping

@@ -52,6 +52,15 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'config.process[0].model.inference_lora_path': {
+    title: 'Inference LoRA Path',
+    description: (
+      <>
+        Optional path to a LoRA that is loaded only for sample generation. The trainer unloads it again before returning
+        to training, so it can be used for preview-only adapters such as turbo or guidance LoRAs.
+      </>
+    ),
+  },
   'datasets.control_path': {
     title: 'Control Dataset',
     description: (

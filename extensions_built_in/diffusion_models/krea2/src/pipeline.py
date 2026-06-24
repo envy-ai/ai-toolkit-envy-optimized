@@ -21,6 +21,8 @@ from einops import rearrange, repeat
 from PIL import Image
 from diffusers.utils.torch_utils import randn_tensor
 
+from toolkit.basic import flush
+
 from .mmdit import SingleStreamDiT
 
 
@@ -176,6 +178,14 @@ class Krea2Pipeline:
     def device(self):
         return self.model.device_torch
 
+    @property
+    def text_encoder(self):
+        return self.model.text_encoder
+
+    @property
+    def transformer(self):
+        return self.model.transformer
+
     def to(self, *args, **kwargs):
         return self
 
@@ -252,6 +262,13 @@ class Krea2Pipeline:
             else:
                 v = v_cond
             latents = latents + (tprev - tcurr) * v.to(torch.float32)
+
+        if model.model_config.low_vram:
+            transformer.to("cpu")
+            del cond_feats, cond_mask
+            if do_cfg:
+                del uncond_feats, uncond_mask
+            flush()
 
         images = model.decode_latents(latents, device=device, dtype=dtype)
         images = images.float().clamp(-1.0, 1.0)
