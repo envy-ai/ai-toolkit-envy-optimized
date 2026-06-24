@@ -10,6 +10,7 @@ This fork is optimized for advanced LoRA/DoRA training on newer transformer imag
 - **Expanded DoRA support**: DoRA is available as a training target in more places, including the simple job UI, with fixes for quantized model weights and lower-memory training.
 - **Improved inference LoRA handling**: better support for loading assistant or inference LoRAs for previews/sampling without interfering with the LoRA being trained.
 - **Qwen Image memory optimizations**: lower-VRAM prompt embedding, safer text embedding cache restore behavior, and reduced GPU memory spikes around cached latents and text embeddings.
+- **Ideogram 4 memory optimizations**: tested and working on a 4090 without layer swapping
 - **Quantization improvements**: better handling for TorchAO/Quanto quantized models, including Nucleus mixture-of-experts quantization support and safer quantized save/load paths.
 - **Optimizer stability fixes**: Prodigy8Bit has improved checkpoint serialization and numerical stability for small gradients.
 - **Training UI additions**: DoRA selection, clearer content/style controls, Min SNR Gamma, Prodigy/Prodigy8Bit naming cleanup, and an experimental Rose optimizer option.
