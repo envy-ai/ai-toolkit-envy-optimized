@@ -11,9 +11,12 @@ from optimum.quanto import QBytesTensor, QTensor
 from toolkit.network_mixins import ToolkitModuleMixin, ExtractableModuleMixin
 
 try:
-    from torchao.dtypes.affine_quantized_tensor import AffineQuantizedTensor
+    from torchao.dtypes import AffineQuantizedTensor
 except Exception:
-    AffineQuantizedTensor = None
+    try:
+        from torchao.dtypes.affine_quantized_tensor import AffineQuantizedTensor
+    except Exception:
+        AffineQuantizedTensor = None
 
 if TYPE_CHECKING:
     from toolkit.lora_special import LoRASpecialNetwork
@@ -111,7 +114,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         if isinstance(weight, QTensor) or isinstance(weight, QBytesTensor):
             return weight.dequantize().data.detach()
         if AffineQuantizedTensor is not None and isinstance(weight, AffineQuantizedTensor):
-            return weight.dequantize().detach()
+            return weight.dequantize().data.detach()
         return weight.data.detach()
 
     def get_orig_bias(self):

@@ -8,6 +8,8 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from toolkit.models.DoRA import DoRAModule
+from toolkit.models import DoRA as dora_module
+from toolkit.models.lokr import AffineQuantizedTensor as LokrAffineQuantizedTensor
 
 
 class FakeNetwork:
@@ -21,6 +23,9 @@ class FakeNetwork:
 
 
 class DoRAMemoryTests(unittest.TestCase):
+    def test_affine_quantized_tensor_detection_matches_lokr(self):
+        self.assertIs(dora_module.AffineQuantizedTensor, LokrAffineQuantizedTensor)
+
     def test_scalar_multiplier_forward_reuses_existing_outputs(self):
         torch.manual_seed(1)
         network = FakeNetwork()
