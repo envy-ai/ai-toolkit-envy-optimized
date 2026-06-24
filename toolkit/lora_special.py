@@ -370,7 +370,10 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                                 transformer_block_names = base_model.get_transformer_block_names()
                             
                             if transformer_block_names is not None:
-                                if not any([name in lora_name for name in transformer_block_names]):
+                                # match against clean_name (dotted) so block names can be
+                                # dotted paths (e.g. "model.language_model.layers"); lora_name
+                                # has dots replaced with "$$"/"_" and wouldn't match.
+                                if not any([block_name in clean_name for block_name in transformer_block_names]):
                                     skip = True
                             else:
                                 if self.is_pixart:
@@ -591,4 +594,3 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                 all_params.append({"lr": unet_lr, "params": list(self.unet_conv_out.parameters())})
 
         return all_params
-

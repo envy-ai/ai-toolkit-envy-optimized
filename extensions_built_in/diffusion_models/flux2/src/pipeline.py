@@ -330,7 +330,7 @@ class Flux2Pipeline(DiffusionPipeline):
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = self.transformer.device
+        device = getattr(self.transformer, "device", None) or self._execution_device
 
         # 3. Encode the prompt
 

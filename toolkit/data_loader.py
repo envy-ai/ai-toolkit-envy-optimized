@@ -98,7 +98,7 @@ class ImageDataset(Dataset, CaptionMixin):
 
         self.resolution = self.get_config('resolution', 256)
         self.file_list = [os.path.join(self.path, file) for file in os.listdir(self.path) if
-                          file.lower().endswith(tuple(image_extensions))]
+                          file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
 
         # this might take a while
         print_acc(f"  -  Preprocessing image dimensions")
@@ -237,7 +237,7 @@ class PairedImageDataset(Dataset):
         self.pos_weight = self.get_config('pos_weight', self.network_weight)
         self.neg_weight = self.get_config('neg_weight', self.network_weight)
 
-        supported_exts = tuple(image_extensions)
+        supported_exts = ('.jpg', '.jpeg', '.png', '.webp', '.JPEG', '.JPG', '.PNG', '.WEBP')
 
         if self.pos_folder is not None and self.neg_folder is not None:
             # find matching files
@@ -611,9 +611,29 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             return len(self.batch_indices)
         return len(self.file_list)
 
-    def _get_single_item(self, index) -> 'FileItemDTO':
+    def _get_replacement_index(self, index) -> int:
+        # when an image fails to load we have to swap in a different one. With buckets the
+        # replacement must come from the same bucket so the collated shapes still match.
+        if self.dataset_config.buckets:
+            for bucket in self.buckets.values():
+                if index in bucket.file_list_idx:
+                    candidates = [i for i in bucket.file_list_idx if i != index]
+                    if candidates:
+                        return random.choice(candidates)
+                    break
+        return random.randint(0, len(self.file_list) - 1)
+
+    def _get_single_item(self, index, _attempts=0) -> 'FileItemDTO':
         file_item: 'FileItemDTO' = copy.deepcopy(self.file_list[index])
-        file_item.load_and_process_image(self.transform)
+        try:
+            file_item.load_and_process_image(self.transform)
+        except Exception as e:
+            print(f"Error loading image, skipping and loading a different one: {file_item.path} ({e})")
+            if _attempts >= 10:
+                # avoid infinite recursion if many files are corrupt
+                raise
+            new_index = self._get_replacement_index(index)
+            return self._get_single_item(new_index, _attempts=_attempts + 1)
         file_item.load_caption(self.caption_dict)
         return file_item
 

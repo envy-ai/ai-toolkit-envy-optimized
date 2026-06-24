@@ -53,7 +53,6 @@ scheduler_config = {
     "use_karras_sigmas": False,
 }
 
-
 class _PipelineLoraController:
     def __init__(
         self,

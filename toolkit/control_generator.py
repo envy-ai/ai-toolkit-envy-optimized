@@ -153,12 +153,24 @@ class ControlGenerator:
             img = image.copy()
             if self.control_bg_remover is None:
                 from transformers import AutoModelForImageSegmentation
-                self.control_bg_remover = AutoModelForImageSegmentation.from_pretrained(
-                    'ZhengPeng7/BiRefNet_HR',
-                    trust_remote_code=True,
-                    revision="595e212b3eaa6a1beaad56cee49749b1e00b1596",
-                    torch_dtype=torch.float16
-                ).to(device)
+                bg_remover_revisions = [
+                    "a7a562f6fd16021180f2f4348f4de003a2d3d1e1",
+                    "595e212b3eaa6a1beaad56cee49749b1e00b1596",
+                ]
+                last_error = None
+                for revision in bg_remover_revisions:
+                    try:
+                        self.control_bg_remover = AutoModelForImageSegmentation.from_pretrained(
+                            'ZhengPeng7/BiRefNet_HR',
+                            trust_remote_code=True,
+                            revision=revision,
+                            torch_dtype=torch.float16
+                        ).to(device)
+                        break
+                    except Exception as e:
+                        last_error = e
+                if self.control_bg_remover is None and last_error is not None:
+                    raise last_error
                 self.control_bg_remover.eval()
 
             image_size = (1024, 1024)

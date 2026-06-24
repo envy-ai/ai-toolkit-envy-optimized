@@ -199,6 +199,11 @@ class BucketsMixin:
             for start_idx in range(0, len(bucket.file_list_idx), self.batch_size):
                 end_idx = min(start_idx + self.batch_size, len(bucket.file_list_idx))
                 batch = bucket.file_list_idx[start_idx:end_idx]
+                # if the bucket has fewer items left than the requested batch size,
+                # duplicate items from this batch to pad it up to batch_size
+                if len(batch) < self.batch_size and len(batch) > 0:
+                    pad = [batch[i % len(batch)] for i in range(self.batch_size - len(batch))]
+                    batch = batch + pad
                 self.batch_indices.append(batch)
 
     def shuffle_buckets(self: 'AiToolkitDataset'):
@@ -725,7 +730,7 @@ class ImageProcessingDTOMixin:
                     if cap.isOpened():
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Go to start
                         start_ret, _ = cap.read()
-                        
+
                         # Try to read the last frame to check if it's accessible
                         if reported_total > 0:
                             cap.set(cv2.CAP_PROP_POS_FRAMES, reported_total - 1)
@@ -754,17 +759,20 @@ class ImageProcessingDTOMixin:
         # if we are caching latents, just do that
         if self.is_latent_cached:
             self.get_latent()
-            if self.has_control_image:
-                self.load_control_image()
-            if self.has_inpaint_image:
-                self.load_inpaint_image()
-            if self.has_clip_image:
-                self.load_clip_image()
-            if self.has_mask_image:
-                self.load_mask_image()
-            if self.has_unconditional:
-                self.load_unconditional_image()
-            return
+            # if load_image_when_caching_latents is set, we still need the raw image
+            # tensor in addition to the cached latent, so fall through to load it below
+            if not self.dataset_config.load_image_when_caching_latents:
+                if self.has_control_image:
+                    self.load_control_image()
+                if self.has_inpaint_image:
+                    self.load_inpaint_image()
+                if self.has_clip_image:
+                    self.load_clip_image()
+                if self.has_mask_image:
+                    self.load_mask_image()
+                if self.has_unconditional:
+                    self.load_unconditional_image()
+                return
         if self.is_audio_model:
             self.load_and_process_audio()
             return
@@ -1870,60 +1878,58 @@ class TextEmbeddingCachingMixin:
             
             did_move = False
 
-            try:
-                # use tqdm to show progress
-                i = 0
-                for file_item in tqdm(self.file_list, desc='Caching text embeddings to disk'):
-                    file_item.latent_load_device = self.sd.device
+            # use tqdm to show progress
+            i = 0
+            for file_item in tqdm(self.file_list, desc='Caching text embeddings to disk'):
+                file_item.latent_load_device = self.sd.device
 
-                    text_embedding_path = file_item.get_text_embedding_path(recalculate=True)
-                    # only process if not saved to disk
-                    if not os.path.exists(text_embedding_path):
-                        # load if not loaded
-                        if not did_move:
-                            self.sd.set_device_state_preset('cache_text_encoder')
-                            did_move = True
+                text_embedding_path = file_item.get_text_embedding_path(recalculate=True)
+                # only process if not saved to disk
+                if not os.path.exists(text_embedding_path):
+                    # load if not loaded
+                    if not did_move:
+                        self.sd.set_device_state_preset('cache_text_encoder')
+                        did_move = True
 
-                        if file_item.encode_control_in_text_embeddings:
-                            if file_item.control_path is None:
-                                raise Exception(f"Could not find a control image for {file_item.path} which is needed for this model")
-                            ctrl_img_list = []
-                            control_path_list = file_item.control_path
-                            if not isinstance(file_item.control_path, list):
-                                control_path_list = [control_path_list]
-                            for i in range(len(control_path_list)):
-                                try:
-                                    img = Image.open(control_path_list[i]).convert("RGB")
-                                    img = exif_transpose(img)
-                                    # convert to 0 to 1 tensor
-                                    img = (
-                                        TF.to_tensor(img)
-                                        .unsqueeze(0)
-                                        .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
-                                    )
-                                    ctrl_img_list.append(img)
-                                except Exception as e:
-                                    print_acc(f"Error: {e}")
-                                    print_acc(f"Error loading control image: {control_path_list[i]}")
+                    if file_item.encode_control_in_text_embeddings:
+                        if file_item.control_path is None:
+                            raise Exception(f"Could not find a control image for {file_item.path} which is needed for this model")
+                        ctrl_img_list = []
+                        control_path_list = file_item.control_path
+                        if not isinstance(file_item.control_path, list):
+                            control_path_list = [control_path_list]
+                        for i in range(len(control_path_list)):
+                            try:
+                                img = Image.open(control_path_list[i]).convert("RGB")
+                                img = exif_transpose(img)
+                                # convert to 0 to 1 tensor
+                                img = (
+                                    TF.to_tensor(img)
+                                    .unsqueeze(0)
+                                    .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
+                                )
+                                ctrl_img_list.append(img)
+                            except Exception as e:
+                                print_acc(f"Error: {e}")
+                                print_acc(f"Error loading control image: {control_path_list[i]}")
 
-                            if len(ctrl_img_list) == 0:
-                                ctrl_img = None
-                            elif not self.sd.has_multiple_control_images:
-                                ctrl_img = ctrl_img_list[0]
-                            else:
-                                ctrl_img = ctrl_img_list
-                            prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)
+                        if len(ctrl_img_list) == 0:
+                            ctrl_img = None
+                        elif not self.sd.has_multiple_control_images:
+                            ctrl_img = ctrl_img_list[0]
                         else:
-                            prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
-                        # save it
-                        prompt_embeds.save(text_embedding_path)
-                        del prompt_embeds
-                    file_item.is_text_embedding_cached = True
-                    i += 1
-            finally:
-                # restore device state
-                if did_move:
-                    self.sd.restore_device_state()
+                            ctrl_img = ctrl_img_list
+                        prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)
+                    else:
+                        prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
+                    # save it
+                    prompt_embeds.save(text_embedding_path)
+                    del prompt_embeds
+                file_item.is_text_embedding_cached = True
+                i += 1
+            # restore device state
+            if did_move:
+                self.sd.restore_device_state()
 
 
 class CLIPCachingMixin:

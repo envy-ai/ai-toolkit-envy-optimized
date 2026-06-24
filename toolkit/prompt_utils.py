@@ -273,8 +273,7 @@ def concat_prompt_embeds(prompt_embeds: list["PromptEmbeds"], padding_side: str 
                     t = torch.cat([t, pad], dim=1)
                 padded.append(t)
             embed_list.append(torch.cat(padded, dim=0))
-        #text_embeds = embed_list
-        text_embeds = padded
+        text_embeds = embed_list
     else:
         max_len = max(p.text_embeds.shape[1] for p in prompt_embeds)
         padded = []

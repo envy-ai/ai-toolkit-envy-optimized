@@ -14,6 +14,7 @@ from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
 )
+from toolkit.dequantize import patch_dequantization_on_save
 from toolkit.accelerator import unwrap_model
 from optimum.quanto import freeze, QTensor
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
@@ -213,6 +214,8 @@ class Flux2Model(BaseModel):
                 self.save_quantized_module_cache(
                     transformer, transformer_cache_path, "transformer"
                 )
+            if not hasattr(transformer, "orig_state_dict"):
+                patch_dequantization_on_save(transformer)
             flush()
         else:
             transformer.to(self.device_torch, dtype=dtype)
