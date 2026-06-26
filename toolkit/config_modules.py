@@ -76,6 +76,25 @@ class SampleItem:
         # only for models that support it, (qwen image edit 2509 for now)
         self.do_cfg_norm: bool = kwargs.get('do_cfg_norm', False)
 
+
+class ComfySampleConfig:
+    def __init__(self, **kwargs):
+        self.enabled: bool = kwargs.get('enabled', False)
+        self.api_url: str = kwargs.get('api_url', 'http://127.0.0.1:8188')
+        self.workflow_path: str = kwargs.get('workflow_path', 'config/comfy_templates/krea2_lora_sample.json.njk')
+        self.model: str = kwargs.get('model', '')
+        self.vae: str = kwargs.get('vae', '')
+        self.text_encoder: str = kwargs.get('text_encoder', '')
+        self.sampler: str = kwargs.get('sampler', 'euler')
+        self.scheduler: str = kwargs.get('scheduler', 'simple')
+        self.inference_lora: str = kwargs.get('inference_lora', '')
+        self.inference_lora_strength: float = kwargs.get('inference_lora_strength', 1.0)
+        self.send_prompts_as_batch: bool = kwargs.get('send_prompts_as_batch', False)
+        self.output_format: str = kwargs.get('output_format', 'webp_with_json')
+        self.output_quality: str = kwargs.get('output_quality', 'high')
+        self.timeout: int = kwargs.get('timeout', 600)
+
+
 class SampleConfig:
     def __init__(self, **kwargs):
         self.sampler: str = kwargs.get('sampler', 'ddpm')
@@ -91,6 +110,7 @@ class SampleConfig:
         self.guidance_rescale = kwargs.get('guidance_rescale', 0.0)
         self.ext: ImgExt = kwargs.get('format', 'jpg')
         self.adapter_conditioning_scale = kwargs.get('adapter_conditioning_scale', 1.0)
+        self.comfy = ComfySampleConfig(**kwargs.get('comfy', {}))
         self.refiner_start_at = kwargs.get('refiner_start_at',
                                            0.5)  # step to start using refiner on sample if it exists
         self.extra_values = kwargs.get('extra_values', [])

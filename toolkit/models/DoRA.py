@@ -81,6 +81,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
         self.is_checkpointing = False
+        self.dora_scale_chunk_size = int(kwargs.get("dora_scale_chunk_size", 256))
 
         d_out = org_module.out_features
         d_in = org_module.in_features
@@ -149,6 +150,32 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
                 weight,
                 scaled_lora_weight.detach(),
             )
+        weight_norm = weight_norm.to(
+            self.magnitude.device,
+            dtype=self.magnitude.dtype,
+        )
+        return self.magnitude / weight_norm
+
+    def get_dora_scale_from_low_rank(self, multiplier_scale):
+        # Same detached DoRA norm as get_dora_scale(), but avoid materializing the
+        # full dense LoRA delta. Krea's larger MLP layers otherwise create sharp
+        # temporary VRAM spikes during gradient-checkpointed training.
+        with torch.no_grad():
+            device = self.lora_up.weight.device
+            dtype = self.lora_up.weight.dtype
+            weight = self.get_orig_weight().to(device, dtype=dtype)
+
+            out_features = self.lora_up.weight.shape[0]
+            chunk_size = max(1, self.dora_scale_chunk_size)
+            weight_norm = torch.empty(out_features, device=device, dtype=dtype)
+
+            for start in range(0, out_features, chunk_size):
+                end = min(start + chunk_size, out_features)
+                lora_weight_chunk = self.lora_up.weight[start:end] @ self.lora_down.weight
+                lora_weight_chunk = lora_weight_chunk * multiplier_scale
+                weight_chunk = weight[start:end] + lora_weight_chunk
+                weight_norm[start:end] = torch.linalg.norm(weight_chunk, dim=1)
+
         weight_norm = weight_norm.to(
             self.magnitude.device,
             dtype=self.magnitude.dtype,

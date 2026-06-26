@@ -154,13 +154,20 @@ class Krea2Model(BaseModel):
         self.vae_scale_factor = 8  # Qwen-Image VAE is f8
         # Safety cap on prompt token length (truncation only); embeds are stored
         # per-sample at natural length and padded to the batch max at the model call.
+        # Krea's image/text sequence is memory sensitive at 1024+ buckets, so use
+        # a lower default in low-VRAM mode while still allowing explicit override.
+        default_max_text_length = 256 if self.model_config.low_vram else 512
         self.max_text_length = int(
-            self.model_config.model_kwargs.get("max_text_length", 512)
+            self.model_config.model_kwargs.get("max_text_length", default_max_text_length)
         )
         # Qwen2TokenizerFast used to tokenize the assistant suffix (matches the
         # reference's separate processor pass).
         self.processor = None
         self.use_old_lokr_format = False
+
+    @property
+    def text_embedding_space_version(self):
+        return f"{self.arch}_te_len{self.max_text_length}"
 
     @staticmethod
     def get_train_scheduler():

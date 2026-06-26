@@ -1,4 +1,20 @@
-import { SampleConfig } from "@/types";
+import { ComfySampleConfig, SampleConfig } from "@/types";
+
+export const defaultComfySampleConfig: ComfySampleConfig = {
+  enabled: false,
+  api_url: 'http://127.0.0.1:8188',
+  workflow_path: 'config/comfy_templates/krea2_lora_sample.json.njk',
+  model: '',
+  vae: '',
+  text_encoder: '',
+  sampler: 'euler',
+  scheduler: 'simple',
+  inference_lora: '',
+  inference_lora_strength: 1.0,
+  send_prompts_as_batch: false,
+  output_format: 'webp_with_json',
+  output_quality: 'high',
+};
 
 export const defaultSampleConfig: SampleConfig = {
   sampler: 'flowmatch',
@@ -47,6 +63,7 @@ export const defaultSampleConfig: SampleConfig = {
   sample_steps: 30,
   num_frames: 1,
   fps: 1,
+  comfy: { ...defaultComfySampleConfig },
 }
 
 export const defaultAudioSampleConfig: SampleConfig = {
@@ -400,6 +417,7 @@ It's Converging!
   sample_steps: 30,
   num_frames: 1,
   fps: 1,
+  comfy: { ...defaultComfySampleConfig },
 };
 
 
@@ -973,4 +991,5 @@ export const defaultIdeogramSamplesConfig: SampleConfig = {
   sample_steps: 30,
   num_frames: 1,
   fps: 1,
+  comfy: { ...defaultComfySampleConfig },
 }

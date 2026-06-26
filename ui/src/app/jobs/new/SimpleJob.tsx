@@ -1,5 +1,5 @@
 'use client';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   modelArchs,
   ModelArch,
@@ -32,6 +32,7 @@ import { FlipHorizontal2, FlipVertical2 } from 'lucide-react';
 import { handleModelArchChange } from './utils';
 import { IoFlaskSharp } from 'react-icons/io5';
 import { isMac } from '@/helpers/basic';
+import { apiClient } from '@/utils/api';
 
 type Props = {
   jobConfig: JobConfig;
@@ -47,6 +48,30 @@ type Props = {
 };
 
 const isDev = process.env.NODE_ENV === 'development';
+
+type ComfyOptions = {
+  model: string[];
+  vae: string[];
+  text_encoder: string[];
+  inference_lora: string[];
+  sampler: string[];
+  scheduler: string[];
+  output_format: string[];
+  output_quality: string[];
+};
+
+const emptyComfyOptions: ComfyOptions = {
+  model: [],
+  vae: [],
+  text_encoder: [],
+  inference_lora: [],
+  sampler: [],
+  scheduler: [],
+  output_format: [],
+  output_quality: [],
+};
+
+const toOptions = (values: string[]): SelectOption[] => values.map(value => ({ value, label: value }));
 
 export default function SimpleJob({
   jobConfig,
@@ -83,6 +108,59 @@ export default function SimpleJob({
   const isAudioModel = !!(modelArch?.group === 'audio');
   const networkType = jobConfig.config.process[0].network?.type ?? 'lora';
   const showNetworkConv = networkType == 'dora' || !disableSections.includes('network.conv');
+  const comfyConfig = jobConfig.config.process[0].sample.comfy;
+  const comfyEnabled = comfyConfig?.enabled || false;
+  const [comfyOptions, setComfyOptions] = useState<ComfyOptions>(emptyComfyOptions);
+
+  useEffect(() => {
+    if (networkType != 'dora') {
+      return;
+    }
+
+    const network = jobConfig.config.process[0].network;
+    const convValue = network?.conv ?? 16;
+
+    if (network?.conv === undefined || network?.conv === null) {
+      setJobConfig(16, 'config.process[0].network.conv');
+    }
+    if (network?.conv_alpha === undefined || network?.conv_alpha === null) {
+      setJobConfig(convValue, 'config.process[0].network.conv_alpha');
+    }
+  }, [
+    networkType,
+    jobConfig.config.process[0].network?.conv,
+    jobConfig.config.process[0].network?.conv_alpha,
+    setJobConfig,
+  ]);
+
+  useEffect(() => {
+    if (!comfyEnabled) {
+      setComfyOptions(emptyComfyOptions);
+      return;
+    }
+
+    let isCancelled = false;
+    apiClient
+      .get('/api/comfy/options', {
+        params: {
+          url: comfyConfig?.api_url || 'http://127.0.0.1:8188',
+        },
+      })
+      .then(res => {
+        if (!isCancelled) {
+          setComfyOptions({ ...emptyComfyOptions, ...res.data });
+        }
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setComfyOptions(emptyComfyOptions);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [comfyEnabled, comfyConfig?.api_url]);
 
   const taggedSampleArr: Record<string, any>[] | null = useMemo(() => {
     if (!modelArch) return null;
@@ -1379,6 +1457,91 @@ export default function SimpleJob({
               placeholder="output/krea2_raw_to_turbo_r256.safetensors"
               className="pt-2"
             />
+            <div className="pt-4">
+              <Checkbox
+                label="Use ComfyUI Renderer"
+                checked={comfyEnabled}
+                onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.enabled')}
+              />
+            </div>
+            {comfyEnabled && (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-2">
+                <TextInput
+                  label="ComfyUI URL"
+                  value={comfyConfig?.api_url || 'http://127.0.0.1:8188'}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.api_url')}
+                  placeholder="http://127.0.0.1:8188"
+                />
+                <TextInput
+                  label="Workflow Path"
+                  value={comfyConfig?.workflow_path || 'config/comfy_templates/krea2_lora_sample.json.njk'}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.workflow_path')}
+                  placeholder="config/comfy_templates/krea2_lora_sample.json.njk"
+                />
+                <Checkbox
+                  label="Send Prompts as Batch"
+                  className="pt-6"
+                  checked={comfyConfig?.send_prompts_as_batch || false}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.send_prompts_as_batch')}
+                />
+                <CreatableSelectInput
+                  label="Comfy Model"
+                  value={comfyConfig?.model || ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.model')}
+                  options={toOptions(comfyOptions.model)}
+                />
+                <CreatableSelectInput
+                  label="Comfy VAE"
+                  value={comfyConfig?.vae || ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.vae')}
+                  options={toOptions(comfyOptions.vae)}
+                />
+                <CreatableSelectInput
+                  label="Comfy Text Encoder"
+                  value={comfyConfig?.text_encoder || ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.text_encoder')}
+                  options={toOptions(comfyOptions.text_encoder)}
+                />
+                <CreatableSelectInput
+                  label="Comfy Sampler"
+                  value={comfyConfig?.sampler || 'euler'}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.sampler')}
+                  options={toOptions(comfyOptions.sampler)}
+                />
+                <CreatableSelectInput
+                  label="Comfy Scheduler"
+                  value={comfyConfig?.scheduler || 'simple'}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.scheduler')}
+                  options={toOptions(comfyOptions.scheduler)}
+                />
+                <CreatableSelectInput
+                  label="Comfy Inference LoRA"
+                  value={comfyConfig?.inference_lora || ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.inference_lora')}
+                  options={toOptions(comfyOptions.inference_lora)}
+                />
+                <NumberInput
+                  label="Inference LoRA Strength"
+                  value={comfyConfig?.inference_lora_strength ?? 1.0}
+                  onChange={value => setJobConfig(value ?? 1.0, 'config.process[0].sample.comfy.inference_lora_strength')}
+                  placeholder="eg. 1.0"
+                  min={0}
+                  required
+                />
+                <CreatableSelectInput
+                  label="Output Format"
+                  value={comfyConfig?.output_format || 'webp_with_json'}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.output_format')}
+                  options={toOptions(comfyOptions.output_format)}
+                />
+                <CreatableSelectInput
+                  label="Output Quality"
+                  value={comfyConfig?.output_quality || 'high'}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.output_quality')}
+                  options={toOptions(comfyOptions.output_quality)}
+                />
+              </div>
+            )}
             <div className="pt-2 mb-2 flex items-center justify-between">
               <label className="block text-xs text-gray-300">
                 Sample Prompts ({jobConfig.config.process[0].sample.samples.length})

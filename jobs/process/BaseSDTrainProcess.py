@@ -4,6 +4,7 @@ import inspect
 import json
 import random
 import shutil
+import time
 from collections import OrderedDict
 import os
 import re
@@ -47,7 +48,7 @@ from toolkit.saving import save_t2i_from_diffusers, load_t2i_model, save_ip_adap
     load_ip_adapter_model, load_custom_adapter_model
 
 from toolkit.scheduler import get_lr_scheduler
-from toolkit.sd_device_states_presets import get_train_sd_device_state_preset
+from toolkit.sd_device_states_presets import get_train_sd_device_state_preset, empty_preset
 from toolkit.stable_diffusion_model import StableDiffusion
 
 from jobs.process import BaseTrainProcess
@@ -73,6 +74,17 @@ import hashlib
 from toolkit.util.blended_blur_noise import get_blended_blur_noise
 from toolkit.util.get_model import get_model_class
 from toolkit.basic import flush
+from toolkit.comfy_sample import (
+    ComfyApiClient,
+    ComfyBatchSampleRequest,
+    ComfySampleRequest,
+    DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
+    DEFAULT_COMFY_WORKFLOW_PATH,
+    get_workflow_for_samples,
+    get_workflow_for_sample,
+    load_workflow,
+    workflow_path_is_template,
+)
 
 
 def _normalize_network_config(network_config, process_config):
@@ -111,6 +123,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.start_step = 0
         self.epoch_num = 0
         self.last_save_step = 0
+        self.last_save_path = None
         # start at 1 so we can do a sample at the start
         self.grad_accumulation_step = 1
         # if true, then we do not do an optimizer step. We are accumulating gradients
@@ -294,6 +307,400 @@ class BaseSDTrainProcess(BaseTrainProcess):
             move_optimizer_state_to_device(self.optimizer, self.device_torch)
             flush()
 
+    def _is_comfy_sampling_enabled(self):
+        sample_comfy = getattr(getattr(self, 'sample_config', None), 'comfy', None)
+        first_sample_comfy = getattr(getattr(self, 'first_sample_config', None), 'comfy', None)
+        return bool(
+            (sample_comfy is not None and sample_comfy.enabled) or
+            (first_sample_comfy is not None and first_sample_comfy.enabled)
+        )
+
+    def _get_comfy_config_for_unload(self):
+        sample_comfy = getattr(getattr(self, 'sample_config', None), 'comfy', None)
+        first_sample_comfy = getattr(getattr(self, 'first_sample_config', None), 'comfy', None)
+        if sample_comfy is not None and sample_comfy.enabled:
+            return sample_comfy
+        if first_sample_comfy is not None and first_sample_comfy.enabled:
+            return first_sample_comfy
+        return None
+
+    def _get_comfy_lora_display_filename(self, step=None):
+        lora_name = self.job.name
+        if self.named_lora:
+            lora_name += '_LoRA'
+        step_num = ''
+        if step is not None:
+            step_num = f"_{str(step).zfill(9)}"
+        return f'{lora_name}{step_num}.safetensors'
+
+    def _get_comfy_lora_output_path(self, step=None):
+        return os.path.abspath(os.path.join(self.save_root, self._get_comfy_lora_display_filename(step)))
+
+    def _cleanup_legacy_comfy_sample_loras(self, sample_folder):
+        for stale_path in glob.glob(os.path.join(sample_folder, f'.{self.job.name}*_comfy_current*.safetensors')):
+            try:
+                os.remove(stale_path)
+            except OSError as e:
+                print_acc(f"Failed to remove stale ComfyUI sample LoRA {stale_path}: {e}")
+
+    def _save_current_network_for_comfy(self, step=None):
+        if self.network is None:
+            return ''
+        os.makedirs(self.save_root, exist_ok=True)
+        file_path = self._get_comfy_lora_output_path(step)
+        if self.last_save_path == file_path and os.path.exists(file_path):
+            return file_path
+
+        self.update_training_metadata()
+        save_meta = get_meta_for_safetensors(copy.deepcopy(self.meta), self.job.name)
+        prev_multiplier = self.network.multiplier
+        self.network.multiplier = 1.0
+        try:
+            embedding_dict = self.embedding.state_dict() if self.embedding else None
+            self.network.save_weights(
+                file_path,
+                dtype=get_torch_dtype(self.save_config.dtype),
+                metadata=save_meta,
+                extra_state_dict=embedding_dict
+            )
+        finally:
+            self.network.multiplier = prev_multiplier
+        self.last_save_path = file_path
+        self.clean_up_saves()
+        return file_path
+
+    def _get_available_system_ram_bytes(self):
+        try:
+            import psutil
+            return psutil.virtual_memory().available
+        except Exception:
+            pass
+
+        try:
+            page_size = os.sysconf('SC_PAGE_SIZE')
+            available_pages = os.sysconf('SC_AVPHYS_PAGES')
+            return page_size * available_pages
+        except (AttributeError, ValueError, OSError):
+            return None
+
+    def _iter_comfy_offload_modules(self):
+        if getattr(self, 'sd', None) is None:
+            return
+
+        for attr_name in ('vae', 'unet', 'text_encoder', 'adapter', 'refiner_unet'):
+            module = getattr(self.sd, attr_name, None)
+            if module is None:
+                continue
+            if isinstance(module, list):
+                for item in module:
+                    if item is not None:
+                        yield item
+            else:
+                yield module
+
+    def _estimate_comfy_cpu_offload_bytes(self):
+        seen_tensors = set()
+        total_bytes = 0
+
+        def add_tensor(tensor):
+            nonlocal total_bytes
+            if not isinstance(tensor, torch.Tensor):
+                return
+            try:
+                if tensor.device.type == 'cpu':
+                    return
+            except Exception:
+                return
+            try:
+                tensor_id = (tensor.untyped_storage().data_ptr(), tensor.device, tensor.numel(), tensor.element_size())
+            except Exception:
+                tensor_id = id(tensor)
+            if tensor_id in seen_tensors:
+                return
+            seen_tensors.add(tensor_id)
+            try:
+                total_bytes += tensor.numel() * tensor.element_size()
+            except Exception:
+                pass
+
+        for module in self._iter_comfy_offload_modules() or []:
+            if not hasattr(module, 'parameters'):
+                continue
+            for parameter in module.parameters(recurse=True):
+                add_tensor(parameter)
+            if hasattr(module, 'buffers'):
+                for buffer in module.buffers(recurse=True):
+                    add_tensor(buffer)
+
+        return total_bytes
+
+    def _ensure_models_offloaded_for_comfy(self, client: Optional[ComfyApiClient] = None):
+        if getattr(self, 'sd', None) is None:
+            return
+
+        offload_bytes = self._estimate_comfy_cpu_offload_bytes()
+        available_bytes = self._get_available_system_ram_bytes()
+        if offload_bytes > 0 and available_bytes is not None:
+            ram_headroom = max(1024 ** 3, int(offload_bytes * 0.10))
+            if available_bytes < offload_bytes + ram_headroom:
+                print_acc(
+                    "System RAM is tight before ComfyUI sampling; asking ComfyUI "
+                    "to unload cached models before offloading trainer models"
+                )
+                if client is not None:
+                    client.unload_models(free_memory=True, ignore_errors=True)
+                gc.collect()
+                flush()
+
+        self.sd.set_device_state(copy.deepcopy(empty_preset))
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        flush()
+
+    def _log_comfy_sample_generation_time(self, elapsed_seconds: float, completed_samples: int, total_samples: int, step=None):
+        message = (
+            f"ComfyUI sample generation completed in {elapsed_seconds:.2f}s "
+            f"for {completed_samples}/{total_samples} sample(s)"
+        )
+        print_acc(message)
+        self._update_comfy_sample_status(message)
+        try:
+            update_db_key = getattr(self, 'update_db_key', None)
+            if callable(update_db_key):
+                update_db_key('info', message)
+        except Exception:
+            pass
+        try:
+            self.logger.log({
+                'comfy_sample_generation_seconds': elapsed_seconds,
+                'comfy_sample_generation_count': completed_samples,
+            })
+            self.logger.commit(step=step if step is not None else self.step_num)
+        except Exception as e:
+            print_acc(f"Failed to log ComfyUI sample generation time: {e}")
+
+    def _log_comfy_sample_generation_start(self, total_samples: int, batch: bool = False):
+        mode = "batch " if batch else ""
+        message = f"Starting ComfyUI {mode}sample generation for {total_samples} sample(s)"
+        print_acc(message)
+        self._update_comfy_sample_status(f"ComfyUI sampling - 0/{total_samples}")
+
+    def _log_comfy_prompt_submitted(
+            self,
+            prompt_id: str,
+            total_samples: int,
+            batch: bool = False,
+            sample_index: Optional[int] = None,
+    ):
+        mode = "batch " if batch else ""
+        if sample_index is None:
+            message = f"Submitted ComfyUI {mode}prompt {prompt_id}; waiting for {total_samples} sample(s)"
+        else:
+            message = (
+                f"Submitted ComfyUI prompt {prompt_id} for sample "
+                f"{sample_index}/{total_samples}; waiting"
+            )
+        print_acc(message)
+        self._update_comfy_sample_status(f"ComfyUI sampling - waiting for {total_samples} sample(s)")
+
+    def _update_comfy_sample_status(self, message: str):
+        update_status = getattr(self, 'update_status', None)
+        if not callable(update_status):
+            return
+        try:
+            update_status("running", message)
+        except Exception:
+            pass
+
+    def _run_with_models_offloaded_for_comfy(self, func):
+        if getattr(self, 'sd', None) is None:
+            return func()
+        self.sd.save_device_state()
+        try:
+            return func()
+        finally:
+            self.sd.restore_device_state()
+            flush()
+
+    def _get_comfy_workflow_path(self, comfy_config, batch=False):
+        workflow_path = comfy_config.workflow_path
+        if batch and workflow_path == DEFAULT_COMFY_WORKFLOW_PATH:
+            return DEFAULT_COMFY_BATCH_WORKFLOW_PATH
+        if not batch and workflow_path == DEFAULT_COMFY_BATCH_WORKFLOW_PATH:
+            return DEFAULT_COMFY_WORKFLOW_PATH
+        return workflow_path
+
+    def _can_render_comfy_sample_batch(self, gen_img_config_list: List[GenerateImageConfig]):
+        if len(gen_img_config_list) <= 1:
+            return False
+        first_config = gen_img_config_list[0]
+        for gen_config in gen_img_config_list[1:]:
+            if (
+                gen_config.width != first_config.width or
+                gen_config.height != first_config.height or
+                gen_config.num_inference_steps != first_config.num_inference_steps or
+                gen_config.guidance_scale != first_config.guidance_scale
+            ):
+                print_acc(
+                    "ComfyUI prompt batching requires matching width, height, "
+                    "sample steps, and CFG. Falling back to individual prompts."
+                )
+                return False
+        return True
+
+    def _render_comfy_samples(self, gen_img_config_list: List[GenerateImageConfig], sample_config: SampleConfig, step=None):
+        if len(gen_img_config_list) == 0:
+            return
+
+        sample_folder = os.path.join(self.save_root, 'samples')
+        self._cleanup_legacy_comfy_sample_loras(sample_folder)
+        training_lora_path = self._save_current_network_for_comfy(step=step)
+        training_lora_filename = self._get_comfy_lora_display_filename(step)
+        comfy_config = sample_config.comfy
+        workflow_path = self._get_comfy_workflow_path(comfy_config)
+        workflow = None
+        if not workflow_path_is_template(workflow_path):
+            workflow = load_workflow(workflow_path)
+        client = ComfyApiClient(
+            api_url=comfy_config.api_url,
+            timeout=comfy_config.timeout,
+        )
+
+        def render():
+            sample_generation_start = time.perf_counter()
+            completed_samples = 0
+            try:
+                self._log_comfy_sample_generation_start(len(gen_img_config_list), batch=False)
+                self._ensure_models_offloaded_for_comfy(client)
+                for i, gen_config in enumerate(gen_img_config_list):
+                    output_path = gen_config.get_image_path(i)
+                    output_stem = os.path.splitext(os.path.basename(output_path))[0]
+                    request = ComfySampleRequest(
+                        prompt=gen_config.prompt,
+                        width=gen_config.width,
+                        height=gen_config.height,
+                        steps=gen_config.num_inference_steps,
+                        cfg=gen_config.guidance_scale,
+                        seed=gen_config.seed,
+                        model=comfy_config.model,
+                        vae=comfy_config.vae,
+                        text_encoder=comfy_config.text_encoder,
+                        sampler=comfy_config.sampler,
+                        scheduler=comfy_config.scheduler,
+                        inference_lora=comfy_config.inference_lora,
+                        inference_lora_strength=comfy_config.inference_lora_strength,
+                        output_format=comfy_config.output_format,
+                        output_quality=comfy_config.output_quality,
+                        training_lora_path=training_lora_path,
+                        training_lora_filename=training_lora_filename,
+                        filename_prefix=f"ai-toolkit/{output_stem}",
+                    )
+                    patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)
+                    prompt_id = client.post_prompt(patched_workflow)
+                    self._log_comfy_prompt_submitted(
+                        prompt_id,
+                        len(gen_img_config_list),
+                        sample_index=i + 1,
+                    )
+                    images = client.wait_for_images(prompt_id)
+                    if len(images) == 0:
+                        raise RuntimeError(f"ComfyUI prompt {prompt_id} completed without image outputs")
+                    client.download_image(images[0], output_path)
+                    completed_samples += 1
+                    self.sample_step_hook(i, len(gen_img_config_list))
+                    self._update_comfy_sample_status(
+                        f"ComfyUI sampling - {completed_samples}/{len(gen_img_config_list)}"
+                    )
+                    flush()
+            finally:
+                elapsed_seconds = time.perf_counter() - sample_generation_start
+                self._log_comfy_sample_generation_time(
+                    elapsed_seconds,
+                    completed_samples,
+                    len(gen_img_config_list),
+                    step=step,
+                )
+                client.unload_models()
+
+        return self._run_with_models_offloaded_for_comfy(render)
+
+    def _render_comfy_sample_batch(self, gen_img_config_list: List[GenerateImageConfig], sample_config: SampleConfig, step=None):
+        if len(gen_img_config_list) == 0:
+            return
+
+        comfy_config = sample_config.comfy
+        workflow_path = self._get_comfy_workflow_path(comfy_config, batch=True)
+        if not workflow_path_is_template(workflow_path):
+            print_acc("ComfyUI prompt batching requires a .njk workflow template. Falling back to individual prompts.")
+            return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
+
+        sample_folder = os.path.join(self.save_root, 'samples')
+        self._cleanup_legacy_comfy_sample_loras(sample_folder)
+        training_lora_path = self._save_current_network_for_comfy(step=step)
+        training_lora_filename = self._get_comfy_lora_display_filename(step)
+        output_paths = [gen_config.get_image_path(i) for i, gen_config in enumerate(gen_img_config_list)]
+        first_output_stem = os.path.splitext(os.path.basename(output_paths[0]))[0]
+        first_config = gen_img_config_list[0]
+        request = ComfyBatchSampleRequest(
+            prompts=[gen_config.prompt for gen_config in gen_img_config_list],
+            width=first_config.width,
+            height=first_config.height,
+            steps=first_config.num_inference_steps,
+            cfg=first_config.guidance_scale,
+            seeds=[gen_config.seed for gen_config in gen_img_config_list],
+            model=comfy_config.model,
+            vae=comfy_config.vae,
+            text_encoder=comfy_config.text_encoder,
+            sampler=comfy_config.sampler,
+            scheduler=comfy_config.scheduler,
+            inference_lora=comfy_config.inference_lora,
+            inference_lora_strength=comfy_config.inference_lora_strength,
+            output_format=comfy_config.output_format,
+            output_quality=comfy_config.output_quality,
+            training_lora_path=training_lora_path,
+            training_lora_filename=training_lora_filename,
+            filename_prefix=f"ai-toolkit/{first_output_stem}_batch",
+        )
+        client = ComfyApiClient(
+            api_url=comfy_config.api_url,
+            timeout=comfy_config.timeout,
+        )
+
+        def render():
+            sample_generation_start = time.perf_counter()
+            completed_samples = 0
+            try:
+                patched_workflow = get_workflow_for_samples(workflow_path, request)
+                self._log_comfy_sample_generation_start(len(gen_img_config_list), batch=True)
+                self._ensure_models_offloaded_for_comfy(client)
+                prompt_id = client.post_prompt(patched_workflow)
+                self._log_comfy_prompt_submitted(prompt_id, len(gen_img_config_list), batch=True)
+                images = client.wait_for_images(prompt_id)
+                if len(images) < len(gen_img_config_list):
+                    raise RuntimeError(
+                        f"ComfyUI prompt {prompt_id} completed with {len(images)} image output(s), "
+                        f"expected {len(gen_img_config_list)}"
+                    )
+                for i, output_path in enumerate(output_paths):
+                    client.download_image(images[i], output_path)
+                    completed_samples += 1
+                    self.sample_step_hook(i, len(gen_img_config_list))
+                    self._update_comfy_sample_status(
+                        f"ComfyUI sampling - {completed_samples}/{len(gen_img_config_list)}"
+                    )
+                flush()
+            finally:
+                elapsed_seconds = time.perf_counter() - sample_generation_start
+                self._log_comfy_sample_generation_time(
+                    elapsed_seconds,
+                    completed_samples,
+                    len(gen_img_config_list),
+                    step=step,
+                )
+                client.unload_models()
+
+        return self._run_with_models_offloaded_for_comfy(render)
+
     def sample(self, step=None, is_first=False):
         if not self.accelerator.is_main_process:
             return
@@ -390,7 +797,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
             self.adapter.is_sampling = True
         
         # send to be generated
-        self.sd.generate_images(gen_img_config_list, sampler=sample_config.sampler)
+        if getattr(sample_config, 'comfy', None) is not None and sample_config.comfy.enabled:
+            if sample_config.comfy.send_prompts_as_batch and self._can_render_comfy_sample_batch(gen_img_config_list):
+                self._render_comfy_sample_batch(gen_img_config_list, sample_config, step=step)
+            else:
+                self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
+        else:
+            self.sd.generate_images(gen_img_config_list, sampler=sample_config.sampler)
 
         
         if self.adapter is not None and isinstance(self.adapter, CustomAdapter):
@@ -702,6 +1115,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             with open(path_to_save, 'w') as f:
                 json.dump(json_data, f, indent=4)
         
+        self.last_save_path = os.path.abspath(file_path)
         print_acc(f"Saved checkpoint to {file_path}")
 
         # save optimizer
@@ -728,8 +1142,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     # Called before the model is loaded
     def hook_before_model_load(self):
-        # override in subclass
-        pass
+        comfy_config = self._get_comfy_config_for_unload()
+        if self.accelerator.is_main_process and comfy_config is not None:
+            print_acc("Requesting ComfyUI model unload before training model load")
+            ComfyApiClient(api_url=comfy_config.api_url, timeout=10).unload_models(ignore_errors=True)
 
     def hook_after_model_load(self):
         # override in subclass

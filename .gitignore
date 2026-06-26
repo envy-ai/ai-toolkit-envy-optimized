@@ -171,6 +171,8 @@ cython_debug/
 /venv.*
 /config/*
 !/config/examples
+!/config/comfy_templates
+!/config/comfy_templates/**
 !/config/_PUT_YOUR_CONFIGS_HERE).txt
 /output/*
 !/output/.gitkeep

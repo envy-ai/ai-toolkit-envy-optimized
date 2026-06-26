@@ -1,6 +1,6 @@
 'use client';
 import { isMac } from '@/helpers/basic';
-import { defaultSampleConfig } from '@/helpers/defaultSamples';
+import { defaultComfySampleConfig, defaultSampleConfig } from '@/helpers/defaultSamples';
 import { JobConfig, SampleConfig, DatasetConfig, SliderConfig } from '@/types';
 
 export const defaultDatasetConfig: DatasetConfig = {
@@ -171,6 +171,15 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
 
   if (jobConfig.config.process[0]?.train?.min_snr_gamma === undefined) {
     jobConfig.config.process[0].train.min_snr_gamma = 5.0;
+  }
+
+  if (jobConfig.config.process[0]?.sample && jobConfig.config.process[0].sample.comfy === undefined) {
+    jobConfig.config.process[0].sample.comfy = { ...defaultComfySampleConfig };
+  } else if (jobConfig.config.process[0]?.sample?.comfy) {
+    jobConfig.config.process[0].sample.comfy = {
+      ...defaultComfySampleConfig,
+      ...jobConfig.config.process[0].sample.comfy,
+    };
   }
 
   return jobConfig;

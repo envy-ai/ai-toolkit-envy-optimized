@@ -308,13 +308,10 @@ class ToolkitModuleMixin:
 
         if self.__class__.__name__ == "DoRAModule":
             # ref https://github.com/huggingface/peft/blob/1e6d1d73a0850223b0916052fd8d2382a90eae5a/src/peft/tuners/lora/layer.py#L417
-            lora_weight = self.lora_up.weight @ self.lora_down.weight
-            # scale it here
             # todo handle our batch split scalers for slider training. For now take the mean of them
             scale = multiplier.mean()
-            scaled_lora_weight = lora_weight * scale
             if is_scalar_multiplier:
-                dora_scale = self.get_dora_scale(scaled_lora_weight)
+                dora_scale = self.get_dora_scale_from_low_rank(scale)
                 dora_scale = dora_scale.to(
                     org_forwarded.device,
                     dtype=org_forwarded.dtype,
@@ -332,6 +329,8 @@ class ToolkitModuleMixin:
                 lx = torch.nn.functional.dropout(x, p=self.dropout)
             else:
                 lx = x
+            lora_weight = self.lora_up.weight @ self.lora_down.weight
+            scaled_lora_weight = lora_weight * scale
             scaled_lora_output = scaled_lora_output + self.apply_dora(lx, scaled_lora_weight).to(org_forwarded.dtype)
 
         try:

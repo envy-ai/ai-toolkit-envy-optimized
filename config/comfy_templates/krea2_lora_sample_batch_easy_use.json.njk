@@ -1,0 +1,320 @@
+{
+  {% for prompt in prompts %}
+  "{{ 1000 + loop.index0 }}": {
+    "inputs": {
+      "value": {{ prompt | json }}
+    },
+    "class_type": "easy string",
+    "_meta": {
+      "title": "Prompt {{ loop.index }}"
+    }
+  },
+  {% endfor %}
+  {% for seed_value in seeds %}
+  "{{ 1100 + loop.index0 }}": {
+    "inputs": {
+      "value": {{ seed_value }}
+    },
+    "class_type": "easy int",
+    "_meta": {
+      "title": "Seed {{ loop.index }}"
+    }
+  },
+  {% endfor %}
+  {% for prompt in prompts %}
+  {% if loop.index0 > 0 %}
+  "{{ 1200 + loop.index0 - 1 }}": {
+    "inputs": {
+      "any_1": [
+        {% if loop.index0 == 1 %}"1000"{% else %}"{{ 1200 + loop.index0 - 2 }}"{% endif %},
+        0
+      ],
+      "any_2": [
+        "{{ 1000 + loop.index0 }}",
+        0
+      ]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {
+      "title": "Prompt List {{ loop.index }}"
+    }
+  },
+  {% endif %}
+  {% endfor %}
+  {% for seed_value in seeds %}
+  {% if loop.index0 > 0 %}
+  "{{ 1300 + loop.index0 - 1 }}": {
+    "inputs": {
+      "any_1": [
+        {% if loop.index0 == 1 %}"1100"{% else %}"{{ 1300 + loop.index0 - 2 }}"{% endif %},
+        0
+      ],
+      "any_2": [
+        "{{ 1100 + loop.index0 }}",
+        0
+      ]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {
+      "title": "Seed List {{ loop.index }}"
+    }
+  },
+  {% endif %}
+  {% endfor %}
+  "2": {
+    "inputs": {
+      "width": {{ width }},
+      "height": {{ height }},
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "3": {
+    "inputs": {
+      "samples": [
+        "17",
+        0
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "upscale": -1,
+      "tile": false,
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 4096,
+      "temporal_overlap": 64
+    },
+    "class_type": "VAEUtils_VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE Decode (VAE Utils)"
+    }
+  },
+  "4": {
+    "inputs": {
+      "unet_name": {{ model | json }},
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "5": {
+    "inputs": {
+      "clip_name": {{ text_encoder | json }},
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "6": {
+    "inputs": {
+      "vae_name": {{ vae | json }},
+      "disable_offload": true
+    },
+    "class_type": "VAEUtils_CustomVAELoader",
+    "_meta": {
+      "title": "Load VAE (VAE Utils)"
+    }
+  },
+  "7": {
+    "inputs": {
+      "conditioning": [
+        "71",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "17": {
+    "inputs": {
+      "seed": [
+        "73",
+        0
+      ],
+      "steps": {{ steps }},
+      "cfg": {{ cfg }},
+      "sampler_name": {{ sampler | json }},
+      "scheduler": {{ scheduler | json }},
+      "denoise": 1,
+      "model": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        0
+      ],
+      "positive": [
+        "71",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "23": {
+    "inputs": {
+      "filename_prefix": {{ filename_prefix | json }},
+      "subdirectory_name": "",
+      "output_format": {{ output_format | json }},
+      "quality": {{ output_quality | json }},
+      "metadata_scope": "full",
+      "include_batch_num": true,
+      "prefer_nearest": true,
+      "images": [
+        "50",
+        0
+      ]
+    },
+    "class_type": "SaveImageWithMetaData",
+    "_meta": {
+      "title": "Save Image With MetaData"
+    }
+  },
+  "36": {
+    "inputs": {
+      "absolute_path": {{ training_lora_path | json }},
+      "lora_strength": 1,
+      "model": [
+        "4",
+        0
+      ],
+      "clip": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "load_lora_from_absolute_path",
+    "_meta": {
+      "title": "Load LoRA From Absolute Path"
+    }
+  },
+  {% if inference_lora_enabled %}
+  "37": {
+    "inputs": {
+      "lora_name": {{ inference_lora | json }},
+      "strength_model": {{ inference_lora_strength }},
+      "strength_clip": {{ inference_lora_strength }},
+      "model": [
+        "36",
+        0
+      ],
+      "clip": [
+        "36",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Load LoRA (Model and CLIP)"
+    }
+  },
+  {% endif %}
+  "41": {
+    "inputs": {
+      "total": {{ sample_count }}
+    },
+    "class_type": "easy forLoopStart",
+    "_meta": {
+      "title": "For Loop Start"
+    }
+  },
+  "50": {
+    "inputs": {
+      "flow": [
+        "41",
+        0
+      ],
+      "initial_value1": [
+        "74",
+        0
+      ]
+    },
+    "class_type": "easy forLoopEnd",
+    "_meta": {
+      "title": "For Loop End"
+    }
+  },
+  "70": {
+    "inputs": {
+      "any": [
+        "{{ 1200 + sample_count - 2 }}",
+        0
+      ],
+      "index": [
+        "41",
+        1
+      ]
+    },
+    "class_type": "easy indexAnything",
+    "_meta": {
+      "title": "Prompt by Loop Index"
+    }
+  },
+  "71": {
+    "inputs": {
+      "text": [
+        "70",
+        0
+      ],
+      "clip": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "73": {
+    "inputs": {
+      "any": [
+        "{{ 1300 + sample_count - 2 }}",
+        0
+      ],
+      "index": [
+        "41",
+        1
+      ]
+    },
+    "class_type": "easy indexAnything",
+    "_meta": {
+      "title": "Seed by Loop Index"
+    }
+  },
+  "74": {
+    "inputs": {
+      "any_1": [
+        "41",
+        2
+      ],
+      "any_2": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {
+      "title": "Append Image to Batch"
+    }
+  }
+}

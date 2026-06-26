@@ -1,0 +1,216 @@
+{
+  "1": {
+    "inputs": {
+      "text": [
+        "39",
+        0
+      ],
+      "clip": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "2": {
+    "inputs": {
+      "width": {{ width }},
+      "height": {{ height }},
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "3": {
+    "inputs": {
+      "samples": [
+        "17",
+        0
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "upscale": -1,
+      "tile": false,
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 4096,
+      "temporal_overlap": 64
+    },
+    "class_type": "VAEUtils_VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE Decode (VAE Utils)"
+    }
+  },
+  "4": {
+    "inputs": {
+      "unet_name": {{ model | json }},
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "5": {
+    "inputs": {
+      "clip_name": {{ text_encoder | json }},
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "6": {
+    "inputs": {
+      "vae_name": {{ vae | json }},
+      "disable_offload": true
+    },
+    "class_type": "VAEUtils_CustomVAELoader",
+    "_meta": {
+      "title": "Load VAE (VAE Utils)"
+    }
+  },
+  "7": {
+    "inputs": {
+      "conditioning": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "17": {
+    "inputs": {
+      "seed": [
+        "26",
+        3
+      ],
+      "steps": {{ steps }},
+      "cfg": {{ cfg }},
+      "sampler_name": {{ sampler | json }},
+      "scheduler": {{ scheduler | json }},
+      "denoise": 1,
+      "model": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        0
+      ],
+      "positive": [
+        "1",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "23": {
+    "inputs": {
+      "filename_prefix": {{ filename_prefix | json }},
+      "subdirectory_name": "",
+      "output_format": {{ output_format | json }},
+      "quality": {{ output_quality | json }},
+      "metadata_scope": "full",
+      "include_batch_num": true,
+      "prefer_nearest": true,
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "SaveImageWithMetaData",
+    "_meta": {
+      "title": "Save Image With MetaData"
+    }
+  },
+  "26": {
+    "inputs": {
+      "seed": {{ seed }}
+    },
+    "class_type": "Seed",
+    "_meta": {
+      "title": "Seed"
+    }
+  },
+  "36": {
+    "inputs": {
+      "absolute_path": {{ training_lora_path | json }},
+      "lora_strength": 1,
+      "model": [
+        "4",
+        0
+      ],
+      "clip": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "load_lora_from_absolute_path",
+    "_meta": {
+      "title": "Load LoRA From Absolute Path"
+    }
+  },
+  {% if inference_lora_enabled %}
+  "37": {
+    "inputs": {
+      "lora_name": {{ inference_lora | json }},
+      "strength_model": {{ inference_lora_strength }},
+      "strength_clip": {{ inference_lora_strength }},
+      "model": [
+        "36",
+        0
+      ],
+      "clip": [
+        "36",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Load LoRA (Model and CLIP)"
+    }
+  },
+  {% endif %}
+  "38": {
+    "inputs": {
+      "label": "Text Output",
+      "text": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "Text to Console",
+    "_meta": {
+      "title": "Text to Console"
+    }
+  },
+  "39": {
+    "inputs": {
+      "text": {{ prompt | json }}
+    },
+    "class_type": "Text Multiline",
+    "_meta": {
+      "title": "Text Multiline"
+    }
+  }
+}

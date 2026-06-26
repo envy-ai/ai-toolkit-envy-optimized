@@ -200,6 +200,22 @@ export interface SampleItem {
   ctrl_img_3?: string | null;
 }
 
+export interface ComfySampleConfig {
+  enabled: boolean;
+  api_url: string;
+  workflow_path: string;
+  model: string;
+  vae: string;
+  text_encoder: string;
+  sampler: string;
+  scheduler: string;
+  inference_lora: string;
+  inference_lora_strength: number;
+  send_prompts_as_batch: boolean;
+  output_format: string;
+  output_quality: string;
+}
+
 export interface SampleConfig {
   sampler: string;
   sample_every: number;
@@ -214,6 +230,7 @@ export interface SampleConfig {
   sample_steps: number;
   num_frames: number;
   fps: number;
+  comfy: ComfySampleConfig;
 }
 
 export interface LoggingConfig {
