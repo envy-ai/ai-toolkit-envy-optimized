@@ -189,3 +189,4 @@ aitk_db.db
 /data
 .claude
 /tmp
+*.bak-*

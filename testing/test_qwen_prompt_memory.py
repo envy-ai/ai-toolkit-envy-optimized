@@ -247,7 +247,7 @@ class QwenPromptMemoryTests(unittest.TestCase):
             model.recorded_state["text_encoder"][0]["device"], torch.device("cuda")
         )
 
-    def test_quantized_module_cache_path_is_temporarily_disabled(self):
+    def test_quantized_module_cache_path_uses_stable_cache_key(self):
         model = BaseModel.__new__(BaseModel)
         model.model_config = SimpleNamespace(
             cache_quantized_models=True,
@@ -259,6 +259,25 @@ class QwenPromptMemoryTests(unittest.TestCase):
         cache_path = model.get_quantized_module_cache_path(
             component_name="transformer",
             qtype="uint6",
+            source_ref={"repo": "Qwen/Qwen-Image-2512"},
+        )
+
+        self.assertIsNotNone(cache_path)
+        self.assertIn("models/.quantized_training_cache/transformer-", cache_path)
+        self.assertTrue(cache_path.endswith(".pt"))
+
+    def test_quantized_module_cache_path_skips_text_encoder(self):
+        model = BaseModel.__new__(BaseModel)
+        model.model_config = SimpleNamespace(
+            cache_quantized_models=True,
+            quantized_model_cache_dir="models/.quantized_training_cache",
+        )
+        model.arch = "qwen_image"
+        model.dtype = "bf16"
+
+        cache_path = model.get_quantized_module_cache_path(
+            component_name="text_encoder",
+            qtype="qfloat8",
             source_ref={"repo": "Qwen/Qwen-Image-2512"},
         )
 

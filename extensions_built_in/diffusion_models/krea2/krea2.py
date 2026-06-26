@@ -180,13 +180,25 @@ class Krea2Model(BaseModel):
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
+    def _get_mmdit_config_kwargs(self):
+        mmdit_kwargs = dict(KREA2_MMDIT_CONFIG)
+        mmdit_kwargs.update(self.model_config.model_kwargs.get("mmdit_config", {}))
+        return mmdit_kwargs
+
+    def _get_transformer_cache_source_ref(self):
+        return {
+            "name_or_path": self.model_config.name_or_path,
+            "checkpoint_filename": self.model_config.model_kwargs.get(
+                "checkpoint_filename", None
+            ),
+            "mmdit_config": self._get_mmdit_config_kwargs(),
+        }
+
     def _load_transformer(self):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading transformer (SingleStreamDiT)")
 
-        mmdit_kwargs = dict(KREA2_MMDIT_CONFIG)
-        mmdit_kwargs.update(self.model_config.model_kwargs.get("mmdit_config", {}))
-        config = SingleMMDiTConfig(**mmdit_kwargs)
+        config = SingleMMDiTConfig(**self._get_mmdit_config_kwargs())
 
         # Build on meta, then materialize straight from the checkpoint.
         with torch.device("meta"):
@@ -244,12 +256,36 @@ class Krea2Model(BaseModel):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading Krea 2 model")
 
-        transformer = self._load_transformer()
+        transformer_cache_path = None
+        transformer = None
+        transformer_loaded_from_cache = False
 
         if self.model_config.quantize:
-            self.print_and_status_update("Quantizing transformer")
-            quantize_model(self, transformer)
-            flush()
+            transformer_cache_path = self.get_quantized_module_cache_path(
+                component_name="transformer",
+                qtype=self.model_config.qtype,
+                source_ref=self._get_transformer_cache_source_ref(),
+                extra_cache_key={
+                    "quantize_kwargs": self.model_config.quantize_kwargs,
+                    "target_lora_modules": getattr(self, "target_lora_modules", None),
+                },
+            )
+            transformer = self.load_quantized_module_cache(
+                transformer_cache_path, "transformer"
+            )
+            transformer_loaded_from_cache = transformer is not None
+
+        if transformer is None:
+            transformer = self._load_transformer()
+
+        if self.model_config.quantize:
+            if not transformer_loaded_from_cache:
+                self.print_and_status_update("Quantizing transformer")
+                quantize_model(self, transformer)
+                self.save_quantized_module_cache(
+                    transformer, transformer_cache_path, "transformer"
+                )
+                flush()
 
         if (
             self.model_config.layer_offloading
