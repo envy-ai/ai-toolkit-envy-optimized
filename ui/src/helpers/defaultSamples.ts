@@ -12,6 +12,9 @@ export const defaultComfySampleConfig: ComfySampleConfig = {
   inference_lora: '',
   inference_lora_strength: 1.0,
   send_prompts_as_batch: false,
+  run_in_background: false,
+  training_lora_path_replace_from: '',
+  training_lora_path_replace_to: '',
   output_format: 'webp_with_json',
   output_quality: 'high',
 };

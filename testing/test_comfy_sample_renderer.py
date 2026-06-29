@@ -9,6 +9,31 @@ from dataclasses import replace
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def install_config_module_import_stubs():
+    if "torch" not in sys.modules:
+        torch_stub = types.ModuleType("torch")
+        torch_stub.Tensor = object
+        sys.modules["torch"] = torch_stub
+    if "torchaudio" not in sys.modules:
+        torchaudio_stub = types.ModuleType("torchaudio")
+        torchaudio_stub.save = lambda *args, **kwargs: None
+        sys.modules["torchaudio"] = torchaudio_stub
+    if "torchao" not in sys.modules:
+        sys.modules["torchao"] = types.ModuleType("torchao")
+        sys.modules["torchao.quantization"] = types.ModuleType("torchao.quantization")
+        quant_primitives_stub = types.ModuleType("torchao.quantization.quant_primitives")
+        quant_primitives_stub._DTYPE_TO_BIT_WIDTH = {}
+        sys.modules["torchao.quantization.quant_primitives"] = quant_primitives_stub
+    if "toolkit.audio.album_artwork" not in sys.modules:
+        album_artwork_stub = types.ModuleType("toolkit.audio.album_artwork")
+        album_artwork_stub.add_album_artwork = lambda *args, **kwargs: None
+        sys.modules["toolkit.audio.album_artwork"] = album_artwork_stub
+    if "toolkit.prompt_utils" not in sys.modules:
+        prompt_utils_stub = types.ModuleType("toolkit.prompt_utils")
+        prompt_utils_stub.PromptEmbeds = object
+        sys.modules["toolkit.prompt_utils"] = prompt_utils_stub
+
+
 class ComfySampleWorkflowTests(unittest.TestCase):
     def setUp(self):
         from toolkit.comfy_sample import ComfySampleRequest
@@ -161,6 +186,9 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(rendered["37"]["inputs"]["strength_clip"], 0.35)
         self.assertEqual(rendered["23"]["inputs"]["output_format"], "webp_with_json")
         self.assertEqual(rendered["23"]["inputs"]["quality"], "high")
+        self.assertEqual(rendered["23"]["inputs"]["metadata_scope"], "full")
+        self.assertTrue(rendered["23"]["inputs"]["prefer_nearest"])
+        self.assertNotIn("file_format", rendered["23"]["inputs"])
         self.assertEqual(rendered["23"]["inputs"]["filename_prefix"], "ai-toolkit/sample_0001")
         self.assertEqual(rendered["23"]["inputs"]["images"], ["3", 0])
         self.assertNotIn("22", rendered)
@@ -226,6 +254,11 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(rendered["74"]["inputs"]["any_2"], ["3", 0])
         self.assertEqual(rendered["23"]["inputs"]["images"], ["50", 0])
         self.assertEqual(rendered["23"]["inputs"]["filename_prefix"], "ai-toolkit/sample_batch")
+        self.assertEqual(rendered["23"]["inputs"]["output_format"], "webp_with_json")
+        self.assertEqual(rendered["23"]["inputs"]["quality"], "high")
+        self.assertEqual(rendered["23"]["inputs"]["metadata_scope"], "full")
+        self.assertTrue(rendered["23"]["inputs"]["prefer_nearest"])
+        self.assertNotIn("file_format", rendered["23"]["inputs"])
         self.assertEqual(rendered["1000"]["inputs"]["value"], "first prompt")
         self.assertEqual(rendered["1001"]["inputs"]["value"], "second prompt")
         self.assertEqual(rendered["1100"]["inputs"]["value"], 123)
@@ -275,28 +308,7 @@ class ComfySampleWorkflowTests(unittest.TestCase):
 
 class ComfySampleConfigTests(unittest.TestCase):
     def test_sample_config_parses_comfy_settings(self):
-        if "torch" not in sys.modules:
-            torch_stub = types.ModuleType("torch")
-            torch_stub.Tensor = object
-            sys.modules["torch"] = torch_stub
-        if "torchaudio" not in sys.modules:
-            torchaudio_stub = types.ModuleType("torchaudio")
-            torchaudio_stub.save = lambda *args, **kwargs: None
-            sys.modules["torchaudio"] = torchaudio_stub
-        if "torchao" not in sys.modules:
-            sys.modules["torchao"] = types.ModuleType("torchao")
-            sys.modules["torchao.quantization"] = types.ModuleType("torchao.quantization")
-            quant_primitives_stub = types.ModuleType("torchao.quantization.quant_primitives")
-            quant_primitives_stub._DTYPE_TO_BIT_WIDTH = {}
-            sys.modules["torchao.quantization.quant_primitives"] = quant_primitives_stub
-        if "toolkit.audio.album_artwork" not in sys.modules:
-            album_artwork_stub = types.ModuleType("toolkit.audio.album_artwork")
-            album_artwork_stub.add_album_artwork = lambda *args, **kwargs: None
-            sys.modules["toolkit.audio.album_artwork"] = album_artwork_stub
-        if "toolkit.prompt_utils" not in sys.modules:
-            prompt_utils_stub = types.ModuleType("toolkit.prompt_utils")
-            prompt_utils_stub.PromptEmbeds = object
-            sys.modules["toolkit.prompt_utils"] = prompt_utils_stub
+        install_config_module_import_stubs()
 
         from toolkit.config_modules import SampleConfig
 
@@ -312,6 +324,9 @@ class ComfySampleConfigTests(unittest.TestCase):
                 "inference_lora": "turbo.safetensors",
                 "inference_lora_strength": 0.42,
                 "send_prompts_as_batch": True,
+                "run_in_background": True,
+                "training_lora_path_replace_from": "/mnt/train",
+                "training_lora_path_replace_to": "R:/train",
                 "output_format": "webp_with_json",
                 "output_quality": "high",
             }
@@ -323,6 +338,20 @@ class ComfySampleConfigTests(unittest.TestCase):
         self.assertEqual(sample.comfy.inference_lora, "turbo.safetensors")
         self.assertEqual(sample.comfy.inference_lora_strength, 0.42)
         self.assertTrue(sample.comfy.send_prompts_as_batch)
+        self.assertTrue(sample.comfy.run_in_background)
+        self.assertEqual(sample.comfy.training_lora_path_replace_from, "/mnt/train")
+        self.assertEqual(sample.comfy.training_lora_path_replace_to, "R:/train")
+
+    def test_comfy_background_sampling_defaults_to_disabled(self):
+        install_config_module_import_stubs()
+
+        from toolkit.config_modules import ComfySampleConfig
+
+        comfy = ComfySampleConfig()
+
+        self.assertFalse(comfy.run_in_background)
+        self.assertEqual(comfy.training_lora_path_replace_from, "")
+        self.assertEqual(comfy.training_lora_path_replace_to, "")
 
 
 class ComfyApiClientTests(unittest.TestCase):
@@ -437,6 +466,83 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         self.assertIn("if not batch and workflow_path == DEFAULT_COMFY_BATCH_WORKFLOW_PATH", workflow_source)
         self.assertIn("return DEFAULT_COMFY_WORKFLOW_PATH", workflow_source)
 
+    def test_train_process_can_run_comfy_sampling_in_background(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        single_start = source.index("def _render_comfy_samples")
+        batch_start = source.index("def _render_comfy_sample_batch")
+        sample_start = source.index("def sample", batch_start)
+        single_source = source[single_start:batch_start]
+        batch_source = source[batch_start:sample_start]
+        unload_start = source.index("def _get_comfy_config_for_unload")
+        unload_end = source.index("\n    def ", unload_start + 1)
+        unload_source = source[unload_start:unload_end]
+
+        self.assertIn("import threading", source)
+        self.assertIn("def _run_comfy_background_task", source)
+        self.assertIn("threading.Thread", source)
+        self.assertIn("if comfy_config.run_in_background:", single_source)
+        self.assertIn("if comfy_config.run_in_background:", batch_source)
+        self.assertIn("offload_models=False", single_source)
+        self.assertIn("unload_models=False", single_source)
+        self.assertIn("offload_models=False", batch_source)
+        self.assertIn("unload_models=False", batch_source)
+        self.assertIn("not sample_comfy.run_in_background", unload_source)
+
+    def test_train_process_tracks_and_waits_for_background_comfy_samples_at_shutdown(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        init_start = source.index("def __init__")
+        init_end = source.index("\n    def ", init_start + 1)
+        init_source = source[init_start:init_end]
+        task_start = source.index("def _run_comfy_background_task")
+        task_end = source.index("\n    def ", task_start + 1)
+        task_source = source[task_start:task_end]
+        run_end_start = source.index("##  END TRAIN LOOP")
+        run_end_end = source.index("\n    def push_to_hub", run_end_start)
+        run_end_source = source[run_end_start:run_end_end]
+
+        self.assertIn("self._comfy_background_threads = []", init_source)
+        self.assertIn("self._comfy_background_errors = []", init_source)
+        self.assertIn("self._comfy_background_threads.append(thread)", task_source)
+        self.assertIn("def _wait_for_comfy_background_tasks", source)
+        self.assertIn("def _release_training_memory_before_comfy_wait", source)
+
+        release_index = run_end_source.index("_release_training_memory_before_comfy_wait")
+        wait_index = run_end_source.index("_wait_for_comfy_background_tasks")
+        logger_finish_index = run_end_source.index("self.logger.finish()")
+        done_hook_index = run_end_source.index("self.done_hook()")
+
+        self.assertLess(release_index, wait_index)
+        self.assertLess(wait_index, logger_finish_index)
+        self.assertLess(logger_finish_index, done_hook_index)
+
+    def test_train_process_maps_comfy_training_lora_path_for_remote_api(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        method_start = source.index("def _get_comfy_training_lora_path")
+        method_end = source.index("\n    def ", method_start + 1)
+        method_source = source[method_start:method_end]
+        render_start = source.index("def _render_comfy_samples")
+        render_end = source.index("def sample", render_start)
+        render_source = source[render_start:render_end]
+
+        self.assertIn("training_lora_path_replace_from", method_source)
+        self.assertIn("training_lora_path_replace_to", method_source)
+        self.assertIn("training_lora_path.replace(replace_from, replace_to, 1)", method_source)
+        self.assertIn("comfy_training_lora_path = self._get_comfy_training_lora_path", render_source)
+        self.assertIn("training_lora_path=comfy_training_lora_path", render_source)
+
+
+class StableDiffusionModelTests(unittest.TestCase):
+    def test_inactive_inference_lora_is_offloaded_after_model_load(self):
+        source = (REPO_ROOT / "toolkit/stable_diffusion_model.py").read_text()
+        load_start = source.index("self.is_loaded = True")
+        inference_start = source.index("if self.model_config.inference_lora_path is not None:", load_start)
+        inference_end = source.index("if self.is_pixart", inference_start)
+        inference_source = source[inference_start:inference_end]
+
+        self.assertIn("load_assistant_lora_from_path", inference_source)
+        self.assertIn("self.assistant_lora.is_active = False", inference_source)
+        self.assertIn("self.assistant_lora.force_to('cpu', self.torch_dtype)", inference_source)
+
 
 class ComfySampleUITests(unittest.TestCase):
     def test_sample_card_exposes_comfy_controls(self):
@@ -455,6 +561,12 @@ class ComfySampleUITests(unittest.TestCase):
         self.assertIn('label="Inference LoRA Strength"', sample_section)
         self.assertIn('label="Comfy Inference LoRA"', sample_section)
         self.assertIn('label="Send Prompts as Batch"', sample_section)
+        self.assertIn('label="Run ComfyUI in Background"', sample_section)
+        self.assertIn("config.process[0].sample.comfy.run_in_background", sample_section)
+        self.assertIn('label="LoRA Path Replace From"', sample_section)
+        self.assertIn('label="LoRA Path Replace To"', sample_section)
+        self.assertIn("config.process[0].sample.comfy.training_lora_path_replace_from", sample_section)
+        self.assertIn("config.process[0].sample.comfy.training_lora_path_replace_to", sample_section)
         self.assertIn('label="Output Format"', sample_section)
         self.assertIn('label="Output Quality"', sample_section)
 

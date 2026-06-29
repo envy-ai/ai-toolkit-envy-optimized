@@ -1054,6 +1054,8 @@ class StableDiffusion:
                 self.model_config.inference_lora_path, self)
             # disable during training
             self.assistant_lora.is_active = False
+            # Keep inactive inference adapters out of VRAM until sample generation needs them.
+            self.assistant_lora.force_to('cpu', self.torch_dtype)
 
         if self.is_pixart and self.vae_scale_factor == 16:
             # TODO make our own pipeline?

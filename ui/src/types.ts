@@ -60,6 +60,14 @@ export interface GPUApiResponse {
  * Training configuration
  */
 
+export interface LayerLrMultiplierConfig {
+  match?: string | string[];
+  contains?: string | string[];
+  pattern?: string | string[];
+  multiplier: number;
+  regex?: boolean;
+}
+
 export interface NetworkConfig {
   type: string;
   linear: number;
@@ -69,7 +77,12 @@ export interface NetworkConfig {
   lokr_full_rank: boolean;
   lokr_factor: number;
   network_kwargs: {
-    ignore_if_contains: string[];
+    ignore_if_contains?: string[];
+    only_if_contains?: string[];
+    layer_lr_multipliers?: LayerLrMultiplierConfig[] | Record<string, number>;
+    lr_multipliers?: LayerLrMultiplierConfig[] | Record<string, number>;
+    block_lr_multipliers?: LayerLrMultiplierConfig[] | Record<string, number>;
+    [key: string]: any;
   };
   transformer_only?: boolean;
 }
@@ -212,6 +225,9 @@ export interface ComfySampleConfig {
   inference_lora: string;
   inference_lora_strength: number;
   send_prompts_as_batch: boolean;
+  run_in_background: boolean;
+  training_lora_path_replace_from: string;
+  training_lora_path_replace_to: string;
   output_format: string;
   output_quality: string;
 }

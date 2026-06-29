@@ -1484,6 +1484,24 @@ export default function SimpleJob({
                   checked={comfyConfig?.send_prompts_as_batch || false}
                   onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.send_prompts_as_batch')}
                 />
+                <Checkbox
+                  label="Run ComfyUI in Background"
+                  className="pt-6"
+                  checked={comfyConfig?.run_in_background || false}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.run_in_background')}
+                />
+                <TextInput
+                  label="LoRA Path Replace From"
+                  value={comfyConfig?.training_lora_path_replace_from || ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.training_lora_path_replace_from')}
+                  placeholder="/mnt/training"
+                />
+                <TextInput
+                  label="LoRA Path Replace To"
+                  value={comfyConfig?.training_lora_path_replace_to || ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.training_lora_path_replace_to')}
+                  placeholder="R:/training"
+                />
                 <CreatableSelectInput
                   label="Comfy Model"
                   value={comfyConfig?.model || ''}

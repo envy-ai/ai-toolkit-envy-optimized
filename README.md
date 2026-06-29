@@ -95,7 +95,7 @@ Optional ComfyUI sample renderer requirements:
 - The ComfyUI templates in `config/comfy_templates/` use core ComfyUI nodes plus a few custom node packs.
 - Both `krea2_lora_sample.json.njk` and `krea2_lora_sample_batch_easy_use.json.njk` require [ComfyUI-VAE-Utils](https://github.com/spacepxl/ComfyUI-VAE-Utils) for `VAEUtils_CustomVAELoader` and `VAEUtils_VAEDecodeTiled`.
 - Both templates require [envy-ai/load_lora_by_index](https://github.com/envy-ai/load_lora_by_index) for `load_lora_from_absolute_path`.
-- Both templates require a `SaveImageWithMetaData` node. [ComfyUI-SaveImageWithMetaData](https://github.com/nkchocoai/ComfyUI-SaveImageWithMetaData) provides it; [revived_comfyui_image_metadata_extension](https://github.com/santodan/revived_comfyui_image_metadata_extension) is also compatible.
+- Both templates require [comfyui_image_metadata_extension](https://github.com/edelvarden/comfyui_image_metadata_extension) for `SaveImageWithMetaData`. Disable other metadata saver packages that register the same node name if ComfyUI loads the wrong one.
 - `krea2_lora_sample.json.njk` also requires [WAS Node Suite](https://github.com/WASasquatch/was-node-suite-comfyui) for `Seed`, `Text Multiline`, and `Text to Console`.
 - `krea2_lora_sample_batch_easy_use.json.njk` also requires [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use) for the `easy *` loop, list, string, and integer nodes.
 
@@ -337,6 +337,41 @@ You can also exclude layers by their names by using `ignore_if_contains` network
 
 `ignore_if_contains` takes priority over `only_if_contains`. So if a weight is covered by both,
 if will be ignored.
+
+To train matched layers more slowly without disabling them, use `layer_lr_multipliers`.
+This creates separate optimizer parameter groups, so it changes the learning rate for
+matched LoRA/DoRA modules without changing the saved LoRA's inference strength.
+Rules are first-match-wins, and unmatched layers use `1.0`.
+
+```yaml
+      network:
+        type: "dora"
+        linear: 128
+        linear_alpha: 128
+        network_kwargs:
+          layer_lr_multipliers:
+            - match: "transformer.blocks.0."
+              multiplier: 0.1
+            - match: "transformer.blocks.1.ff"
+              multiplier: 0.25
+```
+
+The shorthand map form is also supported:
+
+```yaml
+      network:
+        type: "lora"
+        linear: 128
+        linear_alpha: 128
+        network_kwargs:
+          layer_lr_multipliers:
+            "transformer.blocks.0.": 0.1
+            "transformer.blocks.1.": 0.25
+```
+
+For advanced matching, a rule can set `regex: true`. The aliases `lr_multipliers`
+and `block_lr_multipliers` are accepted, but `layer_lr_multipliers` is the preferred
+name for new configs.
 
 ## LoKr Training
 

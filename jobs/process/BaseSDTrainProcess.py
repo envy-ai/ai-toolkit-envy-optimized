@@ -4,6 +4,7 @@ import inspect
 import json
 import random
 import shutil
+import threading
 import time
 from collections import OrderedDict
 import os
@@ -293,6 +294,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.steps_this_boundary = 0
         self.num_consecutive_oom = 0
         self.additional_logs = {}
+        self._comfy_background_threads = []
+        self._comfy_background_errors = []
 
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
@@ -318,9 +321,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def _get_comfy_config_for_unload(self):
         sample_comfy = getattr(getattr(self, 'sample_config', None), 'comfy', None)
         first_sample_comfy = getattr(getattr(self, 'first_sample_config', None), 'comfy', None)
-        if sample_comfy is not None and sample_comfy.enabled:
+        if sample_comfy is not None and sample_comfy.enabled and not sample_comfy.run_in_background:
             return sample_comfy
-        if first_sample_comfy is not None and first_sample_comfy.enabled:
+        if first_sample_comfy is not None and first_sample_comfy.enabled and not first_sample_comfy.run_in_background:
             return first_sample_comfy
         return None
 
@@ -335,6 +338,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def _get_comfy_lora_output_path(self, step=None):
         return os.path.abspath(os.path.join(self.save_root, self._get_comfy_lora_display_filename(step)))
+
+    def _get_comfy_training_lora_path(self, training_lora_path: str, comfy_config) -> str:
+        replace_from = getattr(comfy_config, 'training_lora_path_replace_from', '') or ''
+        replace_to = getattr(comfy_config, 'training_lora_path_replace_to', '') or ''
+        if not replace_from:
+            return training_lora_path
+        return training_lora_path.replace(replace_from, replace_to, 1)
 
     def _cleanup_legacy_comfy_sample_loras(self, sample_folder):
         for stale_path in glob.glob(os.path.join(sample_folder, f'.{self.job.name}*_comfy_current*.safetensors')):
@@ -503,6 +513,101 @@ class BaseSDTrainProcess(BaseTrainProcess):
         print_acc(message)
         self._update_comfy_sample_status(f"ComfyUI sampling - waiting for {total_samples} sample(s)")
 
+    def _run_comfy_background_task(self, render_func, total_samples: int, step=None, batch: bool = False):
+        mode = "batch " if batch else ""
+        message = (
+            f"Queued ComfyUI {mode}sample generation in background "
+            f"for {total_samples} sample(s)"
+        )
+        print_acc(message)
+        self._update_comfy_sample_status(message)
+
+        def run_background():
+            try:
+                render_func()
+            except Exception as e:
+                error_message = f"ComfyUI background sample generation failed: {e}"
+                print_acc(error_message)
+                self._update_comfy_sample_status(error_message)
+                self._comfy_background_errors.append(e)
+
+        thread = threading.Thread(
+            target=run_background,
+            name=f"{self.job.name}-comfy-samples-{step or 'latest'}",
+        )
+        thread.start()
+        self._comfy_background_threads.append(thread)
+        return thread
+
+    def _has_pending_comfy_background_tasks(self):
+        return any(thread.is_alive() for thread in self._comfy_background_threads)
+
+    def _wait_for_comfy_background_tasks(self, status_prefix: str = "Training complete"):
+        if len(self._comfy_background_threads) == 0:
+            return
+
+        pending_count = sum(1 for thread in self._comfy_background_threads if thread.is_alive())
+        if pending_count > 0:
+            message = (
+                f"{status_prefix}; waiting for {pending_count} ComfyUI "
+                f"sample task{'s' if pending_count != 1 else ''}"
+            )
+            print_acc(message)
+            self._update_comfy_sample_status(message)
+
+        for thread in list(self._comfy_background_threads):
+            thread.join()
+        self._comfy_background_threads.clear()
+
+        if len(self._comfy_background_errors) > 0:
+            print_acc("One or more ComfyUI background sample tasks failed after training completed")
+            for error in self._comfy_background_errors:
+                print_acc(str(error))
+            self._comfy_background_errors.clear()
+
+    def _release_training_memory_before_comfy_wait(self, status_prefix: str = "Training complete"):
+        if self._has_pending_comfy_background_tasks():
+            message = f"{status_prefix}; freeing local training memory before waiting for ComfyUI samples"
+            print_acc(message)
+            self._update_comfy_sample_status(message)
+
+        sd = getattr(self, 'sd', None)
+        if sd is not None:
+            try:
+                sd.set_device_state(copy.deepcopy(empty_preset))
+            except Exception as e:
+                print_acc(f"Failed to offload training model before ComfyUI wait: {e}")
+
+        if self.optimizer is not None:
+            try:
+                move_optimizer_state_to_device(self.optimizer, 'cpu')
+            except Exception as e:
+                print_acc(f"Failed to offload optimizer state before ComfyUI wait: {e}")
+
+        self.sd = None
+        self.network = None
+        self.adapter = None
+        self.embedding = None
+        self.decorator = None
+        self.optimizer = None
+        self.lr_scheduler = None
+        self.data_loader = None
+        self.data_loader_reg = None
+        self.params = []
+        self.modules_being_trained = []
+        gc.collect()
+        flush()
+
+    def on_error(self, e: Exception):
+        super().on_error(e)
+        if isinstance(e, KeyboardInterrupt):
+            return
+        try:
+            self._release_training_memory_before_comfy_wait(status_prefix="Training stopped")
+            self._wait_for_comfy_background_tasks(status_prefix="Training stopped")
+        except Exception as wait_error:
+            print_acc(f"Failed while waiting for ComfyUI background samples after error: {wait_error}")
+
     def _update_comfy_sample_status(self, message: str):
         update_status = getattr(self, 'update_status', None)
         if not callable(update_status):
@@ -557,6 +662,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         training_lora_path = self._save_current_network_for_comfy(step=step)
         training_lora_filename = self._get_comfy_lora_display_filename(step)
         comfy_config = sample_config.comfy
+        comfy_training_lora_path = self._get_comfy_training_lora_path(training_lora_path, comfy_config)
         workflow_path = self._get_comfy_workflow_path(comfy_config)
         workflow = None
         if not workflow_path_is_template(workflow_path):
@@ -566,12 +672,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
             timeout=comfy_config.timeout,
         )
 
-        def render():
+        def render(offload_models=True, unload_models=True):
             sample_generation_start = time.perf_counter()
             completed_samples = 0
             try:
                 self._log_comfy_sample_generation_start(len(gen_img_config_list), batch=False)
-                self._ensure_models_offloaded_for_comfy(client)
+                if offload_models:
+                    self._ensure_models_offloaded_for_comfy(client)
                 for i, gen_config in enumerate(gen_img_config_list):
                     output_path = gen_config.get_image_path(i)
                     output_stem = os.path.splitext(os.path.basename(output_path))[0]
@@ -591,7 +698,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         inference_lora_strength=comfy_config.inference_lora_strength,
                         output_format=comfy_config.output_format,
                         output_quality=comfy_config.output_quality,
-                        training_lora_path=training_lora_path,
+                        training_lora_path=comfy_training_lora_path,
                         training_lora_filename=training_lora_filename,
                         filename_prefix=f"ai-toolkit/{output_stem}",
                     )
@@ -620,8 +727,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     len(gen_img_config_list),
                     step=step,
                 )
-                client.unload_models()
+                if unload_models:
+                    client.unload_models()
 
+        if comfy_config.run_in_background:
+            return self._run_comfy_background_task(
+                lambda: render(offload_models=False, unload_models=False),
+                len(gen_img_config_list),
+                step=step,
+                batch=False,
+            )
         return self._run_with_models_offloaded_for_comfy(render)
 
     def _render_comfy_sample_batch(self, gen_img_config_list: List[GenerateImageConfig], sample_config: SampleConfig, step=None):
@@ -638,6 +753,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self._cleanup_legacy_comfy_sample_loras(sample_folder)
         training_lora_path = self._save_current_network_for_comfy(step=step)
         training_lora_filename = self._get_comfy_lora_display_filename(step)
+        comfy_training_lora_path = self._get_comfy_training_lora_path(training_lora_path, comfy_config)
         output_paths = [gen_config.get_image_path(i) for i, gen_config in enumerate(gen_img_config_list)]
         first_output_stem = os.path.splitext(os.path.basename(output_paths[0]))[0]
         first_config = gen_img_config_list[0]
@@ -657,7 +773,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             inference_lora_strength=comfy_config.inference_lora_strength,
             output_format=comfy_config.output_format,
             output_quality=comfy_config.output_quality,
-            training_lora_path=training_lora_path,
+            training_lora_path=comfy_training_lora_path,
             training_lora_filename=training_lora_filename,
             filename_prefix=f"ai-toolkit/{first_output_stem}_batch",
         )
@@ -666,13 +782,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
             timeout=comfy_config.timeout,
         )
 
-        def render():
+        def render(offload_models=True, unload_models=True):
             sample_generation_start = time.perf_counter()
             completed_samples = 0
             try:
                 patched_workflow = get_workflow_for_samples(workflow_path, request)
                 self._log_comfy_sample_generation_start(len(gen_img_config_list), batch=True)
-                self._ensure_models_offloaded_for_comfy(client)
+                if offload_models:
+                    self._ensure_models_offloaded_for_comfy(client)
                 prompt_id = client.post_prompt(patched_workflow)
                 self._log_comfy_prompt_submitted(prompt_id, len(gen_img_config_list), batch=True)
                 images = client.wait_for_images(prompt_id)
@@ -697,8 +814,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     len(gen_img_config_list),
                     step=step,
                 )
-                client.unload_models()
+                if unload_models:
+                    client.unload_models()
 
+        if comfy_config.run_in_background:
+            return self._run_comfy_background_task(
+                lambda: render(offload_models=False, unload_models=False),
+                len(gen_img_config_list),
+                step=step,
+                batch=True,
+            )
         return self._run_with_models_offloaded_for_comfy(render)
 
     def sample(self, step=None, is_first=False):
@@ -3044,6 +3169,17 @@ class BaseSDTrainProcess(BaseTrainProcess):
         print_acc("")
         if self.accelerator.is_main_process:
             self.save()
+
+        self._release_training_memory_before_comfy_wait()
+        unet = None
+        noise_scheduler = None
+        optimizer = None
+        tokenizer = None
+        text_encoder = None
+
+        self._wait_for_comfy_background_tasks()
+
+        if self.accelerator.is_main_process:
             self.logger.finish()
         self.accelerator.end_training()
 
@@ -3056,16 +3192,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     repo_id=self.save_config.hf_repo_id,
                     private=self.save_config.hf_private
                 )
-        del (
-            self.sd,
-            unet,
-            noise_scheduler,
-            optimizer,
-            self.network,
-            tokenizer,
-            text_encoder,
-        )
-
         flush()
         self.done_hook()
 

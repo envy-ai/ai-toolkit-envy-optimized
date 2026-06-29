@@ -5,7 +5,7 @@ import weakref
 import os
 import re
 import sys
-from typing import List, Optional, Dict, Type, Union
+from typing import Any, List, Optional, Dict, Type, Union
 import torch
 from diffusers import UNet2DConditionModel, PixArtTransformer2DModel, AuraFlowTransformer2DModel, WanTransformer3DModel
 from transformers import CLIPTextModel
@@ -254,6 +254,12 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
         self.is_assistant_adapter = is_assistant_adapter
         self.full_rank = network_type.lower() == "fullrank"
         self.is_ara = is_ara
+        self.layer_lr_multipliers = self._normalize_layer_lr_multipliers(
+            kwargs.get(
+                "layer_lr_multipliers",
+                kwargs.get("lr_multipliers", kwargs.get("block_lr_multipliers", None)),
+            )
+        )
         if self.network_type.lower() == "dora":
             self.module_class = DoRAModule
             module_class = DoRAModule
@@ -454,6 +460,7 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                                 use_bias=use_bias,
                                 **module_kwargs
                             )
+                            lora.ai_toolkit_clean_name = clean_name
                             loras.append(lora)
                             if self.network_type.lower() == "lokr":
                                 try:
@@ -580,9 +587,118 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                 unet.conv_in = self.unet_conv_in
                 unet.conv_out = self.unet_conv_out
 
+    @staticmethod
+    def _normalize_layer_lr_multipliers(raw_rules: Any) -> List[Dict[str, Any]]:
+        if raw_rules is None:
+            return []
+
+        if isinstance(raw_rules, dict):
+            if any(key in raw_rules for key in ("match", "contains", "pattern")):
+                raw_entries = [raw_rules]
+            else:
+                raw_entries = [
+                    {"match": match, "multiplier": multiplier}
+                    for match, multiplier in raw_rules.items()
+                ]
+        elif isinstance(raw_rules, list):
+            raw_entries = raw_rules
+        else:
+            raise ValueError("layer_lr_multipliers must be a list or dictionary")
+
+        rules = []
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                raise ValueError("Each layer_lr_multipliers entry must be a dictionary")
+
+            matcher = entry.get("match", entry.get("contains", entry.get("pattern", None)))
+            multiplier = entry.get("multiplier", entry.get("lr_multiplier", entry.get("scale", None)))
+            if matcher is None:
+                raise ValueError("Each layer_lr_multipliers entry must include match, contains, or pattern")
+            if multiplier is None:
+                raise ValueError("Each layer_lr_multipliers entry must include multiplier")
+
+            if isinstance(matcher, str):
+                matchers = [matcher]
+            elif isinstance(matcher, list):
+                matchers = matcher
+            else:
+                raise ValueError("layer_lr_multipliers match must be a string or list of strings")
+
+            use_regex = bool(entry.get("regex", False))
+            for match in matchers:
+                match = str(match)
+                rule = {
+                    "match": match,
+                    "multiplier": float(multiplier),
+                    "regex": use_regex,
+                }
+                if use_regex:
+                    rule["compiled"] = re.compile(match)
+                rules.append(rule)
+
+        return rules
+
+    @staticmethod
+    def _lora_match_names(lora) -> List[str]:
+        names = [
+            lora.lora_name,
+            lora.lora_name.replace("$$", "."),
+        ]
+        clean_name = getattr(lora, "ai_toolkit_clean_name", None)
+        if clean_name is not None:
+            names.append(clean_name)
+        if "$$" not in lora.lora_name:
+            names.append(lora.lora_name.replace("_", "."))
+
+        return list(dict.fromkeys(names))
+
+    def get_lora_lr_multiplier(self, lora) -> float:
+        for rule in self.layer_lr_multipliers:
+            for name in self._lora_match_names(lora):
+                if rule["regex"]:
+                    if rule["compiled"].search(name):
+                        return rule["multiplier"]
+                elif rule["match"] in name:
+                    return rule["multiplier"]
+        return 1.0
+
+    def _append_layer_lr_param_groups(self, all_params, loras, base_lr):
+        multiplier_to_params = {}
+        for lora in loras:
+            multiplier = self.get_lora_lr_multiplier(lora)
+            if multiplier not in multiplier_to_params:
+                multiplier_to_params[multiplier] = []
+            multiplier_to_params[multiplier].extend(lora.parameters())
+
+        for multiplier, params in multiplier_to_params.items():
+            param_data = {"params": params}
+            if base_lr is not None:
+                param_data["lr"] = base_lr * multiplier
+            all_params.append(param_data)
+
     def prepare_optimizer_params(self, text_encoder_lr, unet_lr, default_lr):
-        # call Lora prepare_optimizer_params
-        all_params = super().prepare_optimizer_params(text_encoder_lr, unet_lr, default_lr)
+        if self.layer_lr_multipliers:
+            self.requires_grad_(True)
+            all_params = []
+
+            if self.text_encoder_loras:
+                text_base_lr = text_encoder_lr if text_encoder_lr is not None else default_lr
+                self._append_layer_lr_param_groups(
+                    all_params,
+                    self.text_encoder_loras,
+                    text_base_lr,
+                )
+
+            if self.unet_loras:
+                unet_base_lr = unet_lr if unet_lr is not None else default_lr
+                self._append_layer_lr_param_groups(
+                    all_params,
+                    self.unet_loras,
+                    unet_base_lr,
+                )
+        else:
+            # call Lora prepare_optimizer_params
+            all_params = super().prepare_optimizer_params(text_encoder_lr, unet_lr, default_lr)
 
         if self.full_train_in_out:
             base_model = self.base_model_ref() if self.base_model_ref is not None else None
