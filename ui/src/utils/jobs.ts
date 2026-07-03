@@ -91,6 +91,7 @@ export const getAvaliableJobActions = (job: Job) => {
   const isStopping = job.stop && job.status === 'running';
   const canDelete = ['queued', 'completed', 'stopped', 'error'].includes(job.status) && !isStopping;
   let canEdit = ['queued', 'completed', 'stopped', 'error'].includes(job.status) && !isStopping;
+  const canEditSamples = job.job_type === 'train' && job.status === 'running' && !isStopping;
   const canRemoveFromQueue = job.status === 'queued';
   const canStop = job.status === 'running' && !isStopping;
   let canStart = ['stopped', 'error'].includes(job.status) && !isStopping;
@@ -98,7 +99,7 @@ export const getAvaliableJobActions = (job: Job) => {
   if (job.status === 'completed' && (jobConfig.config.process[0].train?.steps || 0) > job.step && !isStopping) {
     canStart = true;
   }
-  return { canDelete, canEdit, canStop, canStart, canRemoveFromQueue };
+  return { canDelete, canEdit, canEditSamples, canStop, canStart, canRemoveFromQueue };
 };
 
 export const getNumberOfSamples = (job: Job) => {

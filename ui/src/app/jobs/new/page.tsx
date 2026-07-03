@@ -27,6 +27,7 @@ export default function TrainingForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const runId = searchParams.get('id');
+  const sampleOnlyMode = searchParams.get('sampleOnly') === '1';
   const cloneId = searchParams.get('cloneId');
   const [gpuIDs, setGpuIDs] = useState<string | null>(null);
   const { settings, isSettingsLoaded } = useSettings();
@@ -158,6 +159,7 @@ export default function TrainingForm() {
         name: jobConfig.config.name,
         gpu_ids: gpuIDs,
         job_config: jobConfig,
+        sample_only: sampleOnlyMode,
       })
       .then(res => {
         setStatus('success');
@@ -197,11 +199,11 @@ export default function TrainingForm() {
         </div>
         <div className="flex-shrink-0">
           <h1 className="text-base sm:text-lg truncate max-w-[120px] sm:max-w-none">
-            {runId ? 'Edit Training Job' : 'New Training Job'}
+            {sampleOnlyMode ? 'Edit Sample Settings' : runId ? 'Edit Training Job' : 'New Training Job'}
           </h1>
         </div>
         <div className="flex-1"></div>
-        {showAdvancedView && (
+        {!sampleOnlyMode && showAdvancedView && (
           <>
             <div className="hidden sm:block">
               <SelectInput
@@ -219,31 +221,25 @@ export default function TrainingForm() {
             <div className="hidden md:block mx-4 bg-gray-200 dark:bg-gray-800 w-1 h-6"></div>
           </>
         )}
-        {!showAdvancedView && (
+        {!sampleOnlyMode && !showAdvancedView && (
           <>
             <div className="hidden sm:block">
               <SelectInput
                 value={`${jobConfig?.config.process[0].type}`}
                 onChange={value => {
-                  // undo current job type changes
+                  let nextConfig = objectCopy(jobConfig);
                   const currentOption = jobTypeOptions.find(
-                    option => option.value === jobConfig?.config.process[0].type,
+                    option => option.value === nextConfig?.config.process[0].type,
                   );
-                  if (currentOption && currentOption.onDeactivate) {
-                    setJobConfig(currentOption.onDeactivate(objectCopy(jobConfig)));
+                  if (currentOption?.onDeactivate) {
+                    nextConfig = currentOption.onDeactivate(nextConfig);
                   }
                   const option = jobTypeOptions.find(option => option.value === value);
-                  if (option) {
-                    if (option.onActivate) {
-                      setJobConfig(option.onActivate(objectCopy(jobConfig)));
-                    }
-                    jobTypeOptions.forEach(opt => {
-                      if (opt.value !== option.value && opt.onDeactivate) {
-                        setJobConfig(opt.onDeactivate(objectCopy(jobConfig)));
-                      }
-                    });
+                  if (option?.onActivate) {
+                    nextConfig = option.onActivate(nextConfig);
                   }
-                  setJobConfig(value, 'config.process[0].type');
+                  nextConfig.config.process[0].type = value;
+                  setJobConfig(nextConfig);
                 }}
                 options={jobTypeOptions}
               />
@@ -252,15 +248,17 @@ export default function TrainingForm() {
           </>
         )}
 
-        <div className="pr-1 sm:pr-2 flex-shrink-0">
-          <Button
-            className="text-gray-200 bg-gray-800 px-2 sm:px-3 py-1 rounded-md text-xs sm:text-base"
-            onClick={() => setShowAdvancedView(!showAdvancedView)}
-          >
-            <span className="sm:hidden">{showAdvancedView ? 'Simple' : 'Advanced'}</span>
-            <span className="hidden sm:inline">{showAdvancedView ? 'Show Simple' : 'Show Advanced'}</span>
-          </Button>
-        </div>
+        {!sampleOnlyMode && (
+          <div className="pr-1 sm:pr-2 flex-shrink-0">
+            <Button
+              className="text-gray-200 bg-gray-800 px-2 sm:px-3 py-1 rounded-md text-xs sm:text-base"
+              onClick={() => setShowAdvancedView(!showAdvancedView)}
+            >
+              <span className="sm:hidden">{showAdvancedView ? 'Simple' : 'Advanced'}</span>
+              <span className="hidden sm:inline">{showAdvancedView ? 'Show Simple' : 'Show Advanced'}</span>
+            </Button>
+          </div>
+        )}
         <div className="flex-shrink-0">
           <Button
             className="text-white bg-green-600 hover:bg-green-700 px-2 sm:px-3 py-1 rounded-md text-xs sm:text-base"
@@ -272,7 +270,9 @@ export default function TrainingForm() {
             ) : (
               <>
                 <span className="sm:hidden">{runId ? 'Update' : 'Create'}</span>
-                <span className="hidden sm:inline">{runId ? 'Update Job' : 'Create Job'}</span>
+                <span className="hidden sm:inline">
+                  {sampleOnlyMode ? 'Update Samples' : runId ? 'Update Job' : 'Create Job'}
+                </span>
               </>
             )}
           </Button>
@@ -287,7 +287,7 @@ export default function TrainingForm() {
         onChange={handleFileSelected}
       />
 
-      {showAdvancedView ? (
+      {!sampleOnlyMode && showAdvancedView ? (
         <div className="pt-[48px] absolute top-0 left-0 w-full h-full overflow-auto">
           <AdvancedConfigEditor
             config={jobConfig}
@@ -324,6 +324,7 @@ export default function TrainingForm() {
               setGpuIDs={setGpuIDs}
               gpuList={gpuList}
               datasetOptions={datasetOptions}
+              sampleOnlyMode={sampleOnlyMode}
               isLoading={!isSettingsLoaded || !isGPUInfoLoaded || datasetFetchStatus !== 'success'}
             />
           </ErrorBoundary>

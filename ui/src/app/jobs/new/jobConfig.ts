@@ -29,6 +29,17 @@ export const defaultSliderConfig: SliderConfig = {
   negative_prompt: 'person who is sad',
   target_class: 'person',
   anchor_class: '',
+  resolutions: [[1024, 1024]],
+  batch_full_slide: false,
+  targets: [
+    {
+      target_class: 'person',
+      positive: 'person who is happy',
+      negative: 'person who is sad',
+      weight: 1.0,
+      shuffle: false,
+    },
+  ],
 };
 
 export const defaultCompileOptions = {
@@ -55,6 +66,7 @@ export const defaultJobConfig: JobConfig = {
           conv_alpha: 16,
           lokr_full_rank: true,
           lokr_factor: -1,
+          save_magnitude_less_lora: false,
           network_kwargs: {
             ignore_if_contains: [],
           },
@@ -171,6 +183,18 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
 
   if (jobConfig.config.process[0]?.train?.min_snr_gamma === undefined) {
     jobConfig.config.process[0].train.min_snr_gamma = 5.0;
+  }
+
+  if (jobConfig.config.process[0]?.slider && !jobConfig.config.process[0].slider?.targets) {
+    jobConfig.config.process[0].slider.targets = [
+      {
+        target_class: jobConfig.config.process[0].slider.target_class ?? '',
+        positive: jobConfig.config.process[0].slider.positive_prompt ?? '',
+        negative: jobConfig.config.process[0].slider.negative_prompt ?? '',
+        weight: 1.0,
+        shuffle: false,
+      },
+    ];
   }
 
   if (jobConfig.config.process[0]?.sample && jobConfig.config.process[0].sample.comfy === undefined) {

@@ -1,5 +1,5 @@
 import { GroupedSelectOption, SelectOption, JobConfig } from '@/types';
-import { defaultSliderConfig } from './jobConfig';
+import { defaultDatasetConfig, defaultSliderConfig } from './jobConfig';
 import { defaultAudioSampleConfig, defaultSampleConfig, defaultIdeogramSamplesConfig } from '@/helpers/defaultSamples';
 
 type Control = 'depth' | 'line' | 'pose' | 'inpaint';
@@ -13,6 +13,7 @@ type DisableableSections =
   | 'train.diff_output_preservation'
   | 'train.blank_prompt_preservation'
   | 'train.unload_text_encoder'
+  | 'datasets'
   | 'slider';
 
 type AdditionalSections =
@@ -1157,6 +1158,28 @@ export const jobTypeOptions: JobTypeOption[] = [
     disableSections: ['slider'],
   },
   {
+    value: 'slider',
+    label: 'Slider LoRA',
+    disableSections: ['datasets', 'trigger_word', 'train.diff_output_preservation'],
+    onActivate: (config: JobConfig) => {
+      config.config.process[0].slider = { ...defaultSliderConfig };
+      config.config.process[0].datasets = [];
+      config.config.process[0].train.unload_text_encoder = true;
+      config.config.process[0].train.cache_text_embeddings = false;
+      config.config.process[0].train.max_denoising_steps = config.config.process[0].sample.sample_steps ?? 12;
+      return config;
+    },
+    onDeactivate: (config: JobConfig) => {
+      if (config.config.process[0].type === 'slider') {
+        delete config.config.process[0].slider;
+        if (!config.config.process[0].datasets || config.config.process[0].datasets.length === 0) {
+          config.config.process[0].datasets = [{ ...defaultDatasetConfig }];
+        }
+      }
+      return config;
+    },
+  },
+  {
     value: 'concept_slider',
     label: 'Concept Slider',
     disableSections: ['trigger_word', 'train.diff_output_preservation'],
@@ -1167,7 +1190,9 @@ export const jobTypeOptions: JobTypeOption[] = [
     },
     onDeactivate: (config: JobConfig) => {
       // remove slider config
-      delete config.config.process[0].slider;
+      if (config.config.process[0].type === 'concept_slider') {
+        delete config.config.process[0].slider;
+      }
       return config;
     },
   },

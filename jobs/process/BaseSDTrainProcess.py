@@ -155,6 +155,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         else:
             self.has_first_sample_requested = False
             self.first_sample_config = self.sample_config
+        self._live_sample_config_mtime = None
         self.logging_config = LoggingConfig(**self.get_conf('logging', {}))
         self.logger = create_logger(self.logging_config, config, self.save_root)
         self.optimizer: torch.optim.Optimizer = None
@@ -310,6 +311,35 @@ class BaseSDTrainProcess(BaseTrainProcess):
             move_optimizer_state_to_device(self.optimizer, self.device_torch)
             flush()
 
+    def _refresh_live_sample_config(self):
+        config_path = getattr(self.job, 'config_path', None)
+        if not config_path:
+            return
+
+        try:
+            current_mtime = os.path.getmtime(config_path)
+            if self._live_sample_config_mtime == current_mtime:
+                return
+
+            from toolkit.config import get_config
+            live_config = get_config(config_path)
+            process_config = live_config['config']['process'][self.process_id]
+            self.sample_config = SampleConfig(**process_config.get('sample', {}))
+
+            first_sample_config = process_config.get('first_sample', None)
+            if first_sample_config is not None:
+                self.first_sample_config = SampleConfig(**first_sample_config)
+            else:
+                self.first_sample_config = self.sample_config
+
+            train_config = process_config.get('train', {})
+            if 'disable_sampling' in train_config:
+                self.train_config.disable_sampling = train_config['disable_sampling']
+
+            self._live_sample_config_mtime = current_mtime
+        except Exception as e:
+            print_acc(f"Failed to refresh live sample config from {config_path}: {e}")
+
     def _is_comfy_sampling_enabled(self):
         sample_comfy = getattr(getattr(self, 'sample_config', None), 'comfy', None)
         first_sample_comfy = getattr(getattr(self, 'first_sample_config', None), 'comfy', None)
@@ -371,7 +401,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 file_path,
                 dtype=get_torch_dtype(self.save_config.dtype),
                 metadata=save_meta,
-                extra_state_dict=embedding_dict
+                extra_state_dict=embedding_dict,
+                save_magnitude_less_lora=self.network.network_config.save_magnitude_less_lora
             )
         finally:
             self.network.multiplier = prev_multiplier
@@ -829,6 +860,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def sample(self, step=None, is_first=False):
         if not self.accelerator.is_main_process:
             return
+        self._refresh_live_sample_config()
         flush()
         sample_folder = os.path.join(self.save_root, 'samples')
         gen_img_config_list = []
@@ -978,7 +1010,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
             pattern = f"{self.job.name}_*"
             items = glob.glob(os.path.join(self.save_root, pattern))
             # Separate files and directories
-            safetensors_files = [f for f in items if f.endswith('.safetensors')]
+            safetensors_files = [
+                f for f in items
+                if f.endswith('.safetensors') and not f.endswith('-lora.safetensors')
+            ]
             pt_files = [f for f in items if f.endswith('.pt')]
             directories = [d for d in items if os.path.isdir(d) and not d.endswith('.safetensors')]
             embed_files = []
@@ -1036,6 +1071,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     shutil.rmtree(item)
                 else:
                     os.remove(item)
+                if item.endswith('.safetensors') and not item.endswith('-lora.safetensors'):
+                    sidecar_file = os.path.splitext(item)[0] + '-lora.safetensors'
+                    if os.path.exists(sidecar_file):
+                        os.remove(sidecar_file)
                 # see if a yaml file with same name exists
                 yaml_file = os.path.splitext(item)[0] + ".yaml"
                 if os.path.exists(yaml_file):
@@ -1103,7 +1142,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     file_path,
                     dtype=get_torch_dtype(self.save_config.dtype),
                     metadata=save_meta,
-                    extra_state_dict=embedding_dict
+                    extra_state_dict=embedding_dict,
+                    save_magnitude_less_lora=self.network.network_config.save_magnitude_less_lora
                 )
                 self.network.multiplier = prev_multiplier
                 # if we have an embedding as well, pair it with the network
@@ -2900,6 +2940,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 # todo improve this logic to send one of each through if we can buckets and batch size might be an issue
                 is_reg_step = False
                 is_save_step = self.save_config.save_every and self.step_num % self.save_config.save_every == 0
+                self._refresh_live_sample_config()
                 is_sample_step = self.sample_config.sample_every and self.step_num % self.sample_config.sample_every == 0
                 if self.train_config.disable_sampling:
                     is_sample_step = False

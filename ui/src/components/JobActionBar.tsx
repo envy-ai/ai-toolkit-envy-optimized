@@ -30,11 +30,12 @@ export default function JobActionBar({
   autoStartQueue = false,
   menuAnchor = 'bottom',
 }: JobActionBarProps) {
-  const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue } = getAvaliableJobActions(job);
+  const { canStart, canStop, canDelete, canEdit, canEditSamples, canRemoveFromQueue } = getAvaliableJobActions(job);
 
   if (!afterDelete) afterDelete = onRefresh;
 
   const iconSizeClass = 'w-5 h-5 sm:w-6 sm:h-6';
+  const trainEditHref = canEditSamples ? `/jobs/new?id=${job.id}&sampleOnly=1` : `/jobs/new?id=${job.id}`;
   return (
     <div className={`flex items-center flex-shrink-0 ${className ?? ''}`}>
       {canStart && (
@@ -106,8 +107,8 @@ export default function JobActionBar({
           <Pen className={iconSizeClass} />
         </div>
       )}
-      {job.job_type === 'train' && canEdit && (
-        <Link href={`/jobs/new?id=${job.id}`} className="ml-1 sm:ml-2 hover:text-gray-100 inline-block">
+      {job.job_type === 'train' && (canEdit || canEditSamples) && (
+        <Link href={trainEditHref} className="ml-1 sm:ml-2 hover:text-gray-100 inline-block">
           <Pen className={iconSizeClass} />
         </Link>
       )}

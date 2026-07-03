@@ -14,6 +14,7 @@ class BaseJob:
 
         self.config = config['config']
         self.raw_config = config
+        self.config_path = config.get('__config_path', None)
         self.job = config['job']
         self.name = self.get_conf('name', required=True)
         if 'meta' in config:

@@ -237,6 +237,7 @@ class NetworkConfig:
         
         # for multi stage models
         self.split_multistage_loras = kwargs.get('split_multistage_loras', True)
+        self.save_magnitude_less_lora: bool = kwargs.get('save_magnitude_less_lora', False)
         
         # ramtorch, doesn't work yet
         self.layer_offloading = kwargs.get('layer_offloading', False)
@@ -882,7 +883,7 @@ class SliderConfig:
         self.resolutions: List[List[int]] = kwargs.get('resolutions', [[512, 512]])
         self.prompt_file: str = kwargs.get('prompt_file', None)
         self.prompt_tensors: str = kwargs.get('prompt_tensors', None)
-        self.batch_full_slide: bool = kwargs.get('batch_full_slide', True)
+        self.batch_full_slide: bool = kwargs.get('batch_full_slide', False)
         self.use_adapter: bool = kwargs.get('use_adapter', None)  # depth
         self.adapter_img_dir = kwargs.get('adapter_img_dir', None)
         self.low_ram = kwargs.get('low_ram', False)

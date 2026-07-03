@@ -7,12 +7,30 @@ import JobActionBar from './JobActionBar';
 import { Job, Queue } from '@prisma/client';
 import useQueueList from '@/hooks/useQueueList';
 import classNames from 'classnames';
-import { startQueue, stopQueue } from '@/utils/queue';
+import { reorderQueueJobs, startQueue, stopQueue } from '@/utils/queue';
 import { CgSpinner } from 'react-icons/cg';
 import useGPUInfo from '@/hooks/useGPUInfo';
 import { openConfirm } from '@/components/ConfirmModal';
 import { deleteJob, getTotalSteps, stopJob } from '@/utils/jobs';
-import { Trash2 } from 'lucide-react';
+import { GripVertical, Trash2 } from 'lucide-react';
+import JobDatasetLightbox from '@/components/JobDatasetLightbox';
+import {
+  closestCenter,
+  DndContext,
+  DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 interface JobsTableProps {
   autoStartQueue?: boolean;
@@ -20,12 +38,171 @@ interface JobsTableProps {
   job_type?: string | null;
 }
 
+interface QueueTableProps {
+  columns: TableColumn[];
+  rows: Job[];
+  queueID: string;
+  isLoading: boolean;
+  onRefresh: () => void;
+  onReorder: (queueID: string, orderedJobIds: string[]) => void;
+  theadClassName?: string;
+}
+
+function renderTableCells(row: Job, columns: TableColumn[]) {
+  return columns.map(column => (
+    <td key={column.key} className={classNames('px-3 py-2', column.className)}>
+      {column.render ? column.render(row) : (row as any)[column.key]}
+    </td>
+  ));
+}
+
+function StaticQueueRow({ row, columns, rowClass }: { row: Job; columns: TableColumn[]; rowClass: string }) {
+  return (
+    <tr className={`${rowClass} border-b border-gray-700 hover:bg-gray-700`}>
+      <td className="px-3 py-2 w-8">
+        <GripVertical className="h-4 w-4 text-gray-600" aria-hidden="true" />
+      </td>
+      {renderTableCells(row, columns)}
+    </tr>
+  );
+}
+
+function SortableQueueRow({ row, columns, rowClass }: { row: Job; columns: TableColumn[]; rowClass: string }) {
+  const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: row.id,
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <tr
+      ref={setNodeRef}
+      style={style}
+      className={classNames(`${rowClass} border-b border-gray-700 hover:bg-gray-700`, {
+        'relative z-10 opacity-80': isDragging,
+      })}
+    >
+      <td className="px-3 py-2 w-8">
+        <button
+          ref={setActivatorNodeRef}
+          type="button"
+          className="inline-flex h-7 w-7 items-center justify-center rounded text-gray-400 hover:bg-gray-700 hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-grab active:cursor-grabbing"
+          aria-label={`Reorder ${row.name}`}
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical className="h-4 w-4" aria-hidden="true" />
+        </button>
+      </td>
+      {renderTableCells(row, columns)}
+    </tr>
+  );
+}
+
+function SortableQueueTable({
+  columns,
+  rows,
+  queueID,
+  isLoading,
+  onRefresh,
+  onReorder,
+  theadClassName = 'text-gray-400',
+}: QueueTableProps) {
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+
+  const runningRows = rows.filter(job => job.status === 'running' || job.status === 'stopping');
+  const queuedRows = rows.filter(job => job.status === 'queued');
+  const otherRows = rows.filter(job => !['running', 'stopping', 'queued'].includes(job.status));
+  const queuedRowIds = queuedRows.map(job => job.id);
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    const oldIndex = queuedRowIds.indexOf(String(active.id));
+    const newIndex = queuedRowIds.indexOf(String(over.id));
+    if (oldIndex === -1 || newIndex === -1) return;
+
+    const reorderedRows = arrayMove(queuedRows, oldIndex, newIndex);
+    onReorder(
+      queueID,
+      reorderedRows.map(job => job.id),
+    );
+  };
+
+  if (isLoading) {
+    return <UniversalTable columns={columns} rows={rows} isLoading={isLoading} onRefresh={onRefresh} />;
+  }
+
+  if (rows.length === 0) {
+    return <UniversalTable columns={columns} rows={rows} isLoading={isLoading} onRefresh={onRefresh} />;
+  }
+
+  return (
+    <div className="w-full bg-gray-900 rounded-md shadow-md">
+      <div className="overflow-x-auto">
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <table className="w-full text-sm text-left text-gray-300">
+            <thead className={classNames('text-xs uppercase bg-gray-800', theadClassName)}>
+              <tr>
+                <th className="px-3 py-2 w-8"></th>
+                {columns.map(column => (
+                  <th key={column.key} className="px-3 py-2">
+                    {column.title}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <SortableContext items={queuedRowIds} strategy={verticalListSortingStrategy}>
+              <tbody>
+                {runningRows.map((row, index) => (
+                  <StaticQueueRow
+                    key={row.id}
+                    row={row}
+                    columns={columns}
+                    rowClass={index % 2 === 0 ? 'bg-gray-900' : 'bg-gray-800'}
+                  />
+                ))}
+                {queuedRows.map((row, index) => (
+                  <SortableQueueRow
+                    key={row.id}
+                    row={row}
+                    columns={columns}
+                    rowClass={(runningRows.length + index) % 2 === 0 ? 'bg-gray-900' : 'bg-gray-800'}
+                  />
+                ))}
+                {otherRows.map((row, index) => (
+                  <StaticQueueRow
+                    key={row.id}
+                    row={row}
+                    columns={columns}
+                    rowClass={(runningRows.length + queuedRows.length + index) % 2 === 0 ? 'bg-gray-900' : 'bg-gray-800'}
+                  />
+                ))}
+              </tbody>
+            </SortableContext>
+          </table>
+        </DndContext>
+      </div>
+    </div>
+  );
+}
+
 export default function JobsTable({ onlyActive = false, job_type = null }: JobsTableProps) {
-  const { jobs, status, refreshJobs } = useJobsList({ onlyActive, reloadInterval: 5000, job_type });
+  const { jobs, setJobs, status, refreshJobs } = useJobsList({ onlyActive, reloadInterval: 5000, job_type });
   const { queues, status: queueStatus, refreshQueues } = useQueueList();
   const { gpuList, isGPUInfoLoaded } = useGPUInfo();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteProgress, setDeleteProgress] = useState<{ done: number; total: number } | null>(null);
+  const [datasetLightboxJob, setDatasetLightboxJob] = useState<{ jobId: string; imagePath: string | null } | null>(null);
 
   const refresh = () => {
     refreshJobs();
@@ -49,6 +226,23 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
 
   const toggleAll = () => {
     setSelectedIds(allSelected ? new Set() : new Set(jobs.map(job => job.id)));
+  };
+
+  const openDatasetLightbox = (jobId: string, imagePath?: string | null) => {
+    setDatasetLightboxJob({ jobId, imagePath: imagePath ?? null });
+  };
+
+  const onReorderQueue = (queueID: string, orderedJobIds: string[]) => {
+    const nextPositionById = new Map(orderedJobIds.map((id, index) => [id, (index + 1) * 1000]));
+    setJobs(prevJobs =>
+      prevJobs.map(job =>
+        nextPositionById.has(job.id) ? { ...job, queue_position: nextPositionById.get(job.id) as number } : job,
+      ),
+    );
+
+    reorderQueueJobs(queueID, orderedJobIds)
+      .then(() => refreshJobs())
+      .catch(() => refreshJobs());
   };
 
   const onMassDelete = () => {
@@ -120,6 +314,27 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
           className="cursor-pointer accent-blue-500"
         />
       ),
+    },
+    {
+      title: '',
+      key: 'dataset_thumbnail_url',
+      className: 'w-[112px]',
+      render: row =>
+        row.dataset_thumbnail_url ? (
+          <button
+            type="button"
+            onClick={() => openDatasetLightbox(row.id, row.dataset_thumbnail_path)}
+            className="block max-w-[100px] max-h-[100px] rounded border border-gray-700 bg-gray-950 hover:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label={`Browse dataset images for ${row.name}`}
+          >
+            <img
+              src={row.dataset_thumbnail_url}
+              alt=""
+              loading="lazy"
+              className="max-w-[100px] max-h-[100px] object-contain"
+            />
+          </button>
+        ) : null,
     },
     {
       title: 'Name',
@@ -245,6 +460,11 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
 
   return (
     <div>
+      <JobDatasetLightbox
+        jobId={datasetLightboxJob?.jobId ?? null}
+        initialImagePath={datasetLightboxJob?.imagePath ?? null}
+        onClose={() => setDatasetLightboxJob(null)}
+      />
       {(selectedIds.size > 0 || isDeleting) && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 bg-gray-800 rounded-lg border border-gray-700 shadow-lg">
           {isDeleting ? (
@@ -326,11 +546,13 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
                   )}
                 </div>
               </div>
-              <UniversalTable
+              <SortableQueueTable
                 columns={columns}
                 rows={jobsDict[gpuKey].jobs}
+                queueID={gpuKey}
                 isLoading={isLoading}
                 onRefresh={refresh}
+                onReorder={onReorderQueue}
                 theadClassName={
                   queue?.is_running
                     ? 'bg-green-700 dark:bg-green-950 text-white dark:text-gray-400'

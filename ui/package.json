@@ -12,6 +12,9 @@
     "format": "prettier --write \"**/*.{js,jsx,ts,tsx,css,scss}\""
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@headlessui/react": "^2.2.0",
     "@monaco-editor/react": "^4.7.0",
     "@prisma/client": "^6.3.1",
@@ -35,7 +38,8 @@
     "systeminformation": "^5.27.11",
     "uplot": "^1.6.32",
     "uuid": "^11.1.0",
-    "yaml": "^2.7.0"
+    "yaml": "^2.7.0",
+    "yet-another-react-lightbox": "^3.32.0"
   },
   "devDependencies": {
     "@types/archiver": "^6.0.3",

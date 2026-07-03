@@ -9,7 +9,7 @@ import {
   jobTypeOptions,
   SampleTags,
 } from './options';
-import { defaultCompileOptions, defaultDatasetConfig } from './jobConfig';
+import { defaultCompileOptions, defaultDatasetConfig, defaultSliderConfig } from './jobConfig';
 import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
 import { objectCopy, tagsToObj, objToTags } from '@/utils/basic';
 import {
@@ -44,6 +44,7 @@ type Props = {
   setGpuIDs: (value: string | null) => void;
   gpuList: any;
   datasetOptions: any;
+  sampleOnlyMode?: boolean;
   isLoading?: boolean;
 };
 
@@ -73,6 +74,13 @@ const emptyComfyOptions: ComfyOptions = {
 
 const toOptions = (values: string[]): SelectOption[] => values.map(value => ({ value, label: value }));
 
+type ModelPathSource = 'standard' | 'comfy_checkpoint';
+
+const modelPathSourceOptions: SelectOption[] = [
+  { value: 'standard', label: 'AI Toolkit / Hugging Face' },
+  { value: 'comfy_checkpoint', label: 'ComfyUI Checkpoint Path' },
+];
+
 export default function SimpleJob({
   jobConfig,
   setJobConfig,
@@ -83,6 +91,7 @@ export default function SimpleJob({
   setGpuIDs,
   gpuList,
   datasetOptions,
+  sampleOnlyMode = false,
   isLoading,
 }: Props) {
   const modelArch = useMemo(() => {
@@ -106,11 +115,28 @@ export default function SimpleJob({
 
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
+  const isPromptSlider = jobConfig.config.process[0].type === 'slider';
+  const selectedOptimizer = jobConfig.config.process[0].train.optimizer ?? '';
+  const showProdigyOptimizerParams = selectedOptimizer.toLowerCase().startsWith('prodigy');
   const networkType = jobConfig.config.process[0].network?.type ?? 'lora';
   const showNetworkConv = networkType == 'dora' || !disableSections.includes('network.conv');
   const comfyConfig = jobConfig.config.process[0].sample.comfy;
   const comfyEnabled = comfyConfig?.enabled || false;
   const [comfyOptions, setComfyOptions] = useState<ComfyOptions>(emptyComfyOptions);
+  const [modelPathSource, setModelPathSource] = useState<ModelPathSource>(() => {
+    const modelPath = jobConfig.config.process[0].model.name_or_path ?? '';
+    return modelPath.startsWith('/') && modelPath.endsWith('.safetensors') ? 'comfy_checkpoint' : 'standard';
+  });
+  const comfyCheckpointPathSelected = modelPathSource === 'comfy_checkpoint';
+
+  useEffect(() => {
+    const modelPath = jobConfig.config.process[0].model.name_or_path ?? '';
+    if (modelPath.startsWith('/') && modelPath.endsWith('.safetensors')) {
+      setModelPathSource('comfy_checkpoint');
+    } else if (modelPath !== '' && !modelPath.startsWith('/')) {
+      setModelPathSource('standard');
+    }
+  }, [jobConfig.config.process[0].model.name_or_path]);
 
   useEffect(() => {
     if (networkType != 'dora') {
@@ -278,6 +304,7 @@ export default function SimpleJob({
   }, [modelArch]);
 
   const showGPUSelect = !isMac();
+  const sampleOnlyLockedClass = sampleOnlyMode ? 'opacity-50 pointer-events-none select-none' : '';
 
   let numDatasetCols = 4;
   let numSampleTopCols = 4;
@@ -299,6 +326,97 @@ export default function SimpleJob({
   if (numSampleTopCols == 3) {
     sampleTopStyleClass = 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6';
   }
+
+  const sliderTargets = jobConfig.config.process[0].slider?.targets ?? [];
+  const defaultSliderTarget = () =>
+    objectCopy(
+      defaultSliderConfig.targets?.[0] ?? {
+        target_class: '',
+        positive: '',
+        negative: '',
+        weight: 1.0,
+        shuffle: false,
+      },
+    );
+  const sliderTargetsEditor = (
+    <Card title="Slider Targets">
+      <>
+        <div className="mb-4 flex items-center justify-between">
+          <label className="block text-xs text-gray-300">Prompt Sets ({sliderTargets.length})</label>
+        </div>
+        <div className="space-y-4">
+          {sliderTargets.map((target, i) => (
+            <div key={i} className="p-4 rounded-lg bg-gray-800 relative">
+              <div className="absolute top-2 right-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setJobConfig(
+                      sliderTargets.filter((_, index) => index !== i),
+                      'config.process[0].slider.targets',
+                    )
+                  }
+                  className="bg-red-600 hover:bg-red-700 text-white rounded-full p-2 text-sm transition-colors"
+                  title="Remove Prompt Set"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <h2 className="text-lg font-bold mb-4">Prompt Set {i + 1}</h2>
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 pr-10">
+                <TextInput
+                  label="Target Class"
+                  value={target.target_class ?? ''}
+                  onChange={value => setJobConfig(value, `config.process[0].slider.targets[${i}].target_class`)}
+                  placeholder="eg. person"
+                />
+                <NumberInput
+                  label="Weight"
+                  value={target.weight ?? 1.0}
+                  onChange={value => setJobConfig(value, `config.process[0].slider.targets[${i}].weight`)}
+                  placeholder="eg. 1.0"
+                  min={0}
+                />
+                <FormGroup label="Options" className="lg:col-span-2">
+                  <Checkbox
+                    label="Shuffle comma-separated phrases"
+                    checked={target.shuffle || false}
+                    onChange={value => setJobConfig(value, `config.process[0].slider.targets[${i}].shuffle`)}
+                  />
+                </FormGroup>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+                <TextAreaInput
+                  label="Positive Prompt"
+                  value={target.positive ?? ''}
+                  onChange={value => setJobConfig(value, `config.process[0].slider.targets[${i}].positive`)}
+                  placeholder="eg. person who is happy"
+                  rows={3}
+                  required
+                />
+                <TextAreaInput
+                  label="Negative Prompt"
+                  value={target.negative ?? ''}
+                  onChange={value => setJobConfig(value, `config.process[0].slider.targets[${i}].negative`)}
+                  placeholder="eg. person who is sad"
+                  rows={3}
+                  required
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => setJobConfig([...sliderTargets, defaultSliderTarget()], 'config.process[0].slider.targets')}
+          className="w-full px-4 py-2 mt-4 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+        >
+          Add Prompt Set
+        </button>
+      </>
+    </Card>
+  );
+
   return (
     <>
       <form
@@ -313,7 +431,7 @@ export default function SimpleJob({
             </div>
           </div>
         )}
-        <div className={topBarClass}>
+        <div className={`${topBarClass} ${sampleOnlyLockedClass}`}>
           <Card title="Job">
             <TextInput
               label="Training Name"
@@ -360,8 +478,14 @@ export default function SimpleJob({
               }}
               options={groupedModelOptions}
             />
+            <SelectInput
+              label="Base Model Source"
+              value={modelPathSource}
+              onChange={value => setModelPathSource(value as ModelPathSource)}
+              options={modelPathSourceOptions}
+            />
             <TextInput
-              label="Name or Path"
+              label={comfyCheckpointPathSelected ? 'ComfyUI Checkpoint Path' : 'Name or Path'}
               value={jobConfig.config.process[0].model.name_or_path}
               docKey="config.process[0].model.name_or_path"
               onChange={(value: string | null) => {
@@ -370,7 +494,9 @@ export default function SimpleJob({
                 }
                 setJobConfig(value, 'config.process[0].model.name_or_path');
               }}
-              placeholder=""
+              placeholder={
+                comfyCheckpointPathSelected ? 'Paste the full absolute path to a .safetensors checkpoint' : ''
+              }
               required
             />
             {modelArch?.additionalSections?.includes('model.assistant_lora_path') && (
@@ -597,6 +723,13 @@ export default function SimpleJob({
                     required
                   />
                 )}
+                {networkType == 'dora' && (
+                  <Checkbox
+                    label="Save magnitude-less LoRAs"
+                    checked={jobConfig.config.process[0].network?.save_magnitude_less_lora || false}
+                    onChange={value => setJobConfig(value, 'config.process[0].network.save_magnitude_less_lora')}
+                  />
+                )}
                 {showNetworkConv ? (
                   <>
                     <NumberInput
@@ -640,34 +773,72 @@ export default function SimpleJob({
           </Card>
           {!disableSections.includes('slider') && (
             <Card title="Slider">
-              <TextInput
-                label="Target Class"
-                className=""
-                value={jobConfig.config.process[0].slider?.target_class ?? ''}
-                onChange={value => setJobConfig(value, 'config.process[0].slider.target_class')}
-                placeholder="eg. person"
-              />
-              <TextInput
-                label="Positive Prompt"
-                className=""
-                value={jobConfig.config.process[0].slider?.positive_prompt ?? ''}
-                onChange={value => setJobConfig(value, 'config.process[0].slider.positive_prompt')}
-                placeholder="eg. person who is happy"
-              />
-              <TextInput
-                label="Negative Prompt"
-                className=""
-                value={jobConfig.config.process[0].slider?.negative_prompt ?? ''}
-                onChange={value => setJobConfig(value, 'config.process[0].slider.negative_prompt')}
-                placeholder="eg. person who is sad"
-              />
-              <TextInput
-                label="Anchor Class"
-                className=""
-                value={jobConfig.config.process[0].slider?.anchor_class ?? ''}
-                onChange={value => setJobConfig(value, 'config.process[0].slider.anchor_class')}
-                placeholder=""
-              />
+              {isPromptSlider ? (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <NumberInput
+                      label="Training Width"
+                      value={jobConfig.config.process[0].slider?.resolutions?.[0]?.[0] ?? 1024}
+                      onChange={value => {
+                        const height = jobConfig.config.process[0].slider?.resolutions?.[0]?.[1] ?? 1024;
+                        setJobConfig([[value, height]], 'config.process[0].slider.resolutions');
+                      }}
+                      placeholder="eg. 1024"
+                      min={64}
+                      required
+                    />
+                    <NumberInput
+                      label="Training Height"
+                      value={jobConfig.config.process[0].slider?.resolutions?.[0]?.[1] ?? 1024}
+                      onChange={value => {
+                        const width = jobConfig.config.process[0].slider?.resolutions?.[0]?.[0] ?? 1024;
+                        setJobConfig([[width, value]], 'config.process[0].slider.resolutions');
+                      }}
+                      placeholder="eg. 1024"
+                      min={64}
+                      required
+                    />
+                  </div>
+                  <FormGroup label="Batching" className="pt-4">
+                    <Checkbox
+                      label="Full Slide Batch"
+                      checked={jobConfig.config.process[0].slider?.batch_full_slide || false}
+                      onChange={value => setJobConfig(value, 'config.process[0].slider.batch_full_slide')}
+                    />
+                  </FormGroup>
+                </>
+              ) : (
+                <>
+                  <TextInput
+                    label="Target Class"
+                    className=""
+                    value={jobConfig.config.process[0].slider?.target_class ?? ''}
+                    onChange={value => setJobConfig(value, 'config.process[0].slider.target_class')}
+                    placeholder="eg. person"
+                  />
+                  <TextInput
+                    label="Positive Prompt"
+                    className=""
+                    value={jobConfig.config.process[0].slider?.positive_prompt ?? ''}
+                    onChange={value => setJobConfig(value, 'config.process[0].slider.positive_prompt')}
+                    placeholder="eg. person who is happy"
+                  />
+                  <TextInput
+                    label="Negative Prompt"
+                    className=""
+                    value={jobConfig.config.process[0].slider?.negative_prompt ?? ''}
+                    onChange={value => setJobConfig(value, 'config.process[0].slider.negative_prompt')}
+                    placeholder="eg. person who is sad"
+                  />
+                  <TextInput
+                    label="Anchor Class"
+                    className=""
+                    value={jobConfig.config.process[0].slider?.anchor_class ?? ''}
+                    onChange={value => setJobConfig(value, 'config.process[0].slider.anchor_class')}
+                    placeholder=""
+                  />
+                </>
+              )}
             </Card>
           )}
           <Card title="Save">
@@ -699,7 +870,7 @@ export default function SimpleJob({
             />
           </Card>
         </div>
-        <div>
+        <div className={sampleOnlyLockedClass}>
           <Card title="Training">
             <div className={trainingBarClass}>
               <div>
@@ -765,6 +936,26 @@ export default function SimpleJob({
                   min={0}
                   required
                 />
+                {showProdigyOptimizerParams && (
+                  <>
+                    <NumberInput
+                      label="Initial D Estimate"
+                      className="pt-2"
+                      value={jobConfig.config.process[0].train.optimizer_params.d0 ?? 0.000001}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.optimizer_params.d0')}
+                      placeholder="eg. 0.0001"
+                      min={1e-12}
+                    />
+                    <NumberInput
+                      label="D Coefficient"
+                      className="pt-2"
+                      value={jobConfig.config.process[0].train.optimizer_params.d_coef ?? 1.0}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.optimizer_params.d_coef')}
+                      placeholder="eg. 2.0"
+                      min={0}
+                    />
+                  </>
+                )}
               </div>
               <div>
                 {disableSections.includes('train.timestep_type') ? null : (
@@ -957,7 +1148,7 @@ export default function SimpleJob({
             </div>
           </Card>
         </div>
-        <div>
+        <div className={sampleOnlyLockedClass}>
           <Card title="Advanced" collapsible>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div>
@@ -996,303 +1187,311 @@ export default function SimpleJob({
             </div>
           </Card>
         </div>
-        <div>
-          <Card title="Datasets">
-            <>
-              {jobConfig.config.process[0].datasets.map((dataset, i) => (
-                <div key={i} className="p-4 rounded-lg bg-gray-800 relative">
-                  <div className="absolute top-2 right-2 flex gap-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const duplicated = objectCopy(dataset);
-                        const datasets = [...jobConfig.config.process[0].datasets];
-                        datasets.splice(i + 1, 0, duplicated);
-                        setJobConfig(datasets, 'config.process[0].datasets');
-                      }}
-                      className="bg-gray-700 hover:bg-gray-600 rounded-full p-2 text-sm transition-colors"
-                      title="Duplicate Dataset"
-                    >
-                      <Copy className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setJobConfig(
-                          jobConfig.config.process[0].datasets.filter((_, index) => index !== i),
-                          'config.process[0].datasets',
-                        )
-                      }
-                      className="bg-red-600 hover:bg-red-700 text-white rounded-full p-2 text-sm transition-colors"
-                      title="Remove Dataset"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-                  <h2 className="text-lg font-bold mb-4">Dataset {i + 1}</h2>
-                  <div className={datasetStyleClass}>
-                    <div>
-                      <SelectInput
-                        label="Target Dataset"
-                        value={dataset.folder_path}
-                        onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].folder_path`)}
-                        options={datasetOptions}
-                      />
-                      {modelArch?.additionalSections?.includes('datasets.control_path') && (
-                        <SelectInput
-                          label="Control Dataset"
-                          docKey="datasets.control_path"
-                          value={dataset.control_path ?? ''}
-                          className="pt-2"
-                          onChange={value =>
-                            setJobConfig(value == '' ? null : value, `config.process[0].datasets[${i}].control_path`)
-                          }
-                          options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
-                        />
-                      )}
-                      {modelArch?.additionalSections?.includes('datasets.multi_control_paths') && (
-                        <>
-                          <SelectInput
-                            label="Control Dataset 1"
-                            docKey="datasets.multi_control_paths"
-                            value={dataset.control_path_1 ?? ''}
-                            className="pt-2"
-                            onChange={value =>
-                              setJobConfig(
-                                value == '' ? null : value,
-                                `config.process[0].datasets[${i}].control_path_1`,
-                              )
-                            }
-                            options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
-                          />
-                          <SelectInput
-                            label="Control Dataset 2"
-                            docKey="datasets.multi_control_paths"
-                            value={dataset.control_path_2 ?? ''}
-                            className="pt-2"
-                            onChange={value =>
-                              setJobConfig(
-                                value == '' ? null : value,
-                                `config.process[0].datasets[${i}].control_path_2`,
-                              )
-                            }
-                            options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
-                          />
-                          <SelectInput
-                            label="Control Dataset 3"
-                            docKey="datasets.multi_control_paths"
-                            value={dataset.control_path_3 ?? ''}
-                            className="pt-2"
-                            onChange={value =>
-                              setJobConfig(
-                                value == '' ? null : value,
-                                `config.process[0].datasets[${i}].control_path_3`,
-                              )
-                            }
-                            options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
-                          />
-                        </>
-                      )}
-                      <NumberInput
-                        label="LoRA Weight"
-                        value={dataset.network_weight}
-                        className="pt-2"
-                        onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].network_weight`)}
-                        placeholder="eg. 1.0"
-                      />
-                      <NumberInput
-                        label="Num Repeats"
-                        value={dataset.num_repeats || 1}
-                        className="pt-2"
-                        onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].num_repeats`)}
-                        placeholder="eg. 1"
-                        docKey={'dataset.num_repeats'}
-                      />
+        {!disableSections.includes('datasets') && (
+          <div className={sampleOnlyLockedClass}>
+            <Card title="Datasets">
+              <>
+                {jobConfig.config.process[0].datasets.map((dataset, i) => (
+                  <div key={i} className="p-4 rounded-lg bg-gray-800 relative">
+                    <div className="absolute top-2 right-2 flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const duplicated = objectCopy(dataset);
+                          const datasets = [...jobConfig.config.process[0].datasets];
+                          datasets.splice(i + 1, 0, duplicated);
+                          setJobConfig(datasets, 'config.process[0].datasets');
+                        }}
+                        className="bg-gray-700 hover:bg-gray-600 rounded-full p-2 text-sm transition-colors"
+                        title="Duplicate Dataset"
+                      >
+                        <Copy className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setJobConfig(
+                            jobConfig.config.process[0].datasets.filter((_, index) => index !== i),
+                            'config.process[0].datasets',
+                          )
+                        }
+                        className="bg-red-600 hover:bg-red-700 text-white rounded-full p-2 text-sm transition-colors"
+                        title="Remove Dataset"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
                     </div>
-                    <div>
-                      <TextInput
-                        label="Default Caption"
-                        value={dataset.default_caption}
-                        onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].default_caption`)}
-                        placeholder="eg. A photo of a cat"
-                      />
-                      <NumberInput
-                        label="Caption Dropout Rate"
-                        className="pt-2"
-                        value={dataset.caption_dropout_rate}
-                        onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].caption_dropout_rate`)}
-                        placeholder="eg. 0.05"
-                        min={0}
-                        required
-                      />
-                      <CreatableSelectInput
-                        label="Caption Extension"
-                        className="pt-2"
-                        value={dataset.caption_ext || 'txt'}
-                        onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].caption_ext`)}
-                        options={[
-                          { value: 'txt', label: 'txt' },
-                          { value: 'json', label: 'json' },
-                          { value: 'caption', label: 'caption' },
-                        ]}
-                      />
-
-                      {modelArch?.additionalSections?.includes('datasets.num_frames') && !dataset.auto_frame_count && (
+                    <h2 className="text-lg font-bold mb-4">Dataset {i + 1}</h2>
+                    <div className={datasetStyleClass}>
+                      <div>
+                        <SelectInput
+                          label="Target Dataset"
+                          value={dataset.folder_path}
+                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].folder_path`)}
+                          options={datasetOptions}
+                        />
+                        {modelArch?.additionalSections?.includes('datasets.control_path') && (
+                          <SelectInput
+                            label="Control Dataset"
+                            docKey="datasets.control_path"
+                            value={dataset.control_path ?? ''}
+                            className="pt-2"
+                            onChange={value =>
+                              setJobConfig(value == '' ? null : value, `config.process[0].datasets[${i}].control_path`)
+                            }
+                            options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
+                          />
+                        )}
+                        {modelArch?.additionalSections?.includes('datasets.multi_control_paths') && (
+                          <>
+                            <SelectInput
+                              label="Control Dataset 1"
+                              docKey="datasets.multi_control_paths"
+                              value={dataset.control_path_1 ?? ''}
+                              className="pt-2"
+                              onChange={value =>
+                                setJobConfig(
+                                  value == '' ? null : value,
+                                  `config.process[0].datasets[${i}].control_path_1`,
+                                )
+                              }
+                              options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
+                            />
+                            <SelectInput
+                              label="Control Dataset 2"
+                              docKey="datasets.multi_control_paths"
+                              value={dataset.control_path_2 ?? ''}
+                              className="pt-2"
+                              onChange={value =>
+                                setJobConfig(
+                                  value == '' ? null : value,
+                                  `config.process[0].datasets[${i}].control_path_2`,
+                                )
+                              }
+                              options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
+                            />
+                            <SelectInput
+                              label="Control Dataset 3"
+                              docKey="datasets.multi_control_paths"
+                              value={dataset.control_path_3 ?? ''}
+                              className="pt-2"
+                              onChange={value =>
+                                setJobConfig(
+                                  value == '' ? null : value,
+                                  `config.process[0].datasets[${i}].control_path_3`,
+                                )
+                              }
+                              options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
+                            />
+                          </>
+                        )}
                         <NumberInput
-                          label="Num Frames"
+                          label="LoRA Weight"
+                          value={dataset.network_weight}
                           className="pt-2"
-                          docKey="datasets.num_frames"
-                          value={dataset.num_frames}
-                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].num_frames`)}
-                          placeholder="eg. 41"
-                          min={1}
+                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].network_weight`)}
+                          placeholder="eg. 1.0"
+                        />
+                        <NumberInput
+                          label="Num Repeats"
+                          value={dataset.num_repeats || 1}
+                          className="pt-2"
+                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].num_repeats`)}
+                          placeholder="eg. 1"
+                          docKey={'dataset.num_repeats'}
+                        />
+                      </div>
+                      <div>
+                        <TextInput
+                          label="Default Caption"
+                          value={dataset.default_caption}
+                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].default_caption`)}
+                          placeholder="eg. A photo of a cat"
+                        />
+                        <NumberInput
+                          label="Caption Dropout Rate"
+                          className="pt-2"
+                          value={dataset.caption_dropout_rate}
+                          onChange={value =>
+                            setJobConfig(value, `config.process[0].datasets[${i}].caption_dropout_rate`)
+                          }
+                          placeholder="eg. 0.05"
+                          min={0}
                           required
                         />
-                      )}
-                    </div>
-                    <div>
-                      <FormGroup label="Settings" className="">
-                        <Checkbox
-                          label="Cache Latents"
-                          checked={dataset.cache_latents_to_disk || false}
-                          onChange={value =>
-                            setJobConfig(value, `config.process[0].datasets[${i}].cache_latents_to_disk`)
-                          }
+                        <CreatableSelectInput
+                          label="Caption Extension"
+                          className="pt-2"
+                          value={dataset.caption_ext || 'txt'}
+                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].caption_ext`)}
+                          options={[
+                            { value: 'txt', label: 'txt' },
+                            { value: 'json', label: 'json' },
+                            { value: 'caption', label: 'caption' },
+                          ]}
                         />
-                        <Checkbox
-                          label="Is Regularization"
-                          checked={dataset.is_reg || false}
-                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].is_reg`)}
-                        />
-                        {modelArch?.additionalSections?.includes('datasets.auto_frame_count') && (
-                          <Checkbox
-                            label="Auto Frame Count"
-                            checked={dataset.auto_frame_count || false}
-                            onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].auto_frame_count`)}
-                            docKey="datasets.auto_frame_count"
-                          />
-                        )}
-                        {modelArch?.additionalSections?.includes('datasets.do_i2v') && (
-                          <Checkbox
-                            label="Do I2V"
-                            checked={dataset.do_i2v || false}
-                            onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].do_i2v`)}
-                            docKey="datasets.do_i2v"
-                          />
-                        )}
-                        {modelArch?.additionalSections?.includes('datasets.do_audio') && (
-                          <Checkbox
-                            label="Do Audio"
-                            checked={dataset.do_audio || false}
-                            onChange={value => {
-                              if (!value) {
-                                setJobConfig(undefined, `config.process[0].datasets[${i}].do_audio`);
-                              } else {
-                                setJobConfig(value, `config.process[0].datasets[${i}].do_audio`);
-                              }
-                            }}
-                            docKey="datasets.do_audio"
-                          />
-                        )}
-                        {modelArch?.additionalSections?.includes('datasets.audio_normalize') && (
-                          <Checkbox
-                            label="Audio Normalize"
-                            checked={dataset.audio_normalize || false}
-                            onChange={value => {
-                              if (!value) {
-                                setJobConfig(undefined, `config.process[0].datasets[${i}].audio_normalize`);
-                              } else {
-                                setJobConfig(value, `config.process[0].datasets[${i}].audio_normalize`);
-                              }
-                            }}
-                            docKey="datasets.audio_normalize"
-                          />
-                        )}
-                        {modelArch?.additionalSections?.includes('datasets.audio_preserve_pitch') && (
-                          <Checkbox
-                            label="Audio Preserve Pitch"
-                            checked={dataset.audio_preserve_pitch || false}
-                            onChange={value => {
-                              if (!value) {
-                                setJobConfig(undefined, `config.process[0].datasets[${i}].audio_preserve_pitch`);
-                              } else {
-                                setJobConfig(value, `config.process[0].datasets[${i}].audio_preserve_pitch`);
-                              }
-                            }}
-                            docKey="datasets.audio_preserve_pitch"
-                          />
-                        )}
-                      </FormGroup>
-                      {!isAudioModel && (
-                        <FormGroup label="Flipping" docKey={'datasets.flip'} className="mt-2">
-                          <Checkbox
-                            label={
-                              <>
-                                Flip X <FlipHorizontal2 className="inline-block w-4 h-4 ml-1" />
-                              </>
-                            }
-                            checked={dataset.flip_x || false}
-                            onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].flip_x`)}
-                          />
-                          <Checkbox
-                            label={
-                              <>
-                                Flip Y <FlipVertical2 className="inline-block w-4 h-4 ml-1" />
-                              </>
-                            }
-                            checked={dataset.flip_y || false}
-                            onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].flip_y`)}
-                          />
-                        </FormGroup>
-                      )}
-                    </div>
-                    {!isAudioModel && (
-                      <div>
-                        <FormGroup label="Resolutions" className="pt-2">
-                          <div className="grid grid-cols-2 gap-2">
-                            {[
-                              [256, 512, 768, 1024],
-                              [1280, 1328, 1536, 2048],
-                            ].map(resGroup => (
-                              <div key={resGroup[0]} className="space-y-2">
-                                {resGroup.map(res => (
-                                  <Checkbox
-                                    key={res}
-                                    label={res.toString()}
-                                    checked={dataset.resolution.includes(res)}
-                                    onChange={value => {
-                                      const resolutions = dataset.resolution.includes(res)
-                                        ? dataset.resolution.filter(r => r !== res)
-                                        : [...dataset.resolution, res];
-                                      setJobConfig(resolutions, `config.process[0].datasets[${i}].resolution`);
-                                    }}
-                                  />
-                                ))}
-                              </div>
-                            ))}
-                          </div>
-                        </FormGroup>
+
+                        {modelArch?.additionalSections?.includes('datasets.num_frames') &&
+                          !dataset.auto_frame_count && (
+                            <NumberInput
+                              label="Num Frames"
+                              className="pt-2"
+                              docKey="datasets.num_frames"
+                              value={dataset.num_frames}
+                              onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].num_frames`)}
+                              placeholder="eg. 41"
+                              min={1}
+                              required
+                            />
+                          )}
                       </div>
-                    )}
+                      <div>
+                        <FormGroup label="Settings" className="">
+                          <Checkbox
+                            label="Cache Latents"
+                            checked={dataset.cache_latents_to_disk || false}
+                            onChange={value =>
+                              setJobConfig(value, `config.process[0].datasets[${i}].cache_latents_to_disk`)
+                            }
+                          />
+                          <Checkbox
+                            label="Is Regularization"
+                            checked={dataset.is_reg || false}
+                            onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].is_reg`)}
+                          />
+                          {modelArch?.additionalSections?.includes('datasets.auto_frame_count') && (
+                            <Checkbox
+                              label="Auto Frame Count"
+                              checked={dataset.auto_frame_count || false}
+                              onChange={value =>
+                                setJobConfig(value, `config.process[0].datasets[${i}].auto_frame_count`)
+                              }
+                              docKey="datasets.auto_frame_count"
+                            />
+                          )}
+                          {modelArch?.additionalSections?.includes('datasets.do_i2v') && (
+                            <Checkbox
+                              label="Do I2V"
+                              checked={dataset.do_i2v || false}
+                              onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].do_i2v`)}
+                              docKey="datasets.do_i2v"
+                            />
+                          )}
+                          {modelArch?.additionalSections?.includes('datasets.do_audio') && (
+                            <Checkbox
+                              label="Do Audio"
+                              checked={dataset.do_audio || false}
+                              onChange={value => {
+                                if (!value) {
+                                  setJobConfig(undefined, `config.process[0].datasets[${i}].do_audio`);
+                                } else {
+                                  setJobConfig(value, `config.process[0].datasets[${i}].do_audio`);
+                                }
+                              }}
+                              docKey="datasets.do_audio"
+                            />
+                          )}
+                          {modelArch?.additionalSections?.includes('datasets.audio_normalize') && (
+                            <Checkbox
+                              label="Audio Normalize"
+                              checked={dataset.audio_normalize || false}
+                              onChange={value => {
+                                if (!value) {
+                                  setJobConfig(undefined, `config.process[0].datasets[${i}].audio_normalize`);
+                                } else {
+                                  setJobConfig(value, `config.process[0].datasets[${i}].audio_normalize`);
+                                }
+                              }}
+                              docKey="datasets.audio_normalize"
+                            />
+                          )}
+                          {modelArch?.additionalSections?.includes('datasets.audio_preserve_pitch') && (
+                            <Checkbox
+                              label="Audio Preserve Pitch"
+                              checked={dataset.audio_preserve_pitch || false}
+                              onChange={value => {
+                                if (!value) {
+                                  setJobConfig(undefined, `config.process[0].datasets[${i}].audio_preserve_pitch`);
+                                } else {
+                                  setJobConfig(value, `config.process[0].datasets[${i}].audio_preserve_pitch`);
+                                }
+                              }}
+                              docKey="datasets.audio_preserve_pitch"
+                            />
+                          )}
+                        </FormGroup>
+                        {!isAudioModel && (
+                          <FormGroup label="Flipping" docKey={'datasets.flip'} className="mt-2">
+                            <Checkbox
+                              label={
+                                <>
+                                  Flip X <FlipHorizontal2 className="inline-block w-4 h-4 ml-1" />
+                                </>
+                              }
+                              checked={dataset.flip_x || false}
+                              onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].flip_x`)}
+                            />
+                            <Checkbox
+                              label={
+                                <>
+                                  Flip Y <FlipVertical2 className="inline-block w-4 h-4 ml-1" />
+                                </>
+                              }
+                              checked={dataset.flip_y || false}
+                              onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].flip_y`)}
+                            />
+                          </FormGroup>
+                        )}
+                      </div>
+                      {!isAudioModel && (
+                        <div>
+                          <FormGroup label="Resolutions" className="pt-2">
+                            <div className="grid grid-cols-2 gap-2">
+                              {[
+                                [256, 512, 768, 1024],
+                                [1280, 1328, 1536, 2048],
+                              ].map(resGroup => (
+                                <div key={resGroup[0]} className="space-y-2">
+                                  {resGroup.map(res => (
+                                    <Checkbox
+                                      key={res}
+                                      label={res.toString()}
+                                      checked={dataset.resolution.includes(res)}
+                                      onChange={value => {
+                                        const resolutions = dataset.resolution.includes(res)
+                                          ? dataset.resolution.filter(r => r !== res)
+                                          : [...dataset.resolution, res];
+                                        setJobConfig(resolutions, `config.process[0].datasets[${i}].resolution`);
+                                      }}
+                                    />
+                                  ))}
+                                </div>
+                              ))}
+                            </div>
+                          </FormGroup>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
-              <button
-                type="button"
-                onClick={() => {
-                  const newDataset = objectCopy(defaultDatasetConfig);
-                  // automaticallt add the controls for a new dataset
-                  const controls = modelArch?.controls ?? [];
-                  newDataset.controls = controls;
-                  setJobConfig([...jobConfig.config.process[0].datasets, newDataset], 'config.process[0].datasets');
-                }}
-                className="w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
-              >
-                Add Dataset
-              </button>
-            </>
-          </Card>
-        </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const newDataset = objectCopy(defaultDatasetConfig);
+                    // automaticallt add the controls for a new dataset
+                    const controls = modelArch?.controls ?? [];
+                    newDataset.controls = controls;
+                    setJobConfig([...jobConfig.config.process[0].datasets, newDataset], 'config.process[0].datasets');
+                  }}
+                  className="w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+                >
+                  Add Dataset
+                </button>
+              </>
+            </Card>
+          </div>
+        )}
+        {isPromptSlider && <div className={sampleOnlyLockedClass}>{sliderTargetsEditor}</div>}
         <div>
           <Card title="Sample">
             <div className={sampleTopStyleClass}>
@@ -1493,13 +1692,17 @@ export default function SimpleJob({
                 <TextInput
                   label="LoRA Path Replace From"
                   value={comfyConfig?.training_lora_path_replace_from || ''}
-                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.training_lora_path_replace_from')}
+                  onChange={value =>
+                    setJobConfig(value, 'config.process[0].sample.comfy.training_lora_path_replace_from')
+                  }
                   placeholder="/mnt/training"
                 />
                 <TextInput
                   label="LoRA Path Replace To"
                   value={comfyConfig?.training_lora_path_replace_to || ''}
-                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.training_lora_path_replace_to')}
+                  onChange={value =>
+                    setJobConfig(value, 'config.process[0].sample.comfy.training_lora_path_replace_to')
+                  }
                   placeholder="R:/training"
                 />
                 <CreatableSelectInput
@@ -1541,7 +1744,9 @@ export default function SimpleJob({
                 <NumberInput
                   label="Inference LoRA Strength"
                   value={comfyConfig?.inference_lora_strength ?? 1.0}
-                  onChange={value => setJobConfig(value ?? 1.0, 'config.process[0].sample.comfy.inference_lora_strength')}
+                  onChange={value =>
+                    setJobConfig(value ?? 1.0, 'config.process[0].sample.comfy.inference_lora_strength')
+                  }
                   placeholder="eg. 1.0"
                   min={0}
                   required

@@ -107,4 +107,6 @@ def get_config(
         else:
             raise ValueError(f"Config file {config_file_path} must be a json or yaml file")
 
-    return preprocess_config(config, name)
+    processed_config = preprocess_config(config, name)
+    processed_config["__config_path"] = real_config_path
+    return processed_config

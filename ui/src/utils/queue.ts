@@ -30,3 +30,19 @@ export const stopQueue = (queueID: string) => {
       });
   });
 };
+
+export const reorderQueueJobs = (queueID: string, orderedJobIds: string[]) => {
+  return new Promise<void>((resolve, reject) => {
+    apiClient
+      .patch(`/api/queue/${queueID}/reorder`, { orderedJobIds })
+      .then(res => res.data)
+      .then(data => {
+        console.log('Queue reordered:', data);
+        resolve();
+      })
+      .catch(error => {
+        console.error('Error reordering queue:', error);
+        reject(error);
+      });
+  });
+};

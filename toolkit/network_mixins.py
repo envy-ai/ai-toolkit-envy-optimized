@@ -57,6 +57,38 @@ def print_once(msg):
         printed_messages.append(msg)
 
 
+def _is_dora_magnitude_key(key: str) -> bool:
+    return key.endswith(".magnitude") or "lora_magnitude_vector" in key
+
+
+def _without_dora_magnitude_layers(state_dict: OrderedDict) -> OrderedDict:
+    return OrderedDict(
+        (key, value)
+        for key, value in state_dict.items()
+        if not _is_dora_magnitude_key(key)
+    )
+
+
+def _magnitude_less_lora_path(file: str) -> str:
+    root, _ = os.path.splitext(file)
+    return f"{root}-lora.safetensors"
+
+
+def _save_magnitude_less_lora(
+        state_dict: OrderedDict,
+        file: str,
+        metadata: Optional[OrderedDict]
+):
+    from safetensors.torch import save_file
+
+    lora_state_dict = _without_dora_magnitude_layers(state_dict)
+    lora_metadata = OrderedDict(metadata or {})
+    lora_metadata.pop("sshs_model_hash", None)
+    lora_metadata.pop("sshs_legacy_hash", None)
+    lora_metadata = add_model_hash_to_meta(lora_state_dict, lora_metadata)
+    save_file(lora_state_dict, _magnitude_less_lora_path(file), lora_metadata)
+
+
 def broadcast_and_multiply(tensor, multiplier):
     # Determine the number of dimensions required
     num_extra_dims = tensor.dim() - multiplier.dim()
@@ -592,9 +624,15 @@ class ToolkitNetworkMixin:
             self: Network,
             file, dtype=torch.float16,
             metadata=None,
-            extra_state_dict: Optional[OrderedDict] = None
+            extra_state_dict: Optional[OrderedDict] = None,
+            save_magnitude_less_lora: bool = False
     ):
         save_dict = self.get_state_dict(extra_state_dict=extra_state_dict, dtype=dtype)
+        should_save_magnitude_less_lora = (
+            save_magnitude_less_lora
+            and self.network_type.lower() == "dora"
+            and os.path.splitext(file)[1] == ".safetensors"
+        )
         
         if metadata is not None and len(metadata) == 0:
             metadata = None
@@ -607,11 +645,15 @@ class ToolkitNetworkMixin:
         if self.base_model_ref is not None and hasattr(self.base_model_ref(), 'save_lora'):
             # call the base model save lora method
             self.base_model_ref().save_lora(save_dict, file, metadata)
+            if should_save_magnitude_less_lora:
+                _save_magnitude_less_lora(save_dict, file, metadata)
             return
         
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import save_file
             save_file(save_dict, file, metadata)
+            if should_save_magnitude_less_lora:
+                _save_magnitude_less_lora(save_dict, file, metadata)
         else:
             torch.save(save_dict, file)
 

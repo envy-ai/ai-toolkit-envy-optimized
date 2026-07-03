@@ -76,6 +76,7 @@ export interface NetworkConfig {
   conv_alpha: number;
   lokr_full_rank: boolean;
   lokr_factor: number;
+  save_magnitude_less_lora?: boolean;
   network_kwargs: {
     ignore_if_contains?: string[];
     only_if_contains?: string[];
@@ -149,6 +150,8 @@ export interface TrainConfig {
   cache_text_embeddings: boolean;
   optimizer_params: {
     weight_decay: number;
+    d0?: number;
+    d_coef?: number;
   };
   skip_first_sample: boolean;
   force_first_sample: boolean;
@@ -161,6 +164,7 @@ export interface TrainConfig {
   switch_boundary_every: number;
   loss_type: 'mse' | 'mae' | 'wavelet' | 'stepped';
   min_snr_gamma?: number;
+  max_denoising_steps?: number;
   do_differential_guidance?: boolean;
   differential_guidance_scale?: number;
   audio_loss_multiplier?: number;
@@ -254,6 +258,14 @@ export interface LoggingConfig {
   use_ui_logger: boolean;
 }
 
+export interface SliderTargetConfig {
+  target_class: string;
+  positive: string;
+  negative: string;
+  weight?: number;
+  shuffle?: boolean;
+}
+
 export interface SliderConfig {
   guidance_strength?: number;
   anchor_strength?: number;
@@ -261,6 +273,11 @@ export interface SliderConfig {
   negative_prompt?: string;
   target_class?: string;
   anchor_class?: string | null;
+  resolutions?: number[][];
+  targets?: SliderTargetConfig[];
+  prompt_file?: string | null;
+  prompt_tensors?: string | null;
+  batch_full_slide?: boolean;
 }
 
 export interface ProcessConfig {
