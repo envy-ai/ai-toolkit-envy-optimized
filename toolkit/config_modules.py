@@ -241,9 +241,13 @@ class NetworkConfig:
         
         # ramtorch, doesn't work yet
         self.layer_offloading = kwargs.get('layer_offloading', False)
-        
+
         # start from a pretrained lora
         self.pretrained_lora_path = kwargs.get('pretrained_lora_path', None)
+
+        # will create diffirential full weight modules for layers not conv/linear
+        # only useful in very special cases.
+        self.all_layers = kwargs.get('all_layers', False)
 
 
 AdapterTypes = Literal['t2i', 'ip', 'ip+', 'clip', 'ilora', 'photo_maker', 'control_net', 'control_lora', 'i2v']
@@ -740,14 +744,11 @@ class ModelConfig:
 
         if self.compile and self.quantize:
             print("Quantized model detected - allowing torch.compile (experimental)")
-            # make it torchao instead of quantio for compatibility with torch compile
-            if self.qtype == "qfloat8":
-                self.qtype = "float8"
         self.block_compile = kwargs.get("block_compile", False)
         self.compile_mode = kwargs.get("compile_mode", "default")
         self.compile_fullgraph = kwargs.get("compile_fullgraph", False)
         self.compile_dynamic = kwargs.get("compile_dynamic", True)
-        self.cache_size_limit = kwargs.get("cache_size_limit", 8)
+        self.cache_size_limit = kwargs.get("cache_size_limit", None)
         
         # kwargs to pass to the model
         self.model_kwargs = kwargs.get("model_kwargs", {})
@@ -950,6 +951,10 @@ class DatasetConfig:
         self.flip_y: bool = kwargs.get('flip_y', False)
         self.augments: List[str] = kwargs.get('augments', [])
         self.control_path: Union[str,List[str]] = kwargs.get('control_path', None)  # depth maps, etc
+        # pull a random control image from the same folder as the image. Useful for folder grouped pairs.
+        self.control_from_same_folder: bool = kwargs.get('control_from_same_folder', False)
+        self.num_controls_from_same_folder: int = kwargs.get('num_controls_from_same_folder', 1)
+
         if self.control_path == '':
             self.control_path = None
         

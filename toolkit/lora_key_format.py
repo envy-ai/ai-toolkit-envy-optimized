@@ -12,6 +12,10 @@ def peft_key_to_internal_key(key: str, network_type: str = "lora") -> str:
     load_key = load_key.replace("$$lora_down$$", ".lora_down.")
     load_key = load_key.replace("$$lora_up$$", ".lora_up.")
     load_key = load_key.replace("$$magnitude", ".magnitude")
+    if load_key.endswith("$$diff"):
+        load_key = load_key[:-len("$$diff")] + ".diff"
+    elif load_key.endswith("$$diff_b"):
+        load_key = load_key[:-len("$$diff_b")] + ".diff_b"
 
     if network_type.lower() == "lokr":
         load_key = load_key.replace("$$lokr_w1", ".lokr_w1")
