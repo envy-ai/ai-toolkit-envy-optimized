@@ -15,6 +15,7 @@ import { CaptionDatasetModal } from '@/components/CaptionDatasetModal';
 import MergeLoRAsModal from '@/components/MergeLoRAsModal';
 import UpsamplePromptsModal from '@/components/UpsamplePromptsModal';
 import PromptBoxEditorModal from '@/components/PromptBoxEditorModal';
+import TrainingProgressFavicon from '@/components/TrainingProgressFavicon';
 
 export const dynamic = 'force-dynamic';
 
@@ -56,6 +57,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script dangerouslySetInnerHTML={{ __html: `window.server_platform = "${platform}";` }} />
         <ThemeProvider>
           <AuthWrapper authRequired={authRequired}>
+            <TrainingProgressFavicon />
             <div className="flex h-screen bg-gray-950">
               <Sidebar />
               <main className="flex-1 overflow-auto bg-gray-950 text-gray-100 relative">

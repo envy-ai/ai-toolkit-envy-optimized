@@ -12,9 +12,16 @@ export const resolvePythonPath = (): string => {
   if (isWindows) {
     candidates.push(path.join(TOOLKIT_ROOT, '.venv', 'Scripts', 'python.exe'));
     candidates.push(path.join(TOOLKIT_ROOT, 'venv', 'Scripts', 'python.exe'));
+    if (process.env.CONDA_PREFIX) {
+      candidates.push(path.join(process.env.CONDA_PREFIX, 'python.exe'));
+    }
   } else {
     candidates.push(path.join(TOOLKIT_ROOT, '.venv', 'bin', 'python'));
     candidates.push(path.join(TOOLKIT_ROOT, 'venv', 'bin', 'python'));
+    if (process.env.CONDA_PREFIX) {
+      candidates.push(path.join(process.env.CONDA_PREFIX, 'bin', 'python'));
+    }
+    candidates.push(path.join(process.env.HOME || '', '.conda', 'envs', 'ai-toolkit', 'bin', 'python'));
   }
 
   for (const candidate of candidates) {
