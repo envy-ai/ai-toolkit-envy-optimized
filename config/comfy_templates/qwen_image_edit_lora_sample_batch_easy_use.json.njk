@@ -1,0 +1,429 @@
+{
+  {% for prompt in prompts %}
+  "{{ 1000 + loop.index0 }}": {
+    "inputs": {
+      "value": {{ prompt | json }}
+    },
+    "class_type": "easy string",
+    "_meta": {
+      "title": "Prompt {{ loop.index }}"
+    }
+  },
+  {% endfor %}
+  {% for seed_value in seeds %}
+  "{{ 1100 + loop.index0 }}": {
+    "inputs": {
+      "value": {{ seed_value }}
+    },
+    "class_type": "easy int",
+    "_meta": {
+      "title": "Seed {{ loop.index }}"
+    }
+  },
+  {% endfor %}
+  {% for control_image in control_images %}
+  "{{ 1400 + loop.index0 }}": {
+    "inputs": {
+      "image": {{ control_image | json }}
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Control Image {{ loop.index }}"
+    }
+  },
+  {% endfor %}
+  {% for prompt in prompts %}
+  {% if loop.index0 > 0 %}
+  "{{ 1200 + loop.index0 - 1 }}": {
+    "inputs": {
+      "any_1": [
+        {% if loop.index0 == 1 %}"1000"{% else %}"{{ 1200 + loop.index0 - 2 }}"{% endif %},
+        0
+      ],
+      "any_2": [
+        "{{ 1000 + loop.index0 }}",
+        0
+      ]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {
+      "title": "Prompt List {{ loop.index }}"
+    }
+  },
+  {% endif %}
+  {% endfor %}
+  {% for seed_value in seeds %}
+  {% if loop.index0 > 0 %}
+  "{{ 1300 + loop.index0 - 1 }}": {
+    "inputs": {
+      "any_1": [
+        {% if loop.index0 == 1 %}"1100"{% else %}"{{ 1300 + loop.index0 - 2 }}"{% endif %},
+        0
+      ],
+      "any_2": [
+        "{{ 1100 + loop.index0 }}",
+        0
+      ]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {
+      "title": "Seed List {{ loop.index }}"
+    }
+  },
+  {% endif %}
+  {% endfor %}
+  {% for control_image in control_images %}
+  {% if loop.index0 > 0 %}
+  "{{ 1500 + loop.index0 - 1 }}": {
+    "inputs": {
+      "any_1": [
+        {% if loop.index0 == 1 %}"1400"{% else %}"{{ 1500 + loop.index0 - 2 }}"{% endif %},
+        0
+      ],
+      "any_2": [
+        "{{ 1400 + loop.index0 }}",
+        0
+      ]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {
+      "title": "Control Image List {{ loop.index }}"
+    }
+  },
+  {% endif %}
+  {% endfor %}
+  "3": {
+    "inputs": {
+      "samples": [
+        "17",
+        0
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "upscale": -1,
+      "tile": false,
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 4096,
+      "temporal_overlap": 64
+    },
+    "class_type": "VAEUtils_VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE Decode (VAE Utils)"
+    }
+  },
+  "4": {
+    "inputs": {
+      "unet_name": {{ model | json }},
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Qwen Image Edit Diffusion Model"
+    }
+  },
+  "5": {
+    "inputs": {
+      "clip_name": {{ text_encoder | json }},
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load Qwen Image CLIP"
+    }
+  },
+  "6": {
+    "inputs": {
+      "vae_name": {{ vae | json }},
+      "disable_offload": true
+    },
+    "class_type": "VAEUtils_CustomVAELoader",
+    "_meta": {
+      "title": "Load Qwen Image VAE (VAE Utils)"
+    }
+  },
+  "17": {
+    "inputs": {
+      "seed": [
+        "73",
+        0
+      ],
+      "steps": {{ steps }},
+      "cfg": {{ cfg }},
+      "sampler_name": {{ sampler | json }},
+      "scheduler": {{ scheduler | json }},
+      "denoise": 1,
+      "model": [
+        "85",
+        0
+      ],
+      "positive": [
+        "71",
+        0
+      ],
+      "negative": [
+        "72",
+        0
+      ],
+      "latent_image": [
+        "83",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "23": {
+    "inputs": {
+      "filename_prefix": {{ filename_prefix | json }},
+      "subdirectory_name": "",
+      "output_format": {{ output_format | json }},
+      "quality": {{ output_quality | json }},
+      "metadata_scope": "full",
+      "include_batch_num": true,
+      "prefer_nearest": true,
+      "images": [
+        "50",
+        0
+      ]
+    },
+    "class_type": "SaveImageWithMetaData",
+    "_meta": {
+      "title": "Save Image With MetaData"
+    }
+  },
+  "36": {
+    "inputs": {
+      "absolute_path": {{ training_lora_path | json }},
+      "lora_strength": 1,
+      "model": [
+        "4",
+        0
+      ],
+      "clip": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "load_lora_from_absolute_path",
+    "_meta": {
+      "title": "Load Training LoRA From Absolute Path"
+    }
+  },
+  {% if inference_lora_enabled %}
+  "37": {
+    "inputs": {
+      "lora_name": {{ inference_lora | json }},
+      "strength_model": {{ inference_lora_strength }},
+      "strength_clip": {{ inference_lora_strength }},
+      "model": [
+        "36",
+        0
+      ],
+      "clip": [
+        "36",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Load Inference LoRA"
+    }
+  },
+  {% endif %}
+  "41": {
+    "inputs": {
+      "total": {{ sample_count }}
+    },
+    "class_type": "easy forLoopStart",
+    "_meta": {
+      "title": "For Loop Start"
+    }
+  },
+  "50": {
+    "inputs": {
+      "flow": [
+        "41",
+        0
+      ],
+      "initial_value1": [
+        "74",
+        0
+      ]
+    },
+    "class_type": "easy forLoopEnd",
+    "_meta": {
+      "title": "For Loop End"
+    }
+  },
+  "70": {
+    "inputs": {
+      "any": [
+        "{{ 1200 + sample_count - 2 }}",
+        0
+      ],
+      "index": [
+        "41",
+        1
+      ]
+    },
+    "class_type": "easy indexAnything",
+    "_meta": {
+      "title": "Prompt by Loop Index"
+    }
+  },
+  "71": {
+    "inputs": {
+      "prompt": [
+        "70",
+        0
+      ],
+      "clip": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        1
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "image": [
+        "82",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEdit",
+    "_meta": {
+      "title": "Qwen Image Edit Positive Conditioning"
+    }
+  },
+  "72": {
+    "inputs": {
+      "prompt": "",
+      "clip": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        1
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "image": [
+        "82",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEdit",
+    "_meta": {
+      "title": "Qwen Image Edit Negative Conditioning"
+    }
+  },
+  "73": {
+    "inputs": {
+      "any": [
+        "{{ 1300 + sample_count - 2 }}",
+        0
+      ],
+      "index": [
+        "41",
+        1
+      ]
+    },
+    "class_type": "easy indexAnything",
+    "_meta": {
+      "title": "Seed by Loop Index"
+    }
+  },
+  "74": {
+    "inputs": {
+      "any_1": [
+        "41",
+        2
+      ],
+      "any_2": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {
+      "title": "Append Image to Batch"
+    }
+  },
+  "80": {
+    "inputs": {
+      "any": [
+        "{{ 1500 + sample_count - 2 }}",
+        0
+      ],
+      "index": [
+        "41",
+        1
+      ]
+    },
+    "class_type": "easy indexAnything",
+    "_meta": {
+      "title": "Control Image by Loop Index"
+    }
+  },
+  "82": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "image": [
+        "80",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "Scale Control Image to 1 Megapixel"
+    }
+  },
+  "83": {
+    "inputs": {
+      "pixels": [
+        "82",
+        0
+      ],
+      "vae": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "Encode Control Image"
+    }
+  },
+  "84": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "Qwen Image Edit Model Sampling"
+    }
+  },
+  "85": {
+    "inputs": {
+      "strength": 1,
+      "model": [
+        "84",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "Qwen Image Edit CFG Norm"
+    }
+  }
+}

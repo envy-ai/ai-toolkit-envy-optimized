@@ -1,5 +1,7 @@
 import json
 import re
+import ast
+import itertools
 from math import gcd
 from collections import OrderedDict
 from typing import Optional
@@ -17,9 +19,10 @@ import warnings
 warnings.filterwarnings("ignore")
 logging.disable(logging.WARNING)
 
-# The deconstruction JSON is long. 128 tokens (base default) truncates it badly,
-# so enforce a sane floor for this captioner unless the user asked for more.
-MIN_NEW_TOKENS = 3072
+# The deconstruction JSON is long. The base 128-token default truncates it badly;
+# 1,536 tokens preserves several complete unique elements, while the partial-JSON
+# salvage path prevents repeated-element runaways from consuming the whole batch.
+MIN_NEW_TOKENS = 1536
 
 # Largest denominator allowed when snapping a real image's aspect ratio to a
 # clean W:H. Keeps captions in the same small-denominator ratio distribution the
@@ -82,9 +85,93 @@ class Ideogram4Captioner(Qwen3VLCaptioner):
         if start == -1 or end == -1 or end <= start:
             return None
         candidate = text[start : end + 1]
+        candidate = re.sub(
+            r'("high_level_description"\s*:\s*")\'(.*?)\',\s*[\'\"]style_description[\'\"]\s*:',
+            lambda match: match.group(1) + match.group(2).replace('"', '\\"') + '","style_description":',
+            candidate,
+            count=1,
+            flags=re.DOTALL,
+        )
+        candidate = re.sub(r'(?m)^(\s*)=\s*("#[0-9A-Fa-f]{6}")', r'\1\2', candidate)
         try:
             return json.loads(candidate)
         except json.JSONDecodeError:
+            try:
+                value = ast.literal_eval(candidate)
+                return value if isinstance(value, dict) else None
+            except (ValueError, SyntaxError):
+                for length in range(1, 4):
+                    for suffix in itertools.product(("}", "]"), repeat=length):
+                        repaired = candidate + "".join(suffix)
+                        for parser in (json.loads, ast.literal_eval):
+                            try:
+                                value = parser(repaired)
+                                if isinstance(value, dict):
+                                    return value
+                            except (ValueError, SyntaxError, json.JSONDecodeError):
+                                pass
+                return None
+
+    def _extract_partial_json(self, raw: str) -> Optional[dict]:
+        """Salvage complete leading fields/elements from a truncated generation.
+
+        Qwen occasionally repeats one element until max_new_tokens and therefore
+        omits the final array/object delimiters. The complete prefix is still
+        useful. Parse only independently complete JSON values, deduplicate exact
+        repeated elements, and fail closed if the required scene fields are not
+        all recoverable.
+        """
+        text = raw.strip()
+        fence = re.search(r"```(?:json)?\s*(.*)", text, re.DOTALL)
+        if fence:
+            text = fence.group(1).strip()
+        decoder = json.JSONDecoder()
+
+        def value_after(key: str):
+            match = re.search(rf'"{re.escape(key)}"\s*:\s*', text)
+            if not match:
+                raise ValueError(key)
+            value, _ = decoder.raw_decode(text, match.end())
+            return value
+
+        try:
+            high_level = value_after("high_level_description")
+            style = value_after("style_description")
+            background = value_after("background")
+            marker = re.search(r'"elements"\s*:\s*\[', text)
+            if not marker:
+                return None
+            position = marker.end()
+            elements = []
+            seen = set()
+            while position < len(text) and len(elements) < 24:
+                while position < len(text) and (text[position].isspace() or text[position] == ","):
+                    position += 1
+                if position >= len(text) or text[position] == "]":
+                    break
+                try:
+                    element, end = decoder.raw_decode(text, position)
+                except json.JSONDecodeError:
+                    break
+                position = end
+                if not isinstance(element, dict):
+                    continue
+                fingerprint = json.dumps(element, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                elements.append(element)
+            if not isinstance(style, dict) or not isinstance(background, str) or not elements:
+                return None
+            return {
+                "high_level_description": high_level,
+                "style_description": style,
+                "compositional_deconstruction": {
+                    "background": background,
+                    "elements": elements,
+                },
+            }
+        except (ValueError, json.JSONDecodeError):
             return None
 
     def _convert_bbox(self, bbox):
@@ -111,17 +198,81 @@ class Ideogram4Captioner(Qwen3VLCaptioner):
         to the shared normalizer for the rest: drop aspect_ratio, enforce the
         photo/art_style branch and key order, canonicalize medium, and cap/uppercase
         color palettes (16 per image, 5 per element)."""
+        style = data.get("style_description")
+        if not isinstance(style, dict):
+            style = {}
+            data["style_description"] = style
+        medium = str(style.get("medium") or "illustration")
+        style.setdefault("aesthetics", "coherent observed detail and clear visual hierarchy")
+        style.setdefault("lighting", "observed ambient and directional illumination")
+        style["medium"] = medium
+        if medium == "photograph":
+            style.setdefault("photo", "observed documentary or editorial photography")
+            style.pop("art_style", None)
+        else:
+            style.setdefault("art_style", "observed rendered visual style")
+            style.pop("photo", None)
+
         decon = data.get("compositional_deconstruction", {})
         elements = decon.get("elements", []) if isinstance(decon, dict) else []
         if isinstance(elements, list):
+            unique = []
+            seen = set()
             for el in elements:
-                if isinstance(el, dict) and "bbox" in el:
+                if not isinstance(el, dict):
+                    continue
+                aliases = {
+                    "typetype": "type", "typ": "type",
+                    "box": "bbox", "boundingbox": "bbox", "bounding_box": "bbox",
+                    "asc": "desc", "description": "desc",
+                    "palette": "color_palette", "colors": "color_palette",
+                }
+                cleaned = {}
+                for key, value in el.items():
+                    normalized_key = re.sub(r"^[^A-Za-z]+", "", re.sub(r"\s+", "", str(key).strip()))
+                    cleaned[aliases.get(normalized_key.lower(), normalized_key)] = value
+                el = cleaned
+                kind = str(el.get("type") or "").strip().lower()
+                if kind != "text":
+                    el["type"] = "text" if isinstance(el.get("text"), str) and el["text"].strip() else "obj"
+                if el.get("type") == "text" and isinstance(el.get("text"), str):
+                    el["text"] = " | ".join(part.strip() for part in re.split(r"[\r\n]+", el["text"]) if part.strip())
+                    if not el["text"]:
+                        continue
+                    el.setdefault("desc", f"Visible text reading {el['text']!r}")
+                elif el.get("type") == "obj":
+                    el.setdefault("desc", "Observed foreground object")
+                if "bbox" in el:
                     cleaned = self._convert_bbox(el["bbox"])
                     if cleaned is None:
                         el.pop("bbox", None)
                     else:
                         el["bbox"] = cleaned
-        return normalize_caption_dict(data)
+                fingerprint = json.dumps(el, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                unique.append(el)
+            decon["elements"] = unique
+        normalized = normalize_caption_dict(data)
+        # The compact prompt contract forbids overlapping text boxes. Keep the
+        # transcription, but drop the less reliable later box when Qwen assigns
+        # two text regions to the same pixels.
+        text_boxes = []
+        for element in normalized.get("compositional_deconstruction", {}).get("elements", []):
+            if element.get("type") != "text" or not element.get("bbox"):
+                continue
+            box = element["bbox"]
+            overlaps = any(
+                max(box[0], previous[0]) < min(box[2], previous[2])
+                and max(box[1], previous[1]) < min(box[3], previous[3])
+                for previous in text_boxes
+            )
+            if overlaps:
+                element.pop("bbox", None)
+            else:
+                text_boxes.append(box)
+        return normalized
 
     def get_caption_for_file(self, file_path: str) -> Optional[str]:
         try:
@@ -153,7 +304,10 @@ class Ideogram4Captioner(Qwen3VLCaptioner):
             inputs = inputs.to(self.device_torch)
 
             generated_ids = self.model.generate(
-                **inputs, max_new_tokens=self.caption_config.max_new_tokens
+                **inputs,
+                max_new_tokens=self.caption_config.max_new_tokens,
+                repetition_penalty=1.08,
+                no_repeat_ngram_size=6,
             )
             generated_ids_trimmed = [
                 out_ids[len(in_ids) :]
@@ -167,13 +321,16 @@ class Ideogram4Captioner(Qwen3VLCaptioner):
 
             data = self._extract_json(output_text)
             if data is None:
-                print(
-                    f"[IdeogramCaptioner] Could not parse JSON for {file_path}; "
-                    f"saving raw output with regex-adapted bboxes."
-                )
-                # JSON is malformed so we can't swap bboxes per-element. Adapt them
-                # directly in the raw text instead, so the boxes still render right.
-                return swap_bbox_xy_in_text(output_text)
+                data = self._extract_partial_json(output_text)
+                if data is None:
+                    print(
+                        f"[IdeogramCaptioner] Could not parse or salvage JSON for {file_path}; "
+                        f"saving raw output with regex-adapted bboxes."
+                    )
+                    # JSON is malformed so we can't swap bboxes per-element. Adapt them
+                    # directly in the raw text instead, so the boxes still render right.
+                    return swap_bbox_xy_in_text(output_text)
+                print(f"[IdeogramCaptioner] Salvaged truncated JSON for {file_path}.")
 
             data = self._normalize_caption(data)
             # Store pretty JSON for QC/editing; the dataloader minifies at load.

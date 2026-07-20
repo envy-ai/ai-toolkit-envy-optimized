@@ -1,5 +1,7 @@
 import copy
+import hashlib
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
@@ -7,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +19,18 @@ from toolkit.paths import get_path
 DEFAULT_COMFY_API_URL = "http://127.0.0.1:8188"
 DEFAULT_COMFY_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample.json.njk"
 DEFAULT_COMFY_BATCH_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample_batch_easy_use.json.njk"
+DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH = (
+    "config/comfy_templates/qwen_image_edit_lora_sample.json.njk"
+)
+DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH = (
+    "config/comfy_templates/qwen_image_edit_lora_sample_batch_easy_use.json.njk"
+)
+DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH = (
+    "config/comfy_templates/qwen_image_edit_plus_lora_sample.json.njk"
+)
+DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH = (
+    "config/comfy_templates/qwen_image_edit_plus_lora_sample_batch_easy_use.json.njk"
+)
 NUNJUCKS_RENDERER_PATH = "ui/scripts/render_comfy_template.mjs"
 
 
@@ -39,6 +54,9 @@ class ComfySampleRequest:
     training_lora_path: str
     training_lora_filename: str
     filename_prefix: str
+    control_image: Optional[str] = None
+    control_image_2: Optional[str] = None
+    control_image_3: Optional[str] = None
 
 
 @dataclass
@@ -61,6 +79,9 @@ class ComfyBatchSampleRequest:
     training_lora_path: str
     training_lora_filename: str
     filename_prefix: str
+    control_images: Optional[List[str]] = None
+    control_images_2: Optional[List[str]] = None
+    control_images_3: Optional[List[str]] = None
 
 
 def _find_node_id(workflow: Dict[str, Any], class_type: str) -> Optional[str]:
@@ -124,6 +145,19 @@ def build_template_context(request: Any) -> Dict[str, Any]:
     if isinstance(request, ComfyBatchSampleRequest):
         if len(request.prompts) < 2:
             raise ValueError("ComfyUI batch sample requests require at least two prompts")
+        control_images = request.control_images or []
+        control_images_2 = request.control_images_2 or []
+        control_images_3 = request.control_images_3 or []
+        for image_index, images in enumerate(
+            (control_images, control_images_2, control_images_3),
+            start=1,
+        ):
+            if images and len(images) != len(request.prompts):
+                raise ValueError(
+                    f"ComfyUI batch control-image {image_index} count must match the prompt count"
+                )
+        if control_images_3 and not control_images_2:
+            raise ValueError("ComfyUI batch control image 3 requires control image 2")
         lora_context = _training_lora_context(request.training_lora_filename, request.training_lora_path)
         return {
             "prompts": request.prompts,
@@ -134,6 +168,9 @@ def build_template_context(request: Any) -> Dict[str, Any]:
             "cfg": request.cfg,
             "seeds": request.seeds,
             "model": request.model,
+            "qwen_image_edit_plus_shift": (
+                3.1 if "2511" in (request.model or "").lower() else 3.0
+            ),
             "vae": request.vae,
             "text_encoder": request.text_encoder,
             "sampler": request.sampler,
@@ -144,11 +181,18 @@ def build_template_context(request: Any) -> Dict[str, Any]:
             "output_format": request.output_format,
             "output_quality": request.output_quality,
             "filename_prefix": request.filename_prefix,
+            "control_images": control_images,
+            "control_images_2": control_images_2,
+            "control_images_3": control_images_3,
+            "has_control_image_2": bool(control_images_2),
+            "has_control_image_3": bool(control_images_3),
             **lora_context,
         }
 
     training_lora_filename = request.training_lora_filename or os.path.basename(request.training_lora_path)
     training_lora_stem = _strip_safetensors(training_lora_filename)
+    if request.control_image_3 and not request.control_image_2:
+        raise ValueError("ComfyUI control image 3 requires control image 2")
     return {
         "prompt": request.prompt,
         "width": request.width,
@@ -170,6 +214,14 @@ def build_template_context(request: Any) -> Dict[str, Any]:
         "training_lora_filename": training_lora_filename,
         "training_lora_stem": training_lora_stem,
         "filename_prefix": request.filename_prefix,
+        "control_image": request.control_image,
+        "control_image_2": request.control_image_2,
+        "control_image_3": request.control_image_3,
+        "has_control_image_2": bool(request.control_image_2),
+        "has_control_image_3": bool(request.control_image_3),
+        "qwen_image_edit_plus_shift": (
+            3.1 if "2511" in (request.model or "").lower() else 3.0
+        ),
     }
 
 
@@ -359,6 +411,53 @@ class ComfyApiClient:
         if not response or "prompt_id" not in response:
             raise RuntimeError(f"ComfyUI did not return a prompt_id: {response}")
         return response["prompt_id"]
+
+    def upload_image(self, image_path: str, subfolder: str = "ai-toolkit") -> str:
+        if not os.path.isfile(image_path):
+            raise FileNotFoundError(f"ComfyUI control image does not exist: {image_path}")
+
+        source_name = os.path.basename(image_path)
+        path_hash = hashlib.sha256(os.path.abspath(image_path).encode("utf-8")).hexdigest()[:12]
+        upload_name = f"{path_hash}_{source_name}"
+        content_type = mimetypes.guess_type(source_name)[0] or "application/octet-stream"
+        boundary = f"----ai-toolkit-{uuid.uuid4().hex}"
+
+        def field_part(name: str, value: str) -> bytes:
+            return (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+
+        safe_upload_name = upload_name.replace('"', "_").replace("\r", "_").replace("\n", "_")
+        with open(image_path, "rb") as image_file:
+            image_data = image_file.read()
+        body = b"".join([
+            field_part("type", "input"),
+            field_part("subfolder", subfolder),
+            field_part("overwrite", "true"),
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="image"; filename="{safe_upload_name}"\r\n'
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode("utf-8"),
+            image_data,
+            f"\r\n--{boundary}--\r\n".encode("utf-8"),
+        ])
+        request = urllib.request.Request(
+            self._url("/api/upload/image"),
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            response_body = response.read()
+        result = json.loads(response_body.decode("utf-8")) if response_body else {}
+        remote_name = result.get("name")
+        if not remote_name:
+            raise RuntimeError(f"ComfyUI did not return an uploaded image name: {result}")
+        remote_subfolder = result.get("subfolder", subfolder)
+        return f"{remote_subfolder}/{remote_name}" if remote_subfolder else remote_name
 
     def get_history(self, prompt_id: str) -> Dict[str, Any]:
         return self._request_json("GET", f"/api/history/{urllib.parse.quote(prompt_id)}") or {}

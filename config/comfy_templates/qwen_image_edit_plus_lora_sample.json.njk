@@ -1,0 +1,265 @@
+{
+  "3": {
+    "inputs": {
+      "samples": [
+        "17",
+        0
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "upscale": -1,
+      "tile": false,
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 4096,
+      "temporal_overlap": 64
+    },
+    "class_type": "VAEUtils_VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE Decode (VAE Utils)"
+    }
+  },
+  "4": {
+    "inputs": {
+      "unet_name": {{ model | json }},
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Qwen Image Edit Plus Diffusion Model"
+    }
+  },
+  "5": {
+    "inputs": {
+      "clip_name": {{ text_encoder | json }},
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load Qwen Image CLIP"
+    }
+  },
+  "6": {
+    "inputs": {
+      "vae_name": {{ vae | json }},
+      "disable_offload": true
+    },
+    "class_type": "VAEUtils_CustomVAELoader",
+    "_meta": {
+      "title": "Load Qwen Image VAE (VAE Utils)"
+    }
+  },
+  "17": {
+    "inputs": {
+      "seed": {{ seed }},
+      "steps": {{ steps }},
+      "cfg": {{ cfg }},
+      "sampler_name": {{ sampler | json }},
+      "scheduler": {{ scheduler | json }},
+      "denoise": 1,
+      "model": [
+        "85",
+        0
+      ],
+      "positive": [
+        "71",
+        0
+      ],
+      "negative": [
+        "72",
+        0
+      ],
+      "latent_image": [
+        "83",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "23": {
+    "inputs": {
+      "filename_prefix": {{ filename_prefix | json }},
+      "subdirectory_name": "",
+      "output_format": {{ output_format | json }},
+      "quality": {{ output_quality | json }},
+      "metadata_scope": "full",
+      "include_batch_num": true,
+      "prefer_nearest": true,
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "SaveImageWithMetaData",
+    "_meta": {
+      "title": "Save Image With Metadata"
+    }
+  },
+  "36": {
+    "inputs": {
+      "absolute_path": {{ training_lora_path | json }},
+      "lora_strength": 1,
+      "model": [
+        "4",
+        0
+      ],
+      "clip": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "load_lora_from_absolute_path",
+    "_meta": {
+      "title": "Load Training LoRA From Absolute Path"
+    }
+  },
+  {% if inference_lora_enabled %}
+  "37": {
+    "inputs": {
+      "lora_name": {{ inference_lora | json }},
+      "strength_model": {{ inference_lora_strength }},
+      "strength_clip": {{ inference_lora_strength }},
+      "model": [
+        "36",
+        0
+      ],
+      "clip": [
+        "36",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Load Inference LoRA"
+    }
+  },
+  {% endif %}
+  "71": {
+    "inputs": {
+      "prompt": {{ prompt | json }},
+      "clip": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        1
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "image1": [
+        "80",
+        0
+      ]
+      {% if has_control_image_2 %},
+      "image2": [
+        "86",
+        0
+      ]
+      {% endif %}
+      {% if has_control_image_3 %},
+      "image3": [
+        "88",
+        0
+      ]
+      {% endif %}
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "Qwen Image Edit Plus Positive Conditioning"
+    }
+  },
+  "72": {
+    "inputs": {
+      "prompt": "",
+      "clip": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        1
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "image": [
+        "80",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEdit",
+    "_meta": {
+      "title": "Qwen Image Edit Negative Conditioning"
+    }
+  },
+  "80": {
+    "inputs": {
+      "image": {{ control_image | json }}
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Primary Control Image"
+    }
+  },
+  {% if has_control_image_2 %}
+  "86": {
+    "inputs": {
+      "image": {{ control_image_2 | json }}
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Second Control Image"
+    }
+  },
+  {% endif %}
+  {% if has_control_image_3 %}
+  "88": {
+    "inputs": {
+      "image": {{ control_image_3 | json }}
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Third Control Image"
+    }
+  },
+  {% endif %}
+  "83": {
+    "inputs": {
+      "width": {{ width }},
+      "height": {{ height }},
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Output Latent"
+    }
+  },
+  "84": {
+    "inputs": {
+      "shift": {{ qwen_image_edit_plus_shift }},
+      "model": [
+        {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "Qwen Image Edit Plus Model Sampling"
+    }
+  },
+  "85": {
+    "inputs": {
+      "strength": 1,
+      "model": [
+        "84",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "Qwen Image Edit Plus CFG Norm"
+    }
+  }
+}

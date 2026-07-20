@@ -1,0 +1,62 @@
+ComfyUI dynamic model reread fix
+================================
+
+Based on upstream ComfyUI commit:
+
+    52b2dcd76c8f8281fc1041127f1c743be5e74bab
+    Test fix for model reloading issue.
+
+Problem
+-------
+
+ComfyUI's execution cache and its dynamic model-weight residency are separate
+layers. A loader or LoRA node can correctly appear in `execution_cached` while
+the AIMDO dynamic loader still has to make the model weights resident again.
+
+`cast_to_gathered()` was unconditionally calling
+`read_tensor_file_slice_into()`. That is the direct file-backed transfer path
+intended for `--fast-disk`. With the normal configuration, every dynamic VBAR
+fault could therefore reread weight slices from the safetensors backing file
+instead of falling through to the normal RAM-backed tensor-copy path.
+
+This was especially visible when changing LoRAs. A new patch signature makes
+dynamic weight pages dirty, and the unconditional direct-read path then
+restreamed large portions of the base model while rebuilding those pages. Node
+caching did not prevent this because the cached object was the ModelPatcher,
+not the residency of every weight page.
+
+The observed behavior was intermittent because Linux's page cache could make
+later reads cheap. The first sample after a cold or stale residency state was
+very slow; after it warmed the file pages and pinned buffers, the same workflow
+became fast again. Restarting or switching to one batch prompt changed that
+working-set state, which made either action appear to fix the problem.
+
+Fix
+---
+
+Use the direct file-slice path only when the user explicitly enables
+`--fast-disk`. Otherwise, fall through to the existing tensor-storage path,
+which marks the mmap as dirty and copies from the RAM-backed tensor. This lets
+the normal pinned-memory and RAM residency mechanisms do their jobs without
+requiring `--high-ram`.
+
+Apply from a ComfyUI checkout with:
+
+    git apply /path/to/comfyui_dynamic_model_reread_fix.patch
+
+The running ComfyUI process must be restarted after applying the patch because
+`comfy.model_management` is imported at process startup.
+
+diff --git a/comfy/model_management.py b/comfy/model_management.py
+index 222005b6..7afcd966 100644
+--- a/comfy/model_management.py
++++ b/comfy/model_management.py
+@@ -1451,7 +1451,7 @@ def cast_to_gathered(tensors, r, non_blocking=False, stream=None, r2=None):
+             dest2_view = dest2_views.pop(0) if dest2_views is not None else None
+             if tensor is None:
+                 continue
+-            if comfy.memory_management.read_tensor_file_slice_into(tensor, dest_view, stream=stream, destination2=dest2_view):
++            if args.fast_disk and comfy.memory_management.read_tensor_file_slice_into(tensor, dest_view, stream=stream, destination2=dest2_view):
+                 continue
+             storage = tensor._qdata.untyped_storage() if isinstance(tensor, comfy.quant_ops.QuantizedTensor) else tensor.untyped_storage()
+             mark_mmap_dirty(storage)

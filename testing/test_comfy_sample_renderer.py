@@ -1,9 +1,11 @@
 import copy
 import pathlib
 import sys
+import tempfile
 import types
 import unittest
 from dataclasses import replace
+from unittest import mock
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -264,6 +266,211 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(rendered["1100"]["inputs"]["value"], 123)
         self.assertEqual(rendered["1101"]["inputs"]["value"], 124)
 
+    def test_renders_qwen_image_edit_easy_use_batch_template(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        batch_request = comfy_sample.ComfyBatchSampleRequest(
+            prompts=["make it winter", "make it sunset"],
+            width=1024,
+            height=1024,
+            steps=20,
+            cfg=2.5,
+            seeds=[123, 124],
+            model="qwen_image_edit_fp8_e4m3fn.safetensors",
+            vae="qwen_image_vae.safetensors",
+            text_encoder="qwen_2.5_vl_7b_fp8_scaled.safetensors",
+            sampler="euler",
+            scheduler="simple",
+            inference_lora="",
+            inference_lora_strength=1,
+            output_format="webp_with_json",
+            output_quality="high",
+            training_lora_path="/tmp/current_lora.safetensors",
+            training_lora_filename="current_lora.safetensors",
+            filename_prefix="ai-toolkit/qwen_edit_batch",
+            control_images=[
+                "ai-toolkit/first.png",
+                "ai-toolkit/second.png",
+            ],
+        )
+
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH,
+            batch_request,
+        )
+
+        self.assertEqual(rendered["4"]["inputs"]["unet_name"], "qwen_image_edit_fp8_e4m3fn.safetensors")
+        self.assertEqual(rendered["5"]["inputs"]["type"], "qwen_image")
+        self.assertEqual(rendered["6"]["inputs"]["vae_name"], "qwen_image_vae.safetensors")
+        self.assertEqual(rendered["1400"]["class_type"], "LoadImage")
+        self.assertEqual(rendered["1400"]["inputs"]["image"], "ai-toolkit/first.png")
+        self.assertEqual(rendered["1401"]["inputs"]["image"], "ai-toolkit/second.png")
+        self.assertEqual(rendered["80"]["inputs"]["any"], ["1500", 0])
+        self.assertNotIn("81", rendered)
+        self.assertEqual(rendered["82"]["class_type"], "ImageScaleToTotalPixels")
+        self.assertEqual(rendered["82"]["inputs"]["megapixels"], 1)
+        self.assertEqual(rendered["82"]["inputs"]["image"], ["80", 0])
+        self.assertEqual(rendered["71"]["class_type"], "TextEncodeQwenImageEdit")
+        self.assertEqual(rendered["71"]["inputs"]["prompt"], ["70", 0])
+        self.assertEqual(rendered["71"]["inputs"]["image"], ["82", 0])
+        self.assertEqual(rendered["72"]["class_type"], "TextEncodeQwenImageEdit")
+        self.assertEqual(rendered["72"]["inputs"]["prompt"], "")
+        self.assertEqual(rendered["83"]["class_type"], "VAEEncode")
+        self.assertEqual(rendered["83"]["inputs"]["pixels"], ["82", 0])
+        self.assertEqual(rendered["84"]["class_type"], "ModelSamplingAuraFlow")
+        self.assertEqual(rendered["84"]["inputs"]["shift"], 3)
+        self.assertEqual(rendered["84"]["inputs"]["model"], ["36", 0])
+        self.assertEqual(rendered["85"]["class_type"], "CFGNorm")
+        self.assertEqual(rendered["17"]["inputs"]["model"], ["85", 0])
+        self.assertEqual(rendered["17"]["inputs"]["latent_image"], ["83", 0])
+        self.assertNotIn("37", rendered)
+
+    def test_renders_qwen_image_edit_single_template(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        request = replace(
+            self.request,
+            model="qwen_image_edit_fp8_e4m3fn.safetensors",
+            control_image="ai-toolkit/reference.png",
+        )
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
+            request,
+        )
+
+        self.assertEqual(rendered["17"]["inputs"]["seed"], 123)
+        self.assertEqual(rendered["71"]["inputs"]["prompt"], "new prompt")
+        self.assertEqual(rendered["80"]["inputs"]["image"], "ai-toolkit/reference.png")
+        self.assertEqual(rendered["83"]["class_type"], "VAEEncode")
+        self.assertEqual(rendered["23"]["inputs"]["images"], ["3", 0])
+        self.assertFalse(any(node["class_type"].startswith("easy ") for node in rendered.values()))
+
+    def test_renders_qwen_image_edit_plus_easy_use_batch_template(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        batch_request = comfy_sample.ComfyBatchSampleRequest(
+            prompts=["combine the subjects", "swap the materials"],
+            width=1024,
+            height=1024,
+            steps=20,
+            cfg=2.5,
+            seeds=[123, 124],
+            model="qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+            vae="qwen_image_vae.safetensors",
+            text_encoder="qwen_2.5_vl_7b_fp8_scaled.safetensors",
+            sampler="euler",
+            scheduler="simple",
+            inference_lora="",
+            inference_lora_strength=1,
+            output_format="webp_with_json",
+            output_quality="high",
+            training_lora_path="/tmp/current_lora.safetensors",
+            training_lora_filename="current_lora.safetensors",
+            filename_prefix="ai-toolkit/qwen_edit_plus_batch",
+            control_images=["ai-toolkit/first-a.png", "ai-toolkit/first-b.png"],
+            control_images_2=["ai-toolkit/second-a.png", "ai-toolkit/second-b.png"],
+            control_images_3=["ai-toolkit/third-a.png", "ai-toolkit/third-b.png"],
+        )
+
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH,
+            batch_request,
+        )
+
+        self.assertEqual(rendered["5"]["inputs"]["type"], "qwen_image")
+        self.assertEqual(rendered["1600"]["class_type"], "LoadImage")
+        self.assertEqual(rendered["1600"]["inputs"]["image"], "ai-toolkit/second-a.png")
+        self.assertEqual(rendered["1801"]["inputs"]["image"], "ai-toolkit/third-b.png")
+        self.assertEqual(rendered["71"]["class_type"], "TextEncodeQwenImageEditPlus")
+        self.assertEqual(rendered["71"]["inputs"]["image1"], ["80", 0])
+        self.assertEqual(rendered["71"]["inputs"]["image2"], ["86", 0])
+        self.assertEqual(rendered["71"]["inputs"]["image3"], ["88", 0])
+        self.assertEqual(rendered["72"]["class_type"], "TextEncodeQwenImageEdit")
+        self.assertEqual(rendered["72"]["inputs"]["prompt"], "")
+        self.assertEqual(rendered["72"]["inputs"]["image"], ["80", 0])
+        self.assertNotIn("image1", rendered["72"]["inputs"])
+        self.assertNotIn("90", rendered)
+        self.assertNotIn("91", rendered)
+        self.assertEqual(rendered["17"]["inputs"]["positive"], ["71", 0])
+        self.assertEqual(rendered["17"]["inputs"]["negative"], ["72", 0])
+        self.assertEqual(rendered["83"]["class_type"], "EmptyLatentImage")
+        self.assertEqual(rendered["83"]["inputs"]["width"], 1024)
+        self.assertEqual(rendered["83"]["inputs"]["height"], 1024)
+        self.assertEqual(rendered["83"]["inputs"]["batch_size"], 1)
+        self.assertEqual(rendered["84"]["inputs"]["shift"], 3)
+        self.assertEqual(rendered["17"]["inputs"]["latent_image"], ["83", 0])
+
+        rendered_2511 = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH,
+            replace(batch_request, model="qwen_image_edit_2511_bf16.safetensors"),
+        )
+        self.assertEqual(rendered_2511["84"]["inputs"]["shift"], 3.1)
+
+    def test_renders_qwen_image_edit_plus_single_template_with_sample_resolution(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        request = replace(
+            self.request,
+            model="qwen_image_edit_2511_bf16.safetensors",
+            control_image="ai-toolkit/character.png",
+            control_image_2="ai-toolkit/pose.png",
+        )
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,
+            request,
+        )
+
+        self.assertEqual(rendered["17"]["inputs"]["seed"], 123)
+        self.assertEqual(rendered["71"]["inputs"]["prompt"], "new prompt")
+        self.assertEqual(rendered["71"]["inputs"]["image1"], ["80", 0])
+        self.assertEqual(rendered["71"]["inputs"]["image2"], ["86", 0])
+        self.assertNotIn("image3", rendered["71"]["inputs"])
+        self.assertEqual(rendered["80"]["inputs"]["image"], "ai-toolkit/character.png")
+        self.assertEqual(rendered["86"]["inputs"]["image"], "ai-toolkit/pose.png")
+        self.assertNotIn("88", rendered)
+        self.assertEqual(rendered["83"]["inputs"]["width"], 904)
+        self.assertEqual(rendered["83"]["inputs"]["height"], 1464)
+        self.assertEqual(rendered["84"]["inputs"]["shift"], 3.1)
+        self.assertEqual(rendered["23"]["inputs"]["images"], ["3", 0])
+        self.assertFalse(any(node["class_type"].startswith("easy ") for node in rendered.values()))
+
+    def test_qwen_image_edit_plus_template_omits_unused_optional_images(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        batch_request = comfy_sample.ComfyBatchSampleRequest(
+            prompts=["first", "second"],
+            width=1024,
+            height=1024,
+            steps=20,
+            cfg=2.5,
+            seeds=[123, 124],
+            model="qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+            vae="qwen_image_vae.safetensors",
+            text_encoder="qwen_2.5_vl_7b_fp8_scaled.safetensors",
+            sampler="euler",
+            scheduler="simple",
+            inference_lora="",
+            inference_lora_strength=1,
+            output_format="webp_with_json",
+            output_quality="high",
+            training_lora_path="/tmp/current_lora.safetensors",
+            training_lora_filename="current_lora.safetensors",
+            filename_prefix="ai-toolkit/qwen_edit_plus_batch",
+            control_images=["ai-toolkit/first.png", "ai-toolkit/second.png"],
+        )
+
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH,
+            batch_request,
+        )
+
+        self.assertNotIn("image2", rendered["71"]["inputs"])
+        self.assertNotIn("image3", rendered["71"]["inputs"])
+        self.assertNotIn("86", rendered)
+        self.assertNotIn("87", rendered)
+        self.assertNotIn("88", rendered)
+        self.assertNotIn("89", rendered)
+
     def test_extracts_combo_options_from_comfy_object_info(self):
         from toolkit.comfy_sample import extract_input_options
 
@@ -389,6 +596,29 @@ class ComfyApiClientTests(unittest.TestCase):
             ("POST", "/api/free", {"unload_models": True, "free_memory": True})
         ])
 
+    def test_upload_image_posts_multipart_to_comfy_input_storage(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = (
+            b'{"name":"uploaded.png","subfolder":"ai-toolkit","type":"input"}'
+        )
+        with tempfile.NamedTemporaryFile(suffix=".png") as image_file:
+            image_file.write(b"png bytes")
+            image_file.flush()
+            with mock.patch("toolkit.comfy_sample.urllib.request.urlopen", return_value=response) as urlopen:
+                remote_name = ComfyApiClient().upload_image(image_file.name)
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8188/api/upload/image")
+        self.assertEqual(request.method, "POST")
+        self.assertIn("multipart/form-data", request.headers["Content-type"])
+        self.assertIn(b'name="type"', request.data)
+        self.assertIn(b'name="subfolder"', request.data)
+        self.assertIn(b'name="image"', request.data)
+        self.assertIn(b"png bytes", request.data)
+        self.assertEqual(remote_name, "ai-toolkit/uploaded.png")
+
 
 class ComfySampleTrainProcessTests(unittest.TestCase):
     def test_train_process_offloads_models_once_before_comfy_sample_loop(self):
@@ -455,16 +685,71 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         self.assertIn("send_prompts_as_batch", source)
         self.assertIn("_render_comfy_sample_batch(gen_img_config_list, sample_config, step=step)", source)
 
-    def test_batch_workflow_config_falls_back_to_single_template_for_individual_samples(self):
+    def test_comfy_batch_dispatch_allows_per_sample_scalar_overrides(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+
+        self.assertNotIn("def _can_render_comfy_sample_batch", source)
+        self.assertNotIn("ComfyUI prompt batching requires matching width", source)
+        self.assertIn(
+            "if sample_config.comfy.send_prompts_as_batch and len(gen_img_config_list) > 1:",
+            source,
+        )
+
+    def test_qwen_image_edit_batch_uploads_control_images_before_rendering(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        batch_start = source.index("def _render_comfy_sample_batch")
+        sample_start = source.index("def sample", batch_start)
+        batch_source = source[batch_start:sample_start]
+
+        self.assertIn("DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH", source)
+        self.assertIn("gen_config.ctrl_img_1 or gen_config.ctrl_img", batch_source)
+        self.assertIn("client.upload_image(control_image_path)", batch_source)
+        self.assertIn("control_images=uploaded_control_images", batch_source)
+
+    def test_qwen_image_edit_plus_batch_uploads_up_to_three_control_images(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        batch_start = source.index("def _render_comfy_sample_batch")
+        sample_start = source.index("def sample", batch_start)
+        batch_source = source[batch_start:sample_start]
+
+        self.assertIn("DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH", source)
+        self.assertIn("control_image_paths_2", batch_source)
+        self.assertIn("control_image_paths_3", batch_source)
+        self.assertIn("control_images_2=uploaded_control_images_2", batch_source)
+        self.assertIn("control_images_3=uploaded_control_images_3", batch_source)
+        self.assertIn("same number of control images", batch_source)
+
+    def test_workflow_config_selects_batch_and_single_templates(self):
         source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
         workflow_start = source.index("def _get_comfy_workflow_path")
         workflow_end = source.index("\n    def ", workflow_start + 1)
         workflow_source = source[workflow_start:workflow_end]
 
-        self.assertIn("if batch and workflow_path == DEFAULT_COMFY_WORKFLOW_PATH", workflow_source)
-        self.assertIn("return DEFAULT_COMFY_BATCH_WORKFLOW_PATH", workflow_source)
-        self.assertIn("if not batch and workflow_path == DEFAULT_COMFY_BATCH_WORKFLOW_PATH", workflow_source)
-        self.assertIn("return DEFAULT_COMFY_WORKFLOW_PATH", workflow_source)
+        self.assertIn("(DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH)", workflow_source)
+        self.assertIn(
+            "DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,\n"
+            "                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH",
+            workflow_source,
+        )
+        self.assertIn(
+            "DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH,\n"
+            "                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH",
+            workflow_source,
+        )
+
+    def test_qwen_single_workflows_upload_control_images_per_sample(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        single_start = source.index("def _render_comfy_samples")
+        batch_start = source.index("def _render_comfy_sample_batch", single_start)
+        single_source = source[single_start:batch_start]
+
+        self.assertIn("DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH", single_source)
+        self.assertIn("client.upload_image(control_image_path)", single_source)
+        self.assertIn("client.upload_image(control_image_path_2)", single_source)
+        self.assertIn("client.upload_image(control_image_path_3)", single_source)
+        self.assertIn("control_image=uploaded_control_image", single_source)
+        self.assertIn("control_image_2=uploaded_control_image_2", single_source)
+        self.assertIn("control_image_3=uploaded_control_image_3", single_source)
 
     def test_train_process_can_run_comfy_sampling_in_background(self):
         source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
@@ -526,7 +811,8 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
 
         self.assertIn("training_lora_path_replace_from", method_source)
         self.assertIn("training_lora_path_replace_to", method_source)
-        self.assertIn("training_lora_path.replace(replace_from, replace_to, 1)", method_source)
+        self.assertIn("replace_to.endswith(('/', '\\\\'))", method_source)
+        self.assertIn("return replace_to + suffix", method_source)
         self.assertIn("comfy_training_lora_path = self._get_comfy_training_lora_path", render_source)
         self.assertIn("training_lora_path=comfy_training_lora_path", render_source)
 

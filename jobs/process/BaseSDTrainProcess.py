@@ -80,6 +80,10 @@ from toolkit.comfy_sample import (
     ComfyBatchSampleRequest,
     ComfySampleRequest,
     DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
+    DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
+    DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH,
+    DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,
+    DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH,
     DEFAULT_COMFY_WORKFLOW_PATH,
     get_workflow_for_samples,
     get_workflow_for_sample,
@@ -374,7 +378,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
         replace_to = getattr(comfy_config, 'training_lora_path_replace_to', '') or ''
         if not replace_from:
             return training_lora_path
-        return training_lora_path.replace(replace_from, replace_to, 1)
+        suffix = training_lora_path[len(replace_from):] if training_lora_path.startswith(replace_from) else None
+        if suffix is None:
+            return training_lora_path
+        if replace_to.endswith(('/', '\\')) and suffix.startswith(('/', '\\')):
+            suffix = suffix[1:]
+        return replace_to + suffix
 
     def _cleanup_legacy_comfy_sample_loras(self, sample_folder):
         for stale_path in glob.glob(os.path.join(sample_folder, f'.{self.job.name}*_comfy_current*.safetensors')):
@@ -660,41 +669,51 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def _get_comfy_workflow_path(self, comfy_config, batch=False):
         workflow_path = comfy_config.workflow_path
-        if batch and workflow_path == DEFAULT_COMFY_WORKFLOW_PATH:
-            return DEFAULT_COMFY_BATCH_WORKFLOW_PATH
-        if not batch and workflow_path == DEFAULT_COMFY_BATCH_WORKFLOW_PATH:
-            return DEFAULT_COMFY_WORKFLOW_PATH
+        if batch:
+            workflow_pairs = (
+                (DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH),
+                (
+                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
+                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH,
+                ),
+                (
+                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,
+                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH,
+                ),
+            )
+        else:
+            workflow_pairs = (
+                (DEFAULT_COMFY_BATCH_WORKFLOW_PATH, DEFAULT_COMFY_WORKFLOW_PATH),
+                (
+                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH,
+                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
+                ),
+                (
+                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH,
+                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,
+                ),
+            )
+        for source_path, target_path in workflow_pairs:
+            if workflow_path == source_path:
+                return target_path
         return workflow_path
-
-    def _can_render_comfy_sample_batch(self, gen_img_config_list: List[GenerateImageConfig]):
-        if len(gen_img_config_list) <= 1:
-            return False
-        first_config = gen_img_config_list[0]
-        for gen_config in gen_img_config_list[1:]:
-            if (
-                gen_config.width != first_config.width or
-                gen_config.height != first_config.height or
-                gen_config.num_inference_steps != first_config.num_inference_steps or
-                gen_config.guidance_scale != first_config.guidance_scale
-            ):
-                print_acc(
-                    "ComfyUI prompt batching requires matching width, height, "
-                    "sample steps, and CFG. Falling back to individual prompts."
-                )
-                return False
-        return True
 
     def _render_comfy_samples(self, gen_img_config_list: List[GenerateImageConfig], sample_config: SampleConfig, step=None):
         if len(gen_img_config_list) == 0:
             return
 
+        comfy_config = sample_config.comfy
+        workflow_path = self._get_comfy_workflow_path(comfy_config)
+        is_qwen_image_edit_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH
+        is_qwen_image_edit_plus_workflow = (
+            workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH
+        )
+
         sample_folder = os.path.join(self.save_root, 'samples')
         self._cleanup_legacy_comfy_sample_loras(sample_folder)
         training_lora_path = self._save_current_network_for_comfy(step=step)
         training_lora_filename = self._get_comfy_lora_display_filename(step)
-        comfy_config = sample_config.comfy
         comfy_training_lora_path = self._get_comfy_training_lora_path(training_lora_path, comfy_config)
-        workflow_path = self._get_comfy_workflow_path(comfy_config)
         workflow = None
         if not workflow_path_is_template(workflow_path):
             workflow = load_workflow(workflow_path)
@@ -713,6 +732,49 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 for i, gen_config in enumerate(gen_img_config_list):
                     output_path = gen_config.get_image_path(i)
                     output_stem = os.path.splitext(os.path.basename(output_path))[0]
+                    control_image_path = gen_config.ctrl_img_1 or gen_config.ctrl_img
+                    control_image_path_2 = gen_config.ctrl_img_2
+                    control_image_path_3 = gen_config.ctrl_img_3
+                    if is_qwen_image_edit_workflow:
+                        if control_image_path_2 is not None or control_image_path_3 is not None:
+                            raise ValueError(
+                                f"Qwen Image Edit ComfyUI sample {i + 1} supports one control image. "
+                                "Use ctrl_img or ctrl_img_1, not ctrl_img_2/ctrl_img_3."
+                            )
+                        if not control_image_path:
+                            raise ValueError(
+                                f"Qwen Image Edit ComfyUI sample {i + 1} is missing "
+                                "ctrl_img or ctrl_img_1."
+                            )
+                    elif is_qwen_image_edit_plus_workflow:
+                        if not control_image_path:
+                            raise ValueError(
+                                f"Qwen Image Edit Plus ComfyUI sample {i + 1} is missing "
+                                "ctrl_img or ctrl_img_1."
+                            )
+                        if control_image_path_3 is not None and control_image_path_2 is None:
+                            raise ValueError(
+                                f"Qwen Image Edit Plus ComfyUI sample {i + 1} has "
+                                "ctrl_img_3 without ctrl_img_2."
+                            )
+
+                    uploaded_control_image = (
+                        client.upload_image(control_image_path)
+                        if control_image_path and (
+                            is_qwen_image_edit_workflow or is_qwen_image_edit_plus_workflow
+                        )
+                        else None
+                    )
+                    uploaded_control_image_2 = (
+                        client.upload_image(control_image_path_2)
+                        if control_image_path_2 and is_qwen_image_edit_plus_workflow
+                        else None
+                    )
+                    uploaded_control_image_3 = (
+                        client.upload_image(control_image_path_3)
+                        if control_image_path_3 and is_qwen_image_edit_plus_workflow
+                        else None
+                    )
                     request = ComfySampleRequest(
                         prompt=gen_config.prompt,
                         width=gen_config.width,
@@ -732,6 +794,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         training_lora_path=comfy_training_lora_path,
                         training_lora_filename=training_lora_filename,
                         filename_prefix=f"ai-toolkit/{output_stem}",
+                        control_image=uploaded_control_image,
+                        control_image_2=uploaded_control_image_2,
+                        control_image_3=uploaded_control_image_3,
                     )
                     patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)
                     prompt_id = client.post_prompt(patched_workflow)
@@ -779,6 +844,52 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if not workflow_path_is_template(workflow_path):
             print_acc("ComfyUI prompt batching requires a .njk workflow template. Falling back to individual prompts.")
             return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
+        is_qwen_image_edit_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH
+        is_qwen_image_edit_plus_workflow = (
+            workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH
+        )
+        control_image_paths = []
+        control_image_paths_2 = []
+        control_image_paths_3 = []
+        if is_qwen_image_edit_workflow:
+            for i, gen_config in enumerate(gen_img_config_list):
+                if gen_config.ctrl_img_2 is not None or gen_config.ctrl_img_3 is not None:
+                    raise ValueError(
+                        "The Qwen Image Edit ComfyUI batch workflow supports one control image per sample. "
+                        "Use ctrl_img or ctrl_img_1, not ctrl_img_2/ctrl_img_3."
+                    )
+                control_image_path = gen_config.ctrl_img_1 or gen_config.ctrl_img
+                if not control_image_path:
+                    raise ValueError(
+                        f"Qwen Image Edit ComfyUI sample {i + 1} is missing ctrl_img or ctrl_img_1."
+                    )
+                control_image_paths.append(control_image_path)
+        elif is_qwen_image_edit_plus_workflow:
+            reference_counts = set()
+            for i, gen_config in enumerate(gen_img_config_list):
+                control_image_path = gen_config.ctrl_img_1 or gen_config.ctrl_img
+                if not control_image_path:
+                    raise ValueError(
+                        f"Qwen Image Edit Plus ComfyUI sample {i + 1} is missing ctrl_img or ctrl_img_1."
+                    )
+                if gen_config.ctrl_img_3 is not None and gen_config.ctrl_img_2 is None:
+                    raise ValueError(
+                        f"Qwen Image Edit Plus ComfyUI sample {i + 1} has ctrl_img_3 without ctrl_img_2."
+                    )
+                control_image_paths.append(control_image_path)
+                reference_count = 1
+                if gen_config.ctrl_img_2 is not None:
+                    control_image_paths_2.append(gen_config.ctrl_img_2)
+                    reference_count = 2
+                if gen_config.ctrl_img_3 is not None:
+                    control_image_paths_3.append(gen_config.ctrl_img_3)
+                    reference_count = 3
+                reference_counts.add(reference_count)
+            if len(reference_counts) != 1:
+                raise ValueError(
+                    "Qwen Image Edit Plus ComfyUI batching requires every sample to use "
+                    "the same number of control images."
+                )
 
         sample_folder = os.path.join(self.save_root, 'samples')
         self._cleanup_legacy_comfy_sample_loras(sample_folder)
@@ -788,26 +899,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
         output_paths = [gen_config.get_image_path(i) for i, gen_config in enumerate(gen_img_config_list)]
         first_output_stem = os.path.splitext(os.path.basename(output_paths[0]))[0]
         first_config = gen_img_config_list[0]
-        request = ComfyBatchSampleRequest(
-            prompts=[gen_config.prompt for gen_config in gen_img_config_list],
-            width=first_config.width,
-            height=first_config.height,
-            steps=first_config.num_inference_steps,
-            cfg=first_config.guidance_scale,
-            seeds=[gen_config.seed for gen_config in gen_img_config_list],
-            model=comfy_config.model,
-            vae=comfy_config.vae,
-            text_encoder=comfy_config.text_encoder,
-            sampler=comfy_config.sampler,
-            scheduler=comfy_config.scheduler,
-            inference_lora=comfy_config.inference_lora,
-            inference_lora_strength=comfy_config.inference_lora_strength,
-            output_format=comfy_config.output_format,
-            output_quality=comfy_config.output_quality,
-            training_lora_path=comfy_training_lora_path,
-            training_lora_filename=training_lora_filename,
-            filename_prefix=f"ai-toolkit/{first_output_stem}_batch",
-        )
         client = ComfyApiClient(
             api_url=comfy_config.api_url,
             timeout=comfy_config.timeout,
@@ -817,6 +908,41 @@ class BaseSDTrainProcess(BaseTrainProcess):
             sample_generation_start = time.perf_counter()
             completed_samples = 0
             try:
+                uploaded_control_images = [
+                    client.upload_image(control_image_path)
+                    for control_image_path in control_image_paths
+                ]
+                uploaded_control_images_2 = [
+                    client.upload_image(control_image_path)
+                    for control_image_path in control_image_paths_2
+                ]
+                uploaded_control_images_3 = [
+                    client.upload_image(control_image_path)
+                    for control_image_path in control_image_paths_3
+                ]
+                request = ComfyBatchSampleRequest(
+                    prompts=[gen_config.prompt for gen_config in gen_img_config_list],
+                    width=first_config.width,
+                    height=first_config.height,
+                    steps=first_config.num_inference_steps,
+                    cfg=first_config.guidance_scale,
+                    seeds=[gen_config.seed for gen_config in gen_img_config_list],
+                    model=comfy_config.model,
+                    vae=comfy_config.vae,
+                    text_encoder=comfy_config.text_encoder,
+                    sampler=comfy_config.sampler,
+                    scheduler=comfy_config.scheduler,
+                    inference_lora=comfy_config.inference_lora,
+                    inference_lora_strength=comfy_config.inference_lora_strength,
+                    output_format=comfy_config.output_format,
+                    output_quality=comfy_config.output_quality,
+                    training_lora_path=comfy_training_lora_path,
+                    training_lora_filename=training_lora_filename,
+                    filename_prefix=f"ai-toolkit/{first_output_stem}_batch",
+                    control_images=uploaded_control_images,
+                    control_images_2=uploaded_control_images_2,
+                    control_images_3=uploaded_control_images_3,
+                )
                 patched_workflow = get_workflow_for_samples(workflow_path, request)
                 self._log_comfy_sample_generation_start(len(gen_img_config_list), batch=True)
                 if offload_models:
@@ -955,7 +1081,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         
         # send to be generated
         if getattr(sample_config, 'comfy', None) is not None and sample_config.comfy.enabled:
-            if sample_config.comfy.send_prompts_as_batch and self._can_render_comfy_sample_batch(gen_img_config_list):
+            if sample_config.comfy.send_prompts_as_batch and len(gen_img_config_list) > 1:
                 self._render_comfy_sample_batch(gen_img_config_list, sample_config, step=step)
             else:
                 self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
