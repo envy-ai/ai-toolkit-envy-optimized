@@ -65,6 +65,15 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'config.process[0].network.pretrained_lora_path': {
+    title: 'Pretrained LoRA Path',
+    description: (
+      <>
+        Optional local path to an existing LoRA to use as the starting weights for training. This initializes the
+        network weights without resuming the pretrained LoRA&apos;s training step metadata.
+      </>
+    ),
+  },
   'datasets.control_path': {
     title: 'Control Dataset',
     description: (

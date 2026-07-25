@@ -95,7 +95,7 @@ class ComfySampleConfig:
         self.training_lora_path_replace_to: str = kwargs.get('training_lora_path_replace_to', '')
         self.output_format: str = kwargs.get('output_format', 'webp_with_json')
         self.output_quality: str = kwargs.get('output_quality', 'high')
-        self.timeout: int = kwargs.get('timeout', 600)
+        self.timeout: int = kwargs.get('timeout', 30 * 60)
 
 
 class SampleConfig:

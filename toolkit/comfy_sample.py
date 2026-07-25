@@ -11,12 +11,13 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from toolkit.paths import get_path
 
 
 DEFAULT_COMFY_API_URL = "http://127.0.0.1:8188"
+DEFAULT_COMFY_PROMPT_TIMEOUT = 30 * 60
 DEFAULT_COMFY_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample.json.njk"
 DEFAULT_COMFY_BATCH_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample_batch_easy_use.json.njk"
 DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH = (
@@ -32,6 +33,10 @@ DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH = (
     "config/comfy_templates/qwen_image_edit_plus_lora_sample_batch_easy_use.json.njk"
 )
 NUNJUCKS_RENDERER_PATH = "ui/scripts/render_comfy_template.mjs"
+
+
+class ComfyPromptWaitCancelled(RuntimeError):
+    pass
 
 
 @dataclass
@@ -374,7 +379,12 @@ def get_history_output_images(history: Dict[str, Any], prompt_id: str) -> List[D
 
 
 class ComfyApiClient:
-    def __init__(self, api_url: str = DEFAULT_COMFY_API_URL, timeout: int = 600, poll_interval: float = 1.0):
+    def __init__(
+            self,
+            api_url: str = DEFAULT_COMFY_API_URL,
+            timeout: int = DEFAULT_COMFY_PROMPT_TIMEOUT,
+            poll_interval: float = 1.0,
+    ):
         self.api_url = (api_url or DEFAULT_COMFY_API_URL).rstrip("/")
         self.timeout = timeout
         self.poll_interval = poll_interval
@@ -462,9 +472,17 @@ class ComfyApiClient:
     def get_history(self, prompt_id: str) -> Dict[str, Any]:
         return self._request_json("GET", f"/api/history/{urllib.parse.quote(prompt_id)}") or {}
 
-    def wait_for_images(self, prompt_id: str) -> List[Dict[str, str]]:
-        deadline = time.time() + self.timeout
-        while time.time() < deadline:
+    def wait_for_images(
+            self,
+            prompt_id: str,
+            cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> List[Dict[str, str]]:
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            if cancel_check is not None and cancel_check():
+                raise ComfyPromptWaitCancelled(
+                    f"Stopped waiting for ComfyUI prompt {prompt_id} because training was stopped"
+                )
             history = self.get_history(prompt_id)
             images = get_history_output_images(history, prompt_id)
             if images:

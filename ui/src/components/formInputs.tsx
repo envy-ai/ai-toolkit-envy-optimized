@@ -328,6 +328,14 @@ export const CreatableSelectInput = (props: CreatableSelectInputProps) => {
   const [isCustom, setIsCustom] = React.useState(!isInOptions && !!value);
   const customInputRef = React.useRef<HTMLInputElement>(null);
 
+  // Options may arrive asynchronously. If a saved custom-looking value is in
+  // the fetched options, switch back to the full-width dropdown automatically.
+  React.useEffect(() => {
+    if (isInOptions) {
+      setIsCustom(false);
+    }
+  }, [isInOptions]);
+
   // Build select options with "Custom" at the top
   const customOption: SelectOption = { value: CUSTOM_SELECT_VALUE, label: 'Custom' };
   const selectOptions = React.useMemo(() => {

@@ -78,6 +78,7 @@ from toolkit.basic import flush
 from toolkit.comfy_sample import (
     ComfyApiClient,
     ComfyBatchSampleRequest,
+    ComfyPromptWaitCancelled,
     ComfySampleRequest,
     DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
@@ -301,6 +302,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.additional_logs = {}
         self._comfy_background_threads = []
         self._comfy_background_errors = []
+        self._comfy_prompt_wait_cancel_event = threading.Event()
 
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
@@ -553,6 +555,31 @@ class BaseSDTrainProcess(BaseTrainProcess):
         print_acc(message)
         self._update_comfy_sample_status(f"ComfyUI sampling - waiting for {total_samples} sample(s)")
 
+    def _should_cancel_comfy_prompt_wait(self):
+        if (
+                self._comfy_prompt_wait_cancel_event.is_set()
+                or bool(getattr(self, 'is_stopping', False))
+        ):
+            return True
+
+        should_stop = getattr(self, 'should_stop', None)
+        if not callable(should_stop):
+            return False
+        try:
+            stop_requested = bool(should_stop())
+        except Exception:
+            return False
+        if stop_requested:
+            self.is_stopping = True
+            self._comfy_prompt_wait_cancel_event.set()
+            update_status = getattr(self, 'update_status', None)
+            if callable(update_status):
+                try:
+                    update_status("stopped", "Job stopped")
+                except Exception:
+                    pass
+        return stop_requested
+
     def _run_comfy_background_task(self, render_func, total_samples: int, step=None, batch: bool = False):
         mode = "batch " if batch else ""
         message = (
@@ -565,6 +592,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         def run_background():
             try:
                 render_func()
+            except ComfyPromptWaitCancelled as e:
+                print_acc(str(e))
             except Exception as e:
                 error_message = f"ComfyUI background sample generation failed: {e}"
                 print_acc(error_message)
@@ -574,6 +603,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         thread = threading.Thread(
             target=run_background,
             name=f"{self.job.name}-comfy-samples-{step or 'latest'}",
+            daemon=True,
         )
         thread.start()
         self._comfy_background_threads.append(thread)
@@ -640,7 +670,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def on_error(self, e: Exception):
         super().on_error(e)
-        if isinstance(e, KeyboardInterrupt):
+        if (
+                isinstance(e, (KeyboardInterrupt, ComfyPromptWaitCancelled))
+                or bool(getattr(self, 'is_stopping', False))
+        ):
+            self._comfy_prompt_wait_cancel_event.set()
             return
         try:
             self._release_training_memory_before_comfy_wait(status_prefix="Training stopped")
@@ -805,7 +839,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         len(gen_img_config_list),
                         sample_index=i + 1,
                     )
-                    images = client.wait_for_images(prompt_id)
+                    images = client.wait_for_images(
+                        prompt_id,
+                        cancel_check=self._should_cancel_comfy_prompt_wait,
+                    )
                     if len(images) == 0:
                         raise RuntimeError(f"ComfyUI prompt {prompt_id} completed without image outputs")
                     client.download_image(images[0], output_path)
@@ -848,9 +885,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         is_qwen_image_edit_plus_workflow = (
             workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH
         )
-        control_image_paths = []
-        control_image_paths_2 = []
-        control_image_paths_3 = []
+        indexed_batch_groups = [list(enumerate(gen_img_config_list))]
         if is_qwen_image_edit_workflow:
             for i, gen_config in enumerate(gen_img_config_list):
                 if gen_config.ctrl_img_2 is not None or gen_config.ctrl_img_3 is not None:
@@ -863,9 +898,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     raise ValueError(
                         f"Qwen Image Edit ComfyUI sample {i + 1} is missing ctrl_img or ctrl_img_1."
                     )
-                control_image_paths.append(control_image_path)
         elif is_qwen_image_edit_plus_workflow:
-            reference_counts = set()
+            # The workflow builds one aligned list per control-image slot, so samples
+            # with different slot counts must be submitted as separate prompts.
+            groups_by_reference_count = OrderedDict()
             for i, gen_config in enumerate(gen_img_config_list):
                 control_image_path = gen_config.ctrl_img_1 or gen_config.ctrl_img
                 if not control_image_path:
@@ -876,20 +912,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     raise ValueError(
                         f"Qwen Image Edit Plus ComfyUI sample {i + 1} has ctrl_img_3 without ctrl_img_2."
                     )
-                control_image_paths.append(control_image_path)
                 reference_count = 1
                 if gen_config.ctrl_img_2 is not None:
-                    control_image_paths_2.append(gen_config.ctrl_img_2)
                     reference_count = 2
                 if gen_config.ctrl_img_3 is not None:
-                    control_image_paths_3.append(gen_config.ctrl_img_3)
                     reference_count = 3
-                reference_counts.add(reference_count)
-            if len(reference_counts) != 1:
-                raise ValueError(
-                    "Qwen Image Edit Plus ComfyUI batching requires every sample to use "
-                    "the same number of control images."
-                )
+                groups_by_reference_count.setdefault(reference_count, []).append((i, gen_config))
+            indexed_batch_groups = list(groups_by_reference_count.values())
 
         sample_folder = os.path.join(self.save_root, 'samples')
         self._cleanup_legacy_comfy_sample_loras(sample_folder)
@@ -897,8 +926,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
         training_lora_filename = self._get_comfy_lora_display_filename(step)
         comfy_training_lora_path = self._get_comfy_training_lora_path(training_lora_path, comfy_config)
         output_paths = [gen_config.get_image_path(i) for i, gen_config in enumerate(gen_img_config_list)]
-        first_output_stem = os.path.splitext(os.path.basename(output_paths[0]))[0]
-        first_config = gen_img_config_list[0]
         client = ComfyApiClient(
             api_url=comfy_config.api_url,
             timeout=comfy_config.timeout,
@@ -908,60 +935,136 @@ class BaseSDTrainProcess(BaseTrainProcess):
             sample_generation_start = time.perf_counter()
             completed_samples = 0
             try:
-                uploaded_control_images = [
-                    client.upload_image(control_image_path)
-                    for control_image_path in control_image_paths
-                ]
-                uploaded_control_images_2 = [
-                    client.upload_image(control_image_path)
-                    for control_image_path in control_image_paths_2
-                ]
-                uploaded_control_images_3 = [
-                    client.upload_image(control_image_path)
-                    for control_image_path in control_image_paths_3
-                ]
-                request = ComfyBatchSampleRequest(
-                    prompts=[gen_config.prompt for gen_config in gen_img_config_list],
-                    width=first_config.width,
-                    height=first_config.height,
-                    steps=first_config.num_inference_steps,
-                    cfg=first_config.guidance_scale,
-                    seeds=[gen_config.seed for gen_config in gen_img_config_list],
-                    model=comfy_config.model,
-                    vae=comfy_config.vae,
-                    text_encoder=comfy_config.text_encoder,
-                    sampler=comfy_config.sampler,
-                    scheduler=comfy_config.scheduler,
-                    inference_lora=comfy_config.inference_lora,
-                    inference_lora_strength=comfy_config.inference_lora_strength,
-                    output_format=comfy_config.output_format,
-                    output_quality=comfy_config.output_quality,
-                    training_lora_path=comfy_training_lora_path,
-                    training_lora_filename=training_lora_filename,
-                    filename_prefix=f"ai-toolkit/{first_output_stem}_batch",
-                    control_images=uploaded_control_images,
-                    control_images_2=uploaded_control_images_2,
-                    control_images_3=uploaded_control_images_3,
+                self._log_comfy_sample_generation_start(
+                    len(gen_img_config_list),
+                    batch=True,
                 )
-                patched_workflow = get_workflow_for_samples(workflow_path, request)
-                self._log_comfy_sample_generation_start(len(gen_img_config_list), batch=True)
                 if offload_models:
                     self._ensure_models_offloaded_for_comfy(client)
-                prompt_id = client.post_prompt(patched_workflow)
-                self._log_comfy_prompt_submitted(prompt_id, len(gen_img_config_list), batch=True)
-                images = client.wait_for_images(prompt_id)
-                if len(images) < len(gen_img_config_list):
-                    raise RuntimeError(
-                        f"ComfyUI prompt {prompt_id} completed with {len(images)} image output(s), "
-                        f"expected {len(gen_img_config_list)}"
+
+                for indexed_batch_group in indexed_batch_groups:
+                    group_configs = [gen_config for _, gen_config in indexed_batch_group]
+                    first_original_index, first_config = indexed_batch_group[0]
+                    first_output_stem = os.path.splitext(
+                        os.path.basename(output_paths[first_original_index])
+                    )[0]
+
+                    control_image_paths = []
+                    control_image_paths_2 = []
+                    control_image_paths_3 = []
+                    if is_qwen_image_edit_workflow or is_qwen_image_edit_plus_workflow:
+                        control_image_paths = [
+                            gen_config.ctrl_img_1 or gen_config.ctrl_img
+                            for gen_config in group_configs
+                        ]
+                    if is_qwen_image_edit_plus_workflow:
+                        control_image_paths_2 = [
+                            gen_config.ctrl_img_2
+                            for gen_config in group_configs
+                            if gen_config.ctrl_img_2 is not None
+                        ]
+                        control_image_paths_3 = [
+                            gen_config.ctrl_img_3
+                            for gen_config in group_configs
+                            if gen_config.ctrl_img_3 is not None
+                        ]
+
+                    uploaded_control_images = [
+                        client.upload_image(control_image_path)
+                        for control_image_path in control_image_paths
+                    ]
+                    uploaded_control_images_2 = [
+                        client.upload_image(control_image_path)
+                        for control_image_path in control_image_paths_2
+                    ]
+                    uploaded_control_images_3 = [
+                        client.upload_image(control_image_path)
+                        for control_image_path in control_image_paths_3
+                    ]
+
+                    is_batch_group = len(group_configs) > 1
+                    if is_batch_group:
+                        request = ComfyBatchSampleRequest(
+                            prompts=[gen_config.prompt for gen_config in group_configs],
+                            width=first_config.width,
+                            height=first_config.height,
+                            steps=first_config.num_inference_steps,
+                            cfg=first_config.guidance_scale,
+                            seeds=[gen_config.seed for gen_config in group_configs],
+                            model=comfy_config.model,
+                            vae=comfy_config.vae,
+                            text_encoder=comfy_config.text_encoder,
+                            sampler=comfy_config.sampler,
+                            scheduler=comfy_config.scheduler,
+                            inference_lora=comfy_config.inference_lora,
+                            inference_lora_strength=comfy_config.inference_lora_strength,
+                            output_format=comfy_config.output_format,
+                            output_quality=comfy_config.output_quality,
+                            training_lora_path=comfy_training_lora_path,
+                            training_lora_filename=training_lora_filename,
+                            filename_prefix=f"ai-toolkit/{first_output_stem}_batch",
+                            control_images=uploaded_control_images,
+                            control_images_2=uploaded_control_images_2,
+                            control_images_3=uploaded_control_images_3,
+                        )
+                        patched_workflow = get_workflow_for_samples(workflow_path, request)
+                    else:
+                        request = ComfySampleRequest(
+                            prompt=first_config.prompt,
+                            width=first_config.width,
+                            height=first_config.height,
+                            steps=first_config.num_inference_steps,
+                            cfg=first_config.guidance_scale,
+                            seed=first_config.seed,
+                            model=comfy_config.model,
+                            vae=comfy_config.vae,
+                            text_encoder=comfy_config.text_encoder,
+                            sampler=comfy_config.sampler,
+                            scheduler=comfy_config.scheduler,
+                            inference_lora=comfy_config.inference_lora,
+                            inference_lora_strength=comfy_config.inference_lora_strength,
+                            output_format=comfy_config.output_format,
+                            output_quality=comfy_config.output_quality,
+                            training_lora_path=comfy_training_lora_path,
+                            training_lora_filename=training_lora_filename,
+                            filename_prefix=f"ai-toolkit/{first_output_stem}",
+                            control_image=uploaded_control_images[0] if uploaded_control_images else None,
+                            control_image_2=uploaded_control_images_2[0] if uploaded_control_images_2 else None,
+                            control_image_3=uploaded_control_images_3[0] if uploaded_control_images_3 else None,
+                        )
+                        single_workflow_path = self._get_comfy_workflow_path(comfy_config, batch=False)
+                        single_workflow = None
+                        if not workflow_path_is_template(single_workflow_path):
+                            single_workflow = load_workflow(single_workflow_path)
+                        patched_workflow = get_workflow_for_sample(
+                            single_workflow_path,
+                            request,
+                            single_workflow,
+                        )
+
+                    prompt_id = client.post_prompt(patched_workflow)
+                    self._log_comfy_prompt_submitted(
+                        prompt_id,
+                        len(gen_img_config_list) if not is_batch_group else len(group_configs),
+                        sample_index=first_original_index + 1 if not is_batch_group else None,
+                        batch=is_batch_group,
                     )
-                for i, output_path in enumerate(output_paths):
-                    client.download_image(images[i], output_path)
-                    completed_samples += 1
-                    self.sample_step_hook(i, len(gen_img_config_list))
-                    self._update_comfy_sample_status(
-                        f"ComfyUI sampling - {completed_samples}/{len(gen_img_config_list)}"
+                    images = client.wait_for_images(
+                        prompt_id,
+                        cancel_check=self._should_cancel_comfy_prompt_wait,
                     )
+                    if len(images) < len(group_configs):
+                        raise RuntimeError(
+                            f"ComfyUI prompt {prompt_id} completed with {len(images)} image output(s), "
+                            f"expected {len(group_configs)}"
+                        )
+                    for group_index, (original_index, _) in enumerate(indexed_batch_group):
+                        client.download_image(images[group_index], output_paths[original_index])
+                        completed_samples += 1
+                        self.sample_step_hook(completed_samples - 1, len(gen_img_config_list))
+                        self._update_comfy_sample_status(
+                            f"ComfyUI sampling - {completed_samples}/{len(gen_img_config_list)}"
+                        )
                 flush()
             finally:
                 elapsed_seconds = time.perf_counter() - sample_generation_start

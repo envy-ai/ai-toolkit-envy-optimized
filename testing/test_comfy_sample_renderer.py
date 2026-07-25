@@ -557,11 +557,28 @@ class ComfySampleConfigTests(unittest.TestCase):
         comfy = ComfySampleConfig()
 
         self.assertFalse(comfy.run_in_background)
+        self.assertEqual(comfy.timeout, 30 * 60)
         self.assertEqual(comfy.training_lora_path_replace_from, "")
         self.assertEqual(comfy.training_lora_path_replace_to, "")
 
 
 class ComfyApiClientTests(unittest.TestCase):
+    def test_prompt_wait_defaults_to_thirty_minutes(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        self.assertEqual(ComfyApiClient().timeout, 30 * 60)
+
+    def test_prompt_wait_can_be_cancelled_when_training_stops(self):
+        from toolkit.comfy_sample import ComfyApiClient, ComfyPromptWaitCancelled
+
+        client = ComfyApiClient()
+        client.get_history = mock.Mock(return_value={})
+
+        with self.assertRaises(ComfyPromptWaitCancelled):
+            client.wait_for_images("abc", cancel_check=lambda: True)
+
+        client.get_history.assert_not_called()
+
     def test_post_prompt_includes_workflow_metadata_for_save_nodes(self):
         from toolkit.comfy_sample import ComfyApiClient
 
@@ -706,18 +723,46 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         self.assertIn("client.upload_image(control_image_path)", batch_source)
         self.assertIn("control_images=uploaded_control_images", batch_source)
 
-    def test_qwen_image_edit_plus_batch_uploads_up_to_three_control_images(self):
+    def test_qwen_image_edit_plus_splits_batches_by_control_image_count(self):
         source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
         batch_start = source.index("def _render_comfy_sample_batch")
         sample_start = source.index("def sample", batch_start)
         batch_source = source[batch_start:sample_start]
 
         self.assertIn("DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH", source)
+        self.assertIn("groups_by_reference_count = OrderedDict()", batch_source)
+        self.assertIn(
+            "groups_by_reference_count.setdefault(reference_count, []).append((i, gen_config))",
+            batch_source,
+        )
+        self.assertIn("indexed_batch_groups = list(groups_by_reference_count.values())", batch_source)
         self.assertIn("control_image_paths_2", batch_source)
         self.assertIn("control_image_paths_3", batch_source)
         self.assertIn("control_images_2=uploaded_control_images_2", batch_source)
         self.assertIn("control_images_3=uploaded_control_images_3", batch_source)
-        self.assertIn("same number of control images", batch_source)
+        self.assertNotIn("same number of control images", batch_source)
+
+    def test_qwen_image_edit_plus_sub_batches_preserve_outputs_and_support_singletons(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        batch_start = source.index("def _render_comfy_sample_batch")
+        sample_start = source.index("def sample", batch_start)
+        batch_source = source[batch_start:sample_start]
+
+        self.assertIn(
+            "output_paths = [gen_config.get_image_path(i) for i, gen_config in enumerate(gen_img_config_list)]",
+            batch_source,
+        )
+        self.assertIn("is_batch_group = len(group_configs) > 1", batch_source)
+        self.assertIn("single_workflow_path = self._get_comfy_workflow_path(comfy_config, batch=False)", batch_source)
+        self.assertIn("patched_workflow = get_workflow_for_sample(", batch_source)
+        self.assertIn(
+            "client.download_image(images[group_index], output_paths[original_index])",
+            batch_source,
+        )
+        self.assertIn(
+            "self.sample_step_hook(completed_samples - 1, len(gen_img_config_list))",
+            batch_source,
+        )
 
     def test_workflow_config_selects_batch_and_single_templates(self):
         source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
@@ -772,6 +817,23 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         self.assertIn("offload_models=False", batch_source)
         self.assertIn("unload_models=False", batch_source)
         self.assertIn("not sample_comfy.run_in_background", unload_source)
+
+    def test_comfy_prompt_waits_are_cancelled_when_training_stops(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        render_start = source.index("def _render_comfy_samples")
+        render_end = source.index("def sample", render_start)
+        render_source = source[render_start:render_end]
+        error_start = source.index("def on_error")
+        error_end = source.index("\n    def ", error_start + 1)
+        error_source = source[error_start:error_end]
+
+        self.assertEqual(
+            render_source.count("cancel_check=self._should_cancel_comfy_prompt_wait"),
+            2,
+        )
+        self.assertIn("self._comfy_prompt_wait_cancel_event.set()", error_source)
+        self.assertIn("should_stop = getattr(self, 'should_stop', None)", source)
+        self.assertIn("daemon=True", source)
 
     def test_train_process_tracks_and_waits_for_background_comfy_samples_at_shutdown(self):
         source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
