@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
-import { PrismaClient } from '@prisma/client';
+import prisma from '@/server/prisma';
 import { isMac } from '@/helpers/basic';
 import fs from 'fs';
 import path from 'path';
+import { cached } from '@/server/apiCache';
 
-const prisma = new PrismaClient();
 const TOOLKIT_ROOT = path.resolve('@', '..', '..');
 const defaultTrainFolder = path.join(TOOLKIT_ROOT, 'output');
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
@@ -150,6 +150,17 @@ export async function GET(request: Request) {
     }
     if (only_active === 'true') {
       where.status = { in: ['running', 'queued', 'stopping'] };
+      const jobs = await cached(
+        'jobs-active',
+        () =>
+          prisma.job.findMany({
+            where,
+            orderBy: { created_at: 'desc' },
+          }),
+        5000,
+        { job_type },
+      );
+      return NextResponse.json({ jobs: jobs.map(attachDatasetThumbnail) });
     }
 
     const jobs = await prisma.job.findMany({

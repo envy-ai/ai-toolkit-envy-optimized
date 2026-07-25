@@ -29,7 +29,10 @@ from diffusers import AutoencoderKL
 
 try:
     from diffusers import ZImagePipeline
-    from diffusers.models.transformers import ZImageTransformer2DModel
+
+    # our subclass of the diffusers transformer with the universal loading /
+    # quantization mixin (see toolkit/models/classes/_mixin.py)
+    from toolkit.models.v2.z_image import ZImageTransformer2DModel
 except ImportError:
     raise ImportError(
         "Diffusers is out of date. Update diffusers to the latest version by doing pip uninstall diffusers and then pip install -r requirements.txt"
@@ -45,73 +48,6 @@ scheduler_config = {
 # repo to pull the vae / text encoder / tokenizer / config from when loading a
 # single-file checkpoint
 SINGLE_FILE_EXTRAS_REPO = "Tongyi-MAI/Z-Image-Turbo"
-
-
-def convert_single_file_to_diffusers(state_dict):
-    """Convert a single-file Z-Image checkpoint to diffusers transformer keys."""
-    new_sd = {}
-    for key, value in state_dict.items():
-        k = key
-        if k.endswith(".attention.qkv.weight"):
-            # the single file fuses q,k,v into one tensor (in that order); diffusers keeps them split
-            prefix = k[: -len(".attention.qkv.weight")]
-            q, k_proj, v = torch.chunk(value, 3, dim=0)
-            new_sd[prefix + ".attention.to_q.weight"] = q
-            new_sd[prefix + ".attention.to_k.weight"] = k_proj
-            new_sd[prefix + ".attention.to_v.weight"] = v
-            continue
-        k = k.replace(".attention.out.weight", ".attention.to_out.0.weight")
-        k = k.replace(".attention.q_norm.weight", ".attention.norm_q.weight")
-        k = k.replace(".attention.k_norm.weight", ".attention.norm_k.weight")
-        if k.startswith("x_embedder."):
-            k = "all_x_embedder.2-1." + k[len("x_embedder.") :]
-        elif k.startswith("final_layer."):
-            k = "all_final_layer.2-1." + k[len("final_layer.") :]
-        new_sd[k] = value
-    return new_sd
-
-
-def convert_diffusers_to_single_file(state_dict):
-    """Convert a diffusers transformer state dict back to the single-file layout."""
-    new_sd = {}
-    qkv_cache = {}
-    for key, value in state_dict.items():
-        k = key
-        matched = False
-        for suffix in (
-            ".attention.to_q.weight",
-            ".attention.to_k.weight",
-            ".attention.to_v.weight",
-        ):
-            if k.endswith(suffix):
-                prefix = k[: -len(suffix)]
-                cache = qkv_cache.setdefault(prefix, {})
-                cache[suffix] = value
-                if len(cache) == 3:
-                    # the single file expects q,k,v fused in that order
-                    qkv = torch.cat(
-                        [
-                            cache[".attention.to_q.weight"],
-                            cache[".attention.to_k.weight"],
-                            cache[".attention.to_v.weight"],
-                        ],
-                        dim=0,
-                    )
-                    new_sd[prefix + ".attention.qkv.weight"] = qkv
-                    del qkv_cache[prefix]
-                matched = True
-                break
-        if matched:
-            continue
-        k = k.replace(".attention.to_out.0.weight", ".attention.out.weight")
-        k = k.replace(".attention.norm_q.weight", ".attention.q_norm.weight")
-        k = k.replace(".attention.norm_k.weight", ".attention.k_norm.weight")
-        if k.startswith("all_x_embedder.2-1."):
-            k = "x_embedder." + k[len("all_x_embedder.2-1.") :]
-        elif k.startswith("all_final_layer.2-1."):
-            k = "final_layer." + k[len("all_final_layer.2-1.") :]
-        new_sd[k] = value
-    return new_sd
 
 
 class ZImageModel(BaseModel):
@@ -229,9 +165,10 @@ class ZImageModel(BaseModel):
         self.invert_assistant_lora = True
 
     def load_transformer(self, model_path, base_model_path, dtype):
-        """Load the ZImage transformer from either a diffusers folder/repo or a
-        single-file checkpoint. Returns (transformer, base_model_path) since the base
-        path may be redirected to the hub repo for single-file checkpoints."""
+        """Load the ZImage transformer through the OstrisModelMixin universal loader
+        (diffusers folder/repo, local or hub single-file checkpoint, pre-quantized
+        checkpoint). Returns (transformer, base_model_path) since the base path may
+        be redirected to the hub repo for single-file checkpoints."""
         if model_path.endswith(".safetensors"):
             # single-file checkpoint. Load the weights from the file and pull the
             # vae / text encoder / tokenizer / config from the base diffusers repo.
@@ -242,36 +179,32 @@ class ZImageModel(BaseModel):
             if base_model_path == model_path:
                 # extras default to name_or_path which is the single file, fall back to the hub repo
                 base_model_path = self.single_file_extras_repo
+        elif os.path.exists(model_path):
+            # check if the path is a full checkpoint.
+            te_folder_path = os.path.join(model_path, "text_encoder")
+            # if we have the te, this folder is a full checkpoint, use it as the base
+            if os.path.exists(te_folder_path):
+                base_model_path = model_path
 
-            state_dict = load_file(model_path)
-            state_dict = convert_single_file_to_diffusers(state_dict)
-            for key, value in state_dict.items():
-                state_dict[key] = value.to(dtype=dtype)
+        # quantization happens inside load_model unless an adapter has to be merged
+        # into the full precision weights first (assistant lora / accuracy recovery
+        # adapter); those paths quantize after the merge via quantize_model
+        qtype = None
+        if (
+            self.model_config.quantize
+            and self.model_config.assistant_lora_path is None
+            and self.model_config.accuracy_recovery_adapter is None
+        ):
+            qtype = self.model_config.qtype
 
-            config = ZImageTransformer2DModel.load_config(
-                base_model_path, subfolder="transformer"
-            )
-            with torch.device("meta"):
-                transformer = ZImageTransformer2DModel.from_config(config)
-            transformer.load_state_dict(state_dict, assign=True)
-            transformer.to(dtype=dtype)
-            del state_dict
-            flush()
-        else:
-            transformer_path = model_path
-            transformer_subfolder = "transformer"
-            if os.path.exists(transformer_path):
-                transformer_subfolder = None
-                transformer_path = os.path.join(transformer_path, "transformer")
-                # check if the path is a full checkpoint.
-                te_folder_path = os.path.join(model_path, "text_encoder")
-                # if we have the te, this folder is a full checkpoint, use it as the base
-                if os.path.exists(te_folder_path):
-                    base_model_path = model_path
-
-            transformer = ZImageTransformer2DModel.from_pretrained(
-                transformer_path, subfolder=transformer_subfolder, torch_dtype=dtype
-            )
+        transformer = ZImageTransformer2DModel.load_model(
+            model_path,
+            dtype=dtype,
+            qtype=qtype,
+            quantize_device=self.device_torch,
+            config_path=base_model_path if self.is_single_file else None,
+        )
+        flush()
 
         return transformer, base_model_path
 
@@ -285,7 +218,15 @@ class ZImageModel(BaseModel):
 
         transformer_cache_path = None
         transformer = None
-        if self.model_config.quantize and self.model_config.assistant_lora_path is None:
+        assistant_lora_path = getattr(self.model_config, "assistant_lora_path", None)
+        accuracy_recovery_adapter = getattr(
+            self.model_config, "accuracy_recovery_adapter", None
+        )
+        if (
+            self.model_config.quantize
+            and assistant_lora_path is None
+            and accuracy_recovery_adapter is None
+        ):
             transformer_cache_path = self.get_quantized_module_cache_path(
                 component_name="transformer",
                 qtype=self.model_config.qtype,
@@ -294,14 +235,19 @@ class ZImageModel(BaseModel):
                     "base_model_path": base_model_path,
                 },
                 extra_cache_key={
+                    "cache_format": 2,
                     "quantize_kwargs": self.model_config.quantize_kwargs,
+                    "quantization_exclude_modules": self.get_quantization_exclude_modules(),
                     "target_lora_modules": getattr(self, "target_lora_modules", None),
                 },
             )
             transformer = self.load_quantized_module_cache(
                 transformer_cache_path, "transformer"
-        )
+            )
         transformer_loaded_from_cache = transformer is not None
+        if transformer_loaded_from_cache:
+            # Quantized-module caches predate the universal loader's marker.
+            transformer.aitk_is_quantized = True
 
         if transformer is None:
             transformer, base_model_path = self.load_transformer(
@@ -309,20 +255,29 @@ class ZImageModel(BaseModel):
             )
 
         # load assistant lora if specified
-        if self.model_config.assistant_lora_path is not None:
+        if assistant_lora_path is not None:
             self.load_training_adapter(transformer)
             # set qtype to be float8 if it is qfloat8
             if self.model_config.qtype == "qfloat8":
                 self.model_config.qtype = "float8"
 
-        if self.model_config.quantize:
-            if not transformer_loaded_from_cache:
-                self.print_and_status_update("Quantizing Transformer")
-                quantize_model(self, transformer)
-                self.save_quantized_module_cache(
-                    transformer, transformer_cache_path, "transformer"
-                )
-                flush()
+        # already quantized inside load_transformer unless an adapter had to merge
+        # into full precision weights first (or the checkpoint was pre-quantized)
+        if self.model_config.quantize and not getattr(
+            transformer, "aitk_is_quantized", False
+        ):
+            self.print_and_status_update("Quantizing Transformer")
+            quantize_model(self, transformer)
+            transformer.aitk_is_quantized = True
+        if (
+            self.model_config.quantize
+            and not transformer_loaded_from_cache
+            and transformer_cache_path is not None
+        ):
+            self.save_quantized_module_cache(
+                transformer, transformer_cache_path, "transformer"
+            )
+        flush()
 
         if (
             self.model_config.layer_offloading
@@ -534,6 +489,11 @@ class ZImageModel(BaseModel):
     def get_te_has_grad(self):
         return False
 
+    def get_quantization_exclude_modules(self):
+        # the patterns live on the transformer class so the mixin quantization
+        # uses them too (see toolkit/models/classes/z_image.py)
+        return ZImageTransformer2DModel.get_quantization_exclude_modules()
+
     def save_model(self, output_path, meta, save_dtype):
         transformer: ZImageTransformer2DModel = unwrap_model(self.model)
         if self.is_single_file:
@@ -545,7 +505,7 @@ class ZImageModel(BaseModel):
                 save_dict[key] = (
                     dequantize_if_quantized(value).clone().to("cpu", dtype=save_dtype)
                 )
-            save_dict = convert_diffusers_to_single_file(save_dict)
+            save_dict = transformer.convert_state_dict_on_save(save_dict)
 
             if not output_path.endswith(".safetensors"):
                 output_path += ".safetensors"

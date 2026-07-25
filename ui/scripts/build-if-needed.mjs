@@ -11,6 +11,7 @@ const isCheckOnly = process.argv.includes('--check');
 const outputPaths = [
   path.join(uiRoot, '.next', 'BUILD_ID'),
   path.join(uiRoot, 'dist', 'cron', 'worker.js'),
+  path.join(uiRoot, 'dist', 'cron', 'fileServer.js'),
 ];
 
 const sourcePaths = [

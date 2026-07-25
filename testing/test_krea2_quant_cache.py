@@ -1,5 +1,8 @@
+import importlib.util
 import os
+import pathlib
 import sys
+import types
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -8,10 +11,25 @@ import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from extensions_built_in.diffusion_models.krea2.krea2 import (  # noqa: E402
-    Krea2Model,
-    SingleStreamDiT,
-)
+
+def _load_krea_module():
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    package_path = repo_root / "extensions_built_in/diffusion_models/krea2"
+    package_name = "krea2_quant_cache_under_test"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(package_path)]
+    sys.modules[package_name] = package
+    module_name = f"{package_name}.krea2"
+    spec = importlib.util.spec_from_file_location(module_name, package_path / "krea2.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+KREA_MODULE = _load_krea_module()
+Krea2Model = KREA_MODULE.Krea2Model
+SingleStreamDiT = KREA_MODULE.SingleStreamDiT
 
 
 class FakeModule(torch.nn.Module):
@@ -57,7 +75,7 @@ def make_krea_model():
     )
     model.print_and_status_update = mock.Mock()
     model._load_text_encoder = mock.Mock(
-        return_value=("tokenizer", "processor", FakeModule())
+        return_value=("tokenizer", "processor", None, FakeModule())
     )
     model._load_vae = mock.Mock(return_value=FakeModule())
     model.get_quantized_module_cache_path = mock.Mock(return_value="/tmp/krea-cache.pt")
@@ -73,13 +91,8 @@ class Krea2QuantizedCacheTests(unittest.TestCase):
         model.load_quantized_module_cache = mock.Mock(return_value=None)
 
         with (
-            mock.patch(
-                "extensions_built_in.diffusion_models.krea2.krea2.quantize_model"
-            ) as quantize_model,
-            mock.patch(
-                "extensions_built_in.diffusion_models.krea2.krea2.Krea2Pipeline",
-                return_value="pipeline",
-            ),
+            mock.patch.object(KREA_MODULE, "quantize_model") as quantize_model,
+            mock.patch.object(KREA_MODULE, "Krea2Pipeline", return_value="pipeline"),
             mock.patch.object(Krea2Model, "get_train_scheduler", return_value="scheduler"),
         ):
             model.load_model()
@@ -98,7 +111,16 @@ class Krea2QuantizedCacheTests(unittest.TestCase):
         self.assertEqual(
             cache_kwargs["extra_cache_key"],
             {
+                "cache_format": 2,
                 "quantize_kwargs": {"exclude": ["skip.me"]},
+                "quantization_exclude_modules": [
+                    "first",
+                    "tmlp*",
+                    "tproj*",
+                    "txtmlp*",
+                    "txtfusion.projector",
+                    "last*",
+                ],
                 "target_lora_modules": [SingleStreamDiT.__name__],
             },
         )
@@ -118,13 +140,8 @@ class Krea2QuantizedCacheTests(unittest.TestCase):
         model.load_quantized_module_cache = mock.Mock(return_value=cached_transformer)
 
         with (
-            mock.patch(
-                "extensions_built_in.diffusion_models.krea2.krea2.quantize_model"
-            ) as quantize_model,
-            mock.patch(
-                "extensions_built_in.diffusion_models.krea2.krea2.Krea2Pipeline",
-                return_value="pipeline",
-            ),
+            mock.patch.object(KREA_MODULE, "quantize_model") as quantize_model,
+            mock.patch.object(KREA_MODULE, "Krea2Pipeline", return_value="pipeline"),
             mock.patch.object(Krea2Model, "get_train_scheduler", return_value="scheduler"),
         ):
             model.load_model()
@@ -133,6 +150,27 @@ class Krea2QuantizedCacheTests(unittest.TestCase):
         quantize_model.assert_not_called()
         model.save_quantized_module_cache.assert_not_called()
         self.assertIs(model.model, cached_transformer)
+
+    def test_assistant_lora_quantization_does_not_write_to_an_empty_cache_path(self):
+        model = make_krea_model()
+        model.model_config.assistant_lora_path = "/tmp/assistant.safetensors"
+        transformer = FakeModule()
+        model._load_transformer = mock.Mock(return_value=transformer)
+        model.load_training_adapter = mock.Mock()
+        model.load_quantized_module_cache = mock.Mock()
+
+        with (
+            mock.patch.object(KREA_MODULE, "quantize_model") as quantize_model,
+            mock.patch.object(KREA_MODULE, "Krea2Pipeline", return_value="pipeline"),
+            mock.patch.object(Krea2Model, "get_train_scheduler", return_value="scheduler"),
+        ):
+            model.load_model()
+
+        model.get_quantized_module_cache_path.assert_not_called()
+        model.load_quantized_module_cache.assert_not_called()
+        model.load_training_adapter.assert_called_once_with(transformer)
+        quantize_model.assert_called_once_with(model, transformer)
+        model.save_quantized_module_cache.assert_not_called()
 
 
 if __name__ == "__main__":

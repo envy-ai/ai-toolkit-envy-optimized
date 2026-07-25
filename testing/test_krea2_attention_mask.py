@@ -26,6 +26,16 @@ class Krea2AttentionMaskTest(unittest.TestCase):
             torch.equal(attention_mask[0, 0, 0], padding_mask[0])
         )
 
+    def test_pairwise_mask_covers_query_and_key_axes_for_kv_cache(self):
+        mmdit = _load_krea_mmdit()
+        padding_mask = torch.tensor([[True, True, False, True]])
+
+        attention_mask = mmdit._mask(padding_mask, pairwise=True)
+
+        self.assertEqual(attention_mask.shape, (1, 1, 4, 4))
+        expected = padding_mask[:, None, :, None] & padding_mask[:, None, None, :]
+        self.assertTrue(torch.equal(attention_mask, expected))
+
 
 if __name__ == "__main__":
     unittest.main()

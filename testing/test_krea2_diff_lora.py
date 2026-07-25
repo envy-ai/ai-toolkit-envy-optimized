@@ -99,6 +99,7 @@ def _install_krea_import_stubs(load_calls):
     )
     module(
         "transformers",
+        AutoProcessor=Stub,
         AutoTokenizer=Stub,
         Qwen2TokenizerFast=Stub,
         Qwen3VLForConditionalGeneration=Stub,
@@ -112,7 +113,9 @@ def _install_krea_import_stubs(load_calls):
         "toolkit.config_modules",
         GenerateImageConfig=Stub,
         ModelConfig=Stub,
+        NetworkConfig=Stub,
     )
+    module("toolkit.lora_special", LoRASpecialNetwork=Stub)
     module("toolkit.models.base_model", BaseModel=object)
     module("toolkit.basic", flush=lambda *args, **kwargs: None)
     module("toolkit.advanced_prompt_embeds", AdvancedPromptEmbeds=Stub)

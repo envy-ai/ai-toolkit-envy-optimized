@@ -34,6 +34,7 @@ type AdditionalSections =
   | 'model.qie.match_target_res'
   | 'model.assistant_lora_path'
   | 'model.unconditional_lora_path'
+  | 'model.model_kwargs.kv_cache'
   | 'ideogram_4_prompt';
 
 type ModelGroup = 'image' | 'instruction' | 'video' | 'experimental' | 'audio';
@@ -60,12 +61,35 @@ export interface ModelArch {
   additionalSections?: AdditionalSections[];
   accuracyRecoveryAdapters?: { [key: string]: string };
   sampleTags?: SampleTags;
+  gateUrl?: string;
 }
 
 const defaultNameOrPath = '';
-const defaultLinearRank = 32
+const defaultLinearRank = 32;
 
 export const modelArchs: ModelArch[] = [
+  {
+    name: 'anima',
+    label: 'Anima',
+    group: 'image',
+    defaults: {
+      // default updates when [selected, unselected] in the UI
+      'config.process[0].model.name_or_path': ['circlestone-labs/Anima-Base-v1.0-Diffusers', defaultNameOrPath],
+      'config.process[0].model.quantize': [false, false],
+      'config.process[0].model.quantize_te': [false, false],
+      'config.process[0].model.qtype': ['', 'qfloat8'],
+      'config.process[0].model.qtype_te': ['', 'qfloat8'],
+      'config.process[0].sample.sampler': ['flowmatch', 'flowmatch'],
+      'config.process[0].train.noise_scheduler': ['flowmatch', 'flowmatch'],
+      'config.process[0].train.timestep_type': ['weighted', 'sigmoid'],
+      'config.process[0].sample.neg': [
+        'worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia, signature, artist name',
+        '',
+      ],
+    },
+    disableSections: ['network.conv'],
+    additionalSections: ['model.low_vram', 'model.layer_offloading'],
+  },
   {
     name: 'flux',
     label: 'FLUX.1',
@@ -79,6 +103,7 @@ export const modelArchs: ModelArch[] = [
       'config.process[0].train.noise_scheduler': ['flowmatch', 'flowmatch'],
     },
     disableSections: ['network.conv'],
+    gateUrl: 'https://huggingface.co/black-forest-labs/FLUX.1-dev',
   },
   {
     name: 'flux_kontext',
@@ -95,6 +120,7 @@ export const modelArchs: ModelArch[] = [
     },
     disableSections: ['network.conv'],
     additionalSections: ['datasets.control_path', 'sample.ctrl_img'],
+    gateUrl: 'https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev',
   },
   {
     name: 'flex1',
@@ -601,6 +627,7 @@ export const modelArchs: ModelArch[] = [
       'model.layer_offloading',
       'model.qie.match_target_res',
     ],
+    gateUrl: 'https://huggingface.co/black-forest-labs/FLUX.2-dev',
   },
   {
     name: 'zimage:turbo',
@@ -807,6 +834,7 @@ export const modelArchs: ModelArch[] = [
       'model.layer_offloading',
       'model.qie.match_target_res',
     ],
+    gateUrl: 'https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B',
   },
   {
     name: 'ace_step_15_xl',
@@ -1018,6 +1046,7 @@ export const modelArchs: ModelArch[] = [
       'model.unconditional_lora_path',
     ],
     hasMultiLinePrompts: true,
+    gateUrl: 'https://huggingface.co/ideogram-ai/ideogram-4-fp8',
   },
   {
     name: 'prx_pixel',
@@ -1044,6 +1073,7 @@ export const modelArchs: ModelArch[] = [
     name: 'krea2',
     label: 'Krea 2 (raw)',
     group: 'image',
+    gateUrl: 'https://huggingface.co/krea/Krea-2-Raw',
     defaults: {
       'config.process[0].model.name_or_path': ['krea/Krea-2-Raw', defaultNameOrPath],
       'config.process[0].model.quantize': [true, false],
@@ -1065,6 +1095,7 @@ export const modelArchs: ModelArch[] = [
     name: 'krea2:turbo',
     label: 'Krea 2 Turbo (w/ Training Adapter)',
     group: 'image',
+    gateUrl: 'https://huggingface.co/krea/Krea-2-Turbo',
     defaults: {
       'config.process[0].model.name_or_path': ['krea/Krea-2-Turbo', defaultNameOrPath],
       'config.process[0].model.quantize': [true, false],
@@ -1092,6 +1123,7 @@ export const modelArchs: ModelArch[] = [
   {
     name: 'krea2:o_edit',
     label: 'Krea 2 (raw) [Edit Training]',
+    gateUrl: 'https://huggingface.co/krea/Krea-2-Raw',
     group: 'experimental',
     defaults: {
       'config.process[0].model.name_or_path': ['krea/Krea-2-Raw', defaultNameOrPath],
@@ -1105,7 +1137,8 @@ export const modelArchs: ModelArch[] = [
       'config.process[0].model.model_kwargs': [
         {
           edit: true,
-          match_target_res: false,
+          match_target_res: true,
+          kv_cache: true,
         },
         {},
       ],
@@ -1119,11 +1152,13 @@ export const modelArchs: ModelArch[] = [
       'model.low_vram',
       'model.layer_offloading',
       'model.qie.match_target_res',
+      'model.model_kwargs.kv_cache',
     ],
   },
   {
     name: 'krea2:o_edit_turbo',
     label: 'Krea 2 Turbo (w/ Training Adapter) [Edit Training]',
+    gateUrl: 'https://huggingface.co/krea/Krea-2-Turbo',
     group: 'experimental',
     defaults: {
       'config.process[0].model.name_or_path': ['krea/Krea-2-Turbo', defaultNameOrPath],
@@ -1143,7 +1178,8 @@ export const modelArchs: ModelArch[] = [
       'config.process[0].model.model_kwargs': [
         {
           edit: true,
-          match_target_res: false,
+          match_target_res: true,
+          kv_cache: true,
         },
         {},
       ],
@@ -1158,6 +1194,7 @@ export const modelArchs: ModelArch[] = [
       'model.layer_offloading',
       'model.assistant_lora_path',
       'model.qie.match_target_res',
+      'model.model_kwargs.kv_cache',
     ],
   },
   {
@@ -1232,7 +1269,17 @@ export const groupedModelOptions: GroupedSelectOption[] = modelArchs.reduce((acc
 
 export const quantizationOptions: SelectOption[] = [
   { value: '', label: '- NONE -' },
-  { value: 'qfloat8', label: 'float8 (default)' },
+  { value: 'qfloat8', label: 'qfloat8 (default)' },
+  { value: 'float8', label: 'float8' },
+  { value: 'convrot8', label: '8bit convrot' },
+  { value: 'convrot4', label: '4bit convrot (nvfp4)' },
+  { value: 'convrotint7', label: '7bit convrot' },
+  { value: 'convrotint6', label: '6bit convrot' },
+  { value: 'convrotint5', label: '5bit convrot' },
+  { value: 'convrotint4', label: '4bit convrot' },
+  { value: 'convrotint3', label: '3bit convrot' },
+  { value: 'convrotint2', label: '2bit convrot' },
+  { value: 'convrotbitnet', label: '1.58bit convrot (bitnet)' },
   { value: 'uint7', label: '7 bit' },
   { value: 'uint6', label: '6 bit' },
   { value: 'uint5', label: '5 bit' },

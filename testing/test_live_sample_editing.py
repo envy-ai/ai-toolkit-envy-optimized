@@ -51,7 +51,7 @@ class LiveSampleEditingTests(unittest.TestCase):
         self.assertIn("self._refresh_live_sample_config()", train_process_source)
         self.assertLess(
             train_process_source.index("self._refresh_live_sample_config()"),
-            train_process_source.index("is_sample_step = self.sample_config.sample_every"),
+            train_process_source.index("is_sample_step = ("),
         )
         self.assertIn("self.sample_config = SampleConfig", train_process_source)
 
