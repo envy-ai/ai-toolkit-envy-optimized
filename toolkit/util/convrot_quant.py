@@ -296,9 +296,14 @@ def _import_triton():
     at first compile."""
     import triton as _triton
     import triton.language as _tl
+    from triton.language.extra import libdevice as _libdevice
 
     globals()["triton"] = _triton
     globals()["tl"] = _tl
+    # Triton 3.3 resolves JIT free variables via the module globals rather
+    # than the factory function closure. Kernels using rint need this helper
+    # published alongside triton and tl.
+    globals()["libdevice"] = _libdevice
     return _triton, _tl
 
 
@@ -849,7 +854,6 @@ def _get_int8_kernels():
     if _int8_kernels is not None:
         return _int8_kernels
     triton, tl = _import_triton()
-    from triton.language.extra import libdevice
 
     @triton.jit
     def int8_act_quant_kernel(
@@ -1687,7 +1691,6 @@ def _get_intn_grouped_kernel():
     if _intn_grouped_kernel is not None:
         return _intn_grouped_kernel
     triton, tl = _import_triton()
-    from triton.language.extra import libdevice
 
     @triton.jit
     def intn_unpack_grouped_kernel(
@@ -1739,7 +1742,6 @@ def _get_bitnet_kernel():
     if _bitnet_kernel is not None:
         return _bitnet_kernel
     triton, tl = _import_triton()
-    from triton.language.extra import libdevice
 
     @triton.jit
     def bitnet_unpack_kernel(
@@ -1870,7 +1872,6 @@ def _get_int_gemv_kernel():
     if _int_gemv_kernel is not None:
         return _int_gemv_kernel
     triton, tl = _import_triton()
-    from triton.language.extra import libdevice
 
     @triton.jit
     def _unpack_lane(
