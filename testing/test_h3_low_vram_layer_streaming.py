@@ -104,6 +104,31 @@ class H3LowVramLayerStreamingTests(unittest.TestCase):
             client.wait_for_vram_release(timeout=0.001, poll_interval=0.001)
         )
 
+    def test_comfy_vram_release_wait_rejects_cuda_async_pool_false_positive(self):
+        client = object.__new__(ComfyApiClient)
+        client._request_json = Mock(return_value={
+            "devices": [{
+                "vram_total": 24 * 1024 ** 3,
+                "vram_free": 23 * 1024 ** 3,
+                # cudaMallocAsync can report little active allocator memory
+                # while its driver pool still owns nearly all physical VRAM.
+                "torch_vram_total": 32 * 1024 ** 2,
+                "torch_vram_free": 24 * 1024 ** 2,
+            }]
+        })
+
+        self.assertFalse(client.wait_for_vram_release(
+            timeout=0.001,
+            poll_interval=0.001,
+            min_free_bytes=20 * 1024 ** 3,
+            free_memory_probe=lambda: 256 * 1024 ** 2,
+        ))
+        self.assertTrue(client.wait_for_vram_release(
+            timeout=0.01,
+            min_free_bytes=20 * 1024 ** 3,
+            free_memory_probe=lambda: 21 * 1024 ** 3,
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

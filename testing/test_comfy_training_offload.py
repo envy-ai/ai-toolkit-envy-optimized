@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from jobs.process.BaseSDTrainProcess import BaseSDTrainProcess
 
@@ -56,6 +57,56 @@ class ComfyTrainingOffloadTests(unittest.TestCase):
         self.assertEqual(training_network.tensor.device, "cuda:0")
         self.assertEqual(training_child.tensor.device, "cuda:0")
         self.assertEqual(assistant_network.tensor.device, "cuda:0")
+
+    def test_failed_comfy_render_does_not_restore_gpu_models(self):
+        process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
+        process.sd = mock.Mock()
+        process._capture_comfy_auxiliary_device_state = mock.Mock(return_value=[])
+        process._restore_comfy_auxiliary_modules = mock.Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "release failed"):
+            process._run_with_models_offloaded_for_comfy(
+                lambda: (_ for _ in ()).throw(RuntimeError("release failed"))
+            )
+
+        process.sd.save_device_state.assert_called_once_with()
+        process.sd.restore_device_state.assert_not_called()
+        process._restore_comfy_auxiliary_modules.assert_not_called()
+
+    def test_failed_sample_keeps_optimizer_state_on_cpu(self):
+        process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
+        process.optimizer = object()
+        process.device_torch = "cuda:0"
+        process.sample = mock.Mock(side_effect=RuntimeError("sample failed"))
+
+        with (
+            mock.patch(
+                "jobs.process.BaseSDTrainProcess.move_optimizer_state_to_device"
+            ) as move_state,
+            self.assertRaisesRegex(RuntimeError, "sample failed"),
+        ):
+            process.sample_with_optimizer_state_offload()
+
+        move_state.assert_called_once_with(process.optimizer, "cpu")
+
+    def test_release_wait_requires_pre_comfy_physical_vram_baseline(self):
+        process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
+        process._get_free_cuda_memory_bytes = mock.Mock(
+            return_value=21 * 1024 ** 3
+        )
+        process._update_comfy_sample_status = mock.Mock()
+        client = mock.Mock()
+        client.wait_for_vram_release.return_value = True
+
+        self.assertTrue(process._wait_for_comfy_vram_release(
+            client,
+            free_bytes_before_comfy=22 * 1024 ** 3,
+        ))
+
+        client.wait_for_vram_release.assert_called_once_with(
+            min_free_bytes=int(21.5 * 1024 ** 3),
+            free_memory_probe=process._get_free_cuda_memory_bytes,
+        )
 
 
 if __name__ == "__main__":

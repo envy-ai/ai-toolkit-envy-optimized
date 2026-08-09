@@ -569,12 +569,17 @@ class ComfyApiClient:
         max_used_bytes: int = 1024 ** 3,
         timeout: float = 120.0,
         poll_interval: float = 0.5,
+        min_free_bytes: Optional[int] = None,
+        free_memory_probe: Optional[Callable[[], int]] = None,
     ) -> bool:
         """Wait for ComfyUI's asynchronous /free request to reach the GPU.
 
         ComfyUI acknowledges /api/free when it queues the work, rather than
         when model unloading has completed.  A trainer that restores its model
         immediately can therefore race ComfyUI and OOM on the shared GPU.
+        With cudaMallocAsync, allocator ``active_bytes`` can fall before its
+        driver pool releases physical VRAM, so callers may also provide the
+        pre-render free-memory target and a driver-level probe.
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -602,7 +607,16 @@ class ComfyApiClient:
                         free = int(primary_device.get("vram_free", 0))
                         used = max(0, total - free)
                         has_usage = total > 0
-                    if has_usage and used <= max_used_bytes:
+                    allocator_released = has_usage and used <= max_used_bytes
+                    physical_memory_released = True
+                    if min_free_bytes is not None and free_memory_probe is not None:
+                        try:
+                            physical_memory_released = (
+                                int(free_memory_probe()) >= int(min_free_bytes)
+                            )
+                        except (RuntimeError, ValueError, TypeError):
+                            physical_memory_released = False
+                    if allocator_released and physical_memory_released:
                         return True
             except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, TypeError):
                 pass

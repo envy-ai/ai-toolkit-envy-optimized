@@ -319,7 +319,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
         move_optimizer_state_to_device(self.optimizer, 'cpu')
         try:
             self.sample(step, is_first=is_first)
-        finally:
+        except BaseException:
+            # Sampling failures terminate the job. Keep the optimizer offloaded
+            # so cleanup does not mask the original error with a second OOM.
+            flush()
+            raise
+        else:
             flush()
             move_optimizer_state_to_device(self.optimizer, self.device_torch)
             flush()
@@ -560,7 +565,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def _ensure_models_offloaded_for_comfy(self, client: Optional[ComfyApiClient] = None):
         if getattr(self, 'sd', None) is None:
-            return
+            return self._get_free_cuda_memory_bytes()
 
         offload_bytes = self._estimate_comfy_cpu_offload_bytes()
         available_bytes = self._get_available_system_ram_bytes()
@@ -581,6 +586,42 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         flush()
+        return self._get_free_cuda_memory_bytes()
+
+    def _get_free_cuda_memory_bytes(self):
+        if not torch.cuda.is_available():
+            return None
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info(self.device_torch)
+            return int(free_bytes)
+        except (RuntimeError, ValueError, TypeError):
+            return None
+
+    def _wait_for_comfy_vram_release(self, client, free_bytes_before_comfy=None):
+        min_free_bytes = None
+        free_memory_probe = None
+        if free_bytes_before_comfy is not None:
+            # Small CUDA contexts and allocator bookkeeping can vary across the
+            # render. Require physical free VRAM to return close to the value
+            # observed after the trainer was offloaded, while allowing modest
+            # noise from those allocations.
+            tolerance_bytes = 512 * 1024 ** 2
+            min_free_bytes = max(0, int(free_bytes_before_comfy) - tolerance_bytes)
+            free_memory_probe = self._get_free_cuda_memory_bytes
+            message = (
+                "Waiting for ComfyUI to release VRAM before resuming training "
+                f"(need at least {min_free_bytes / 1024 ** 3:.1f} GiB free)"
+            )
+        else:
+            message = "Waiting for ComfyUI to release VRAM before resuming training"
+
+        print_acc(message)
+        self._update_comfy_sample_status(message)
+
+        return client.wait_for_vram_release(
+            min_free_bytes=min_free_bytes,
+            free_memory_probe=free_memory_probe,
+        )
 
     def _log_comfy_sample_generation_time(self, elapsed_seconds: float, completed_samples: int, total_samples: int, step=None):
         message = (
@@ -770,11 +811,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
         auxiliary_device_state = self._capture_comfy_auxiliary_device_state()
         self.sd.save_device_state()
         try:
-            return func()
-        finally:
+            result = func()
+        except BaseException:
+            # The caller will terminate the job. Leaving everything on CPU
+            # preserves the original sampling/release error and avoids an OOM
+            # while ComfyUI may still own the GPU.
+            flush()
+            raise
+        else:
             self.sd.restore_device_state()
             self._restore_comfy_auxiliary_modules(auxiliary_device_state)
             flush()
+            return result
 
     def _get_comfy_workflow_path(self, comfy_config, batch=False):
         workflow_path = comfy_config.workflow_path
@@ -837,10 +885,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
         def render(offload_models=True, unload_models=True):
             sample_generation_start = time.perf_counter()
             completed_samples = 0
+            free_bytes_before_comfy = None
             try:
                 self._log_comfy_sample_generation_start(len(gen_img_config_list), batch=False)
                 if offload_models:
-                    self._ensure_models_offloaded_for_comfy(client)
+                    free_bytes_before_comfy = self._ensure_models_offloaded_for_comfy(client)
                 for i, gen_config in enumerate(gen_img_config_list):
                     output_path = gen_config.get_image_path(i)
                     output_stem = os.path.splitext(os.path.basename(output_path))[0]
@@ -954,8 +1003,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 )
                 if unload_models:
                     client.unload_models(free_memory=True)
-                    print_acc("Waiting for ComfyUI to release VRAM before resuming training")
-                    if not client.wait_for_vram_release():
+                    if not self._wait_for_comfy_vram_release(
+                        client, free_bytes_before_comfy
+                    ):
                         raise RuntimeError(
                             "ComfyUI did not release its GPU models within 120 seconds; "
                             "refusing to restore the training model to avoid a CUDA OOM."
@@ -1038,13 +1088,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
         def render(offload_models=True, unload_models=True):
             sample_generation_start = time.perf_counter()
             completed_samples = 0
+            free_bytes_before_comfy = None
             try:
                 self._log_comfy_sample_generation_start(
                     len(gen_img_config_list),
                     batch=True,
                 )
                 if offload_models:
-                    self._ensure_models_offloaded_for_comfy(client)
+                    free_bytes_before_comfy = self._ensure_models_offloaded_for_comfy(
+                        client
+                    )
 
                 for indexed_batch_group in indexed_batch_groups:
                     group_configs = [gen_config for _, gen_config in indexed_batch_group]
@@ -1188,8 +1241,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 )
                 if unload_models:
                     client.unload_models(free_memory=True)
-                    print_acc("Waiting for ComfyUI to release VRAM before resuming training")
-                    if not client.wait_for_vram_release():
+                    if not self._wait_for_comfy_vram_release(
+                        client, free_bytes_before_comfy
+                    ):
                         raise RuntimeError(
                             "ComfyUI did not release its GPU models within 120 seconds; "
                             "refusing to restore the training model to avoid a CUDA OOM."
