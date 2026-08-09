@@ -731,7 +731,7 @@ class ComfyApiClientTests(unittest.TestCase):
         from toolkit.comfy_sample import ComfyApiClient
 
         payloads = []
-        client = ComfyApiClient()
+        client = ComfyApiClient(api_url="http://comfy.test:8188")
 
         def request_json(method, path, payload=None):
             payloads.append((method, path, payload))
@@ -739,29 +739,93 @@ class ComfyApiClientTests(unittest.TestCase):
 
         client._request_json = request_json
 
-        result = client.release_vram()
+        with mock.patch("builtins.print") as print_mock:
+            result = client.release_vram()
 
         self.assertEqual(payloads, [
             ("POST", "/comfyui-cache-monitor/release_vram", None)
         ])
         self.assertEqual(result["released_bytes"], 123)
+        self.assertIn(
+            "http://comfy.test:8188/comfyui-cache-monitor/release_vram",
+            print_mock.call_args.args[0],
+        )
 
-    def test_release_vram_rejects_a_missing_custom_endpoint(self):
+    def test_release_vram_warns_and_uses_legacy_free_endpoint_when_custom_endpoint_is_missing(self):
         from toolkit.comfy_sample import ComfyApiClient
 
         import urllib.error
 
-        client = ComfyApiClient()
-        client._request_json = mock.Mock(side_effect=urllib.error.HTTPError(
-            "http://127.0.0.1:8188/comfyui-cache-monitor/release_vram",
-            404,
-            "Not Found",
-            {},
-            None,
-        ))
+        payloads = []
+        client = ComfyApiClient(api_url="http://comfy.test:8188")
 
-        with self.assertRaisesRegex(RuntimeError, "missing"):
-            client.release_vram()
+        def request_json(method, path, payload=None):
+            payloads.append((method, path, payload))
+            if path == "/comfyui-cache-monitor/release_vram":
+                raise urllib.error.HTTPError(
+                    "http://comfy.test:8188/comfyui-cache-monitor/release_vram",
+                    404,
+                    "Not Found",
+                    {},
+                    None,
+                )
+
+        client._request_json = request_json
+
+        with mock.patch("builtins.print") as print_mock:
+            result = client.release_vram()
+
+        self.assertEqual(payloads, [
+            ("POST", "/comfyui-cache-monitor/release_vram", None),
+            ("POST", "/api/free", {"unload_models": True}),
+        ])
+        self.assertFalse(result["released"])
+        self.assertTrue(result["fallback_requested"])
+        self.assertTrue(result["fallback_succeeded"])
+        warning = print_mock.call_args_list[-1].args[0]
+        self.assertIn("WARNING", warning)
+        self.assertIn("download/install the comfyui-cache-monitor", warning.lower())
+        self.assertIn("http://comfy.test:8188/api/free", warning)
+
+    def test_release_vram_uses_legacy_free_endpoint_on_unconfirmed_response(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        payloads = []
+        client = ComfyApiClient()
+
+        def request_json(method, path, payload=None):
+            payloads.append((method, path, payload))
+            return {} if path == "/comfyui-cache-monitor/release_vram" else None
+
+        client._request_json = request_json
+
+        with mock.patch("builtins.print"):
+            result = client.release_vram()
+
+        self.assertEqual(payloads, [
+            ("POST", "/comfyui-cache-monitor/release_vram", None),
+            ("POST", "/api/free", {"unload_models": True}),
+        ])
+        self.assertTrue(result["fallback_requested"])
+
+    def test_release_vram_does_not_raise_when_both_endpoints_fail(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        import urllib.error
+
+        client = ComfyApiClient(api_url="http://comfy.test:8188")
+        client._request_json = mock.Mock(side_effect=urllib.error.URLError("offline"))
+
+        with mock.patch("builtins.print") as print_mock:
+            result = client.release_vram()
+
+        self.assertEqual(client._request_json.call_count, 2)
+        self.assertFalse(result["fallback_succeeded"])
+        self.assertEqual(result["fallback_error"], "<urlopen error offline>")
+        self.assertIn(
+            "Legacy ComfyUI VRAM release also failed",
+            print_mock.call_args_list[-1].args[0],
+        )
 
     def test_upload_image_posts_multipart_to_comfy_input_storage(self):
         from toolkit.comfy_sample import ComfyApiClient

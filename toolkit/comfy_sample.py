@@ -18,6 +18,8 @@ from toolkit.paths import get_path
 
 DEFAULT_COMFY_API_URL = "http://127.0.0.1:8188"
 DEFAULT_COMFY_PROMPT_TIMEOUT = 30 * 60
+COMFY_CACHE_MONITOR_RELEASE_PATH = "/comfyui-cache-monitor/release_vram"
+COMFY_LEGACY_FREE_PATH = "/api/free"
 DEFAULT_COMFY_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample.json.njk"
 DEFAULT_COMFY_BATCH_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample_batch_easy_use.json.njk"
 DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH = (
@@ -556,31 +558,48 @@ class ComfyApiClient:
             payload = {"unload_models": True}
             if free_memory:
                 payload["free_memory"] = True
-            self._request_json("POST", "/api/free", payload)
+            self._request_json("POST", COMFY_LEGACY_FREE_PATH, payload)
         except (urllib.error.URLError, TimeoutError, RuntimeError):
             if not ignore_errors:
                 raise
 
     def release_vram(self):
         """Release ComfyUI model VRAM while retaining its resident RAM cache."""
+        release_url = self._url(COMFY_CACHE_MONITOR_RELEASE_PATH)
+        fallback_url = self._url(COMFY_LEGACY_FREE_PATH)
+        print(f"Requesting cache-preserving ComfyUI VRAM release: {release_url}")
         try:
             response = self._request_json(
                 "POST",
-                "/comfyui-cache-monitor/release_vram",
+                COMFY_CACHE_MONITOR_RELEASE_PATH,
             )
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                raise RuntimeError(
-                    "ComfyUI is missing the cache-preserving VRAM release endpoint; "
-                    "install or restart comfyui-cache-monitor before sampling"
-                ) from exc
-            raise
-        if not response or response.get("released") is not True:
-            raise RuntimeError(
-                "ComfyUI did not confirm cache-preserving VRAM release; "
-                "install or restart comfyui-cache-monitor before sampling"
+            if not response or response.get("released") is not True:
+                raise RuntimeError("endpoint did not confirm VRAM release")
+            return response
+        except Exception as exc:
+            print(
+                "WARNING: Cache-preserving ComfyUI VRAM release failed at "
+                f"{release_url}: {exc}. Download/install the comfyui-cache-monitor "
+                f"custom-node module and restart ComfyUI. Falling back to {fallback_url}; "
+                "this may discard ComfyUI's resident model cache."
             )
-        return response
+            fallback_error = None
+            try:
+                self.unload_models()
+            except Exception as fallback_exc:
+                fallback_error = str(fallback_exc)
+                print(
+                    f"WARNING: Legacy ComfyUI VRAM release also failed at {fallback_url}: "
+                    f"{fallback_exc}"
+                )
+            return {
+                "released": False,
+                "fallback_requested": True,
+                "fallback_succeeded": fallback_error is None,
+                "fallback_error": fallback_error,
+                "endpoint": release_url,
+                "fallback_endpoint": fallback_url,
+            }
 
     def get_system_stats(self) -> Dict[str, Any]:
         return self._request_json("GET", "/system_stats") or {}
