@@ -726,6 +726,31 @@ export const modelArchs: ModelArch[] = [
       'config.process[0].sample.height': [768, 1024],
       'config.process[0].sample.guidance_scale': [1, 4],
       'config.process[0].sample.sample_steps': [28, 25],
+      // Keep the fork's ComfyUI H3 renderer defaults alongside upstream's
+      // native sampler and training-adapter defaults. They are used only when
+      // ComfyUI sampling is enabled in the Samples panel.
+      'config.process[0].sample.comfy.workflow_path': [
+        'config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk',
+        'config/comfy_templates/krea2_lora_sample.json.njk',
+      ],
+      'config.process[0].sample.comfy.model': [
+        'minimax_h3_fl2va_pruned_int8_convrot.safetensors',
+        '',
+      ],
+      'config.process[0].sample.comfy.vae': [
+        'minimax_h3_video_vae_fp16.safetensors',
+        '',
+      ],
+      'config.process[0].sample.comfy.audio_vae': [
+        'minimax_h3_audio_vae_fp32.safetensors',
+        '',
+      ],
+      'config.process[0].sample.comfy.text_encoder': [
+        'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors',
+        '',
+      ],
+      'config.process[0].sample.comfy.sampler': ['res_multistep', 'euler'],
+      'config.process[0].sample.comfy.scheduler': ['simple', 'simple'],
       'config.process[0].train.audio_loss_multiplier': [1.0, undefined],
       'config.process[0].train.timestep_type': ['shift', 'sigmoid'],
       'config.process[0].datasets[x].do_i2v': [false, undefined],
