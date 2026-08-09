@@ -79,10 +79,30 @@ class H3LowVramLayerStreamingTests(unittest.TestCase):
     def test_comfy_vram_release_wait_accepts_an_unloaded_gpu(self):
         client = object.__new__(ComfyApiClient)
         client._request_json = Mock(return_value={
-            "devices": [{"vram_total": 24 * 1024 ** 3, "vram_free": 23.5 * 1024 ** 3}]
+            "devices": [{
+                "vram_total": 24 * 1024 ** 3,
+                "vram_free": 18 * 1024 ** 3,
+                "torch_vram_total": 32 * 1024 ** 2,
+                "torch_vram_free": 24 * 1024 ** 2,
+            }]
         })
 
         self.assertTrue(client.wait_for_vram_release(timeout=0.01))
+
+    def test_comfy_vram_release_wait_rejects_active_comfy_allocations(self):
+        client = object.__new__(ComfyApiClient)
+        client._request_json = Mock(return_value={
+            "devices": [{
+                "vram_total": 24 * 1024 ** 3,
+                "vram_free": 18 * 1024 ** 3,
+                "torch_vram_total": 8 * 1024 ** 3,
+                "torch_vram_free": 4 * 1024 ** 3,
+            }]
+        })
+
+        self.assertFalse(
+            client.wait_for_vram_release(timeout=0.001, poll_interval=0.001)
+        )
 
 
 if __name__ == "__main__":

@@ -583,9 +583,26 @@ class ComfyApiClient:
                 devices = stats.get("devices", [])
                 if devices:
                     primary_device = devices[0]
-                    total = int(primary_device.get("vram_total", 0))
-                    free = int(primary_device.get("vram_free", 0))
-                    if total > 0 and total - free <= max_used_bytes:
+                    # vram_total - vram_free is global device usage. It also
+                    # includes the offloaded trainer and unrelated GPU
+                    # processes, so it can stay above the threshold after
+                    # Comfy has completely unloaded and cause a false timeout.
+                    # Comfy reports its own PyTorch reserved/free pool
+                    # separately; their difference is Comfy's active tensor
+                    # allocation and is the signal the /free request controls.
+                    torch_total = primary_device.get("torch_vram_total")
+                    torch_free = primary_device.get("torch_vram_free")
+                    if torch_total is not None and torch_free is not None:
+                        used = max(0, int(torch_total) - int(torch_free))
+                        has_usage = True
+                    else:
+                        # Compatibility with older ComfyUI versions that do
+                        # not expose per-process PyTorch allocator statistics.
+                        total = int(primary_device.get("vram_total", 0))
+                        free = int(primary_device.get("vram_free", 0))
+                        used = max(0, total - free)
+                        has_usage = total > 0
+                    if has_usage and used <= max_used_bytes:
                         return True
             except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, TypeError):
                 pass
