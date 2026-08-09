@@ -1002,12 +1002,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     step=step,
                 )
                 if unload_models:
-                    # Release ComfyUI's GPU models for the trainer without
-                    # resetting its execution cache.  The cached CPU model
-                    # state makes the next sampling handoff substantially
-                    # cheaper; free_memory=True is reserved for the low-RAM
+                    # Release ComfyUI's GPU weights for the trainer while
+                    # retaining both its execution cache and resident CPU
+                    # weight pool. A full unload is reserved for the low-RAM
                     # emergency path in _ensure_models_offloaded_for_comfy.
-                    client.unload_models()
+                    client.release_vram()
                     if not self._wait_for_comfy_vram_release(
                         client, free_bytes_before_comfy
                     ):
@@ -1245,10 +1244,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     step=step,
                 )
                 if unload_models:
-                    # Keep ComfyUI's execution/RAM cache while unloading its
-                    # GPU models.  A full cache reset is only appropriate when
-                    # system RAM is already too tight for trainer offloading.
-                    client.unload_models()
+                    # Keep ComfyUI's execution and resident model caches while
+                    # offloading its GPU weights. A full unload is only
+                    # appropriate when system RAM is already too tight.
+                    client.release_vram()
                     if not self._wait_for_comfy_vram_release(
                         client, free_bytes_before_comfy
                     ):

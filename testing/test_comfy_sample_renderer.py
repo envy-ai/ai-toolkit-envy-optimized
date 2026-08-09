@@ -727,6 +727,42 @@ class ComfyApiClientTests(unittest.TestCase):
             ("POST", "/api/free", {"unload_models": True})
         ])
 
+    def test_release_vram_requests_cache_preserving_custom_endpoint(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        payloads = []
+        client = ComfyApiClient()
+
+        def request_json(method, path, payload=None):
+            payloads.append((method, path, payload))
+            return {"released": True, "released_bytes": 123}
+
+        client._request_json = request_json
+
+        result = client.release_vram()
+
+        self.assertEqual(payloads, [
+            ("POST", "/h3-extended/release_vram", None)
+        ])
+        self.assertEqual(result["released_bytes"], 123)
+
+    def test_release_vram_rejects_a_missing_custom_endpoint(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        import urllib.error
+
+        client = ComfyApiClient()
+        client._request_json = mock.Mock(side_effect=urllib.error.HTTPError(
+            "http://127.0.0.1:8188/h3-extended/release_vram",
+            404,
+            "Not Found",
+            {},
+            None,
+        ))
+
+        with self.assertRaisesRegex(RuntimeError, "missing"):
+            client.release_vram()
+
     def test_upload_image_posts_multipart_to_comfy_input_storage(self):
         from toolkit.comfy_sample import ComfyApiClient
 
@@ -761,9 +797,9 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         single_source = source[single_start:batch_start]
         batch_source = source[batch_start:sample_start]
 
-        self.assertIn("client.unload_models()", single_source)
+        self.assertIn("client.release_vram()", single_source)
         self.assertNotIn("client.unload_models(free_memory=True)", single_source)
-        self.assertIn("client.unload_models()", batch_source)
+        self.assertIn("client.release_vram()", batch_source)
         self.assertNotIn("client.unload_models(free_memory=True)", batch_source)
 
     def test_train_process_offloads_models_once_before_comfy_sample_loop(self):
