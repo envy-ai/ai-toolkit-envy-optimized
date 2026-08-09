@@ -7,6 +7,7 @@ const versionMatch = versionFile.match(/VERSION\s*=\s*["']([^"']+)["']/);
 const appVersion = versionMatch ? versionMatch[1] : 'unknown';
 
 const nextConfig: NextConfig = {
+  outputFileTracingRoot: join(__dirname, '..'),
   env: {
     NEXT_PUBLIC_APP_VERSION: appVersion,
   },
