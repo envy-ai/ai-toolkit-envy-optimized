@@ -5,11 +5,11 @@ import path from 'path';
 import { Readable } from 'stream';
 import { getDatasetsRoot, getTrainingFolder } from '@/server/settings';
 
-export async function GET(request: NextRequest, { params }: { params: { filePath: string } }) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ filePath: string[] }> }) {
   const { filePath } = await params;
   try {
     // Decode the path
-    const decodedFilePath = decodeURIComponent(filePath);
+    const decodedFilePath = decodeURIComponent(filePath.join('/'));
 
     // Get allowed directories
     const datasetRoot = await getDatasetsRoot();

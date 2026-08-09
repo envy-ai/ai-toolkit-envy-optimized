@@ -5,7 +5,7 @@ import fs from 'fs';
 import type { FileHandle } from 'fs/promises';
 import { getTrainingFolder } from '@/server/settings';
 
-export async function GET(request: NextRequest, { params }: { params: { jobID: string } }) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ jobID: string }> }) {
   const { jobID } = await params;
 
   const job = await prisma.job.findUnique({

@@ -16,7 +16,7 @@ import AutoCaptionButton from '@/components/AutoCaptionButton';
 import CaptionMonitor from '@/components/CaptionMonitor';
 import { CreatableSelectInput } from '@/components/formInputs';
 
-export default function DatasetPage({ params }: { params: { datasetName: string } }) {
+export default function DatasetPage({ params }: { params: Promise<{ datasetName: string }> }) {
   const [imgList, setImgList] = useState<{ img_path: string }[]>([]);
   const [isAutoCaptioning, setIsAutoCaptioning] = useState(false);
   const usableParams = use(params as any) as { datasetName: string };
