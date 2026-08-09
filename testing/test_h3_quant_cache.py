@@ -8,6 +8,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 import torch
+from transformers import PretrainedConfig, PreTrainedModel
+from transformers.modeling_outputs import BaseModelOutput
+from transformers.utils.output_capturing import (
+    _CAN_RECORD_REGISTRY,
+    capture_outputs,
+)
 
 from toolkit.util.ostris_quant import OstrisLinear
 
@@ -57,6 +63,22 @@ class FakeQuantizedTextEncoder(FakeModule):
     def __init__(self):
         super().__init__()
         self.quantized_layer = FakeOstrisLinear()
+
+
+class TinyHiddenStateModel(PreTrainedModel):
+    """Small stand-in for Transformers' hook-based Qwen hidden-state API."""
+
+    config_class = PretrainedConfig
+    _can_record_outputs = {"hidden_states": torch.nn.Linear}
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.layer = torch.nn.Linear(2, 2)
+        self.post_init()
+
+    @capture_outputs
+    def forward(self, values, **kwargs):
+        return BaseModelOutput(last_hidden_state=self.layer(values))
 
 
 def make_h3_model():
@@ -200,6 +222,28 @@ class H3QuantizedCacheTests(unittest.TestCase):
 
         self.assertIsNotNone(cache_path)
         self.assertTrue(cache_path.endswith(".pt"))
+
+    def test_cache_load_restores_transformers_hidden_state_capture(self):
+        model = make_h3_model()
+        cached_model = TinyHiddenStateModel(PretrainedConfig())
+
+        with tempfile.TemporaryDirectory() as cache_dir:
+            cache_path = str(pathlib.Path(cache_dir) / "text_encoder.pt")
+            torch.save(cached_model, cache_path)
+            registry_key = str(TinyHiddenStateModel)
+            _CAN_RECORD_REGISTRY.pop(registry_key, None)
+
+            restored = model.load_quantized_module_cache(
+                cache_path, "text encoder"
+            )
+
+        self.assertIs(
+            _CAN_RECORD_REGISTRY[registry_key],
+            TinyHiddenStateModel._can_record_outputs,
+        )
+        outputs = restored(torch.ones(1, 2), output_hidden_states=True)
+        self.assertIsNotNone(outputs.hidden_states)
+        self.assertEqual(len(outputs.hidden_states), 2)
 
 
 if __name__ == "__main__":

@@ -1717,6 +1717,7 @@ class BaseModel:
                 module = torch.load(cache_path, map_location="cpu", weights_only=False)
             except TypeError:
                 module = torch.load(cache_path, map_location="cpu")
+            self._restore_transformers_output_capture_registry(module)
             if not hasattr(module, "orig_state_dict"):
                 patch_dequantization_on_save(module)
             return module
@@ -1725,6 +1726,32 @@ class BaseModel:
                 f"Failed to load cached quantized {component_name}: {e}"
             )
             return None
+
+    @staticmethod
+    def _restore_transformers_output_capture_registry(module: torch.nn.Module):
+        """Restore runtime-only Transformers metadata after ``torch.load``.
+
+        Recent Transformers releases collect hidden states and attentions with
+        hooks described by a process-global registry.  ``PreTrainedModel``
+        constructors populate that registry, but loading a pickled module does
+        not run its constructors.  A cached model can therefore accept
+        ``output_hidden_states=True`` while silently returning
+        ``hidden_states=None``.  Recreate the same registrations performed by
+        ``PreTrainedModel.__init__`` for every restored submodel.
+        """
+        try:
+            from transformers.modeling_utils import PreTrainedModel
+            from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY
+        except (ImportError, AttributeError):
+            # Older Transformers releases return auxiliary outputs directly
+            # and do not have this runtime registry.
+            return
+
+        for submodule in module.modules():
+            if isinstance(submodule, PreTrainedModel):
+                _CAN_RECORD_REGISTRY[str(submodule.__class__)] = getattr(
+                    submodule, "_can_record_outputs", None
+                )
 
     def save_quantized_module_cache(
         self,
