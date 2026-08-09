@@ -457,6 +457,71 @@ class BaseSDTrainProcess(BaseTrainProcess):
             else:
                 yield module
 
+        yield from self._iter_comfy_auxiliary_offload_modules()
+
+    def _iter_comfy_auxiliary_offload_modules(self):
+        """Training modules that are not owned by the regular SD preset.
+
+        LoRA networks (including H3's large training and assistant adapters)
+        hook into the base model but keep their parameters in separate module
+        trees. Moving the UNet/transformer therefore does not move these
+        tensors or their gradients.
+        """
+        seen = set()
+        candidates = [getattr(self, 'network', None)]
+        sd = getattr(self, 'sd', None)
+        if sd is not None:
+            candidates.extend(
+                getattr(sd, attr_name, None)
+                for attr_name in (
+                    'network',
+                    'assistant_lora',
+                    'accuracy_recovery_adapter',
+                )
+            )
+
+        for module in candidates:
+            if module is None or not callable(getattr(module, 'to', None)):
+                continue
+            module_id = id(module)
+            if module_id in seen:
+                continue
+            seen.add(module_id)
+            yield module
+
+    @staticmethod
+    def _get_comfy_module_device(module):
+        for tensor in module.parameters(recurse=True):
+            return tensor.device
+        for tensor in module.buffers(recurse=True):
+            return tensor.device
+        return None
+
+    def _capture_comfy_auxiliary_device_state(self):
+        return [
+            (module, self._get_comfy_module_device(module))
+            for module in self._iter_comfy_auxiliary_offload_modules() or []
+        ]
+
+    @staticmethod
+    def _move_comfy_auxiliary_module(module, device):
+        # Some toolkit networks retain LoRA modules in ordinary Python lists,
+        # so nn.Module.to() alone may not visit all of them.
+        module.to(device)
+        get_all_modules = getattr(module, 'get_all_modules', None)
+        if callable(get_all_modules):
+            for child_module in get_all_modules():
+                child_module.to(device)
+
+    def _offload_comfy_auxiliary_modules(self):
+        for module in self._iter_comfy_auxiliary_offload_modules() or []:
+            self._move_comfy_auxiliary_module(module, 'cpu')
+
+    def _restore_comfy_auxiliary_modules(self, module_states):
+        for module, device in module_states:
+            if device is not None:
+                self._move_comfy_auxiliary_module(module, device)
+
     def _estimate_comfy_cpu_offload_bytes(self):
         seen_tensors = set()
         total_bytes = 0
@@ -512,6 +577,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 flush()
 
         self.sd.set_device_state(copy.deepcopy(empty_preset))
+        self._offload_comfy_auxiliary_modules()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         flush()
@@ -701,11 +767,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def _run_with_models_offloaded_for_comfy(self, func):
         if getattr(self, 'sd', None) is None:
             return func()
+        auxiliary_device_state = self._capture_comfy_auxiliary_device_state()
         self.sd.save_device_state()
         try:
             return func()
         finally:
             self.sd.restore_device_state()
+            self._restore_comfy_auxiliary_modules(auxiliary_device_state)
             flush()
 
     def _get_comfy_workflow_path(self, comfy_config, batch=False):

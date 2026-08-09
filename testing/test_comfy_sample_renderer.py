@@ -757,7 +757,26 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         self.assertIn("self._ensure_models_offloaded_for_comfy(client)", before_loop)
         self.assertNotIn("self._ensure_models_offloaded_for_comfy(client)", between_patch_and_prompt)
         self.assertIn("self.sd.set_device_state(copy.deepcopy(empty_preset))", method_source)
+        self.assertIn("self._offload_comfy_auxiliary_modules()", method_source)
         self.assertIn("free_memory=True", method_source)
+
+    def test_train_process_restores_auxiliary_networks_after_comfy_sample(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        iterator_start = source.index("def _iter_comfy_auxiliary_offload_modules")
+        iterator_end = source.index("\n    def ", iterator_start + 1)
+        iterator_source = source[iterator_start:iterator_end]
+        wrapper_start = source.index("def _run_with_models_offloaded_for_comfy")
+        wrapper_end = source.index("\n    def ", wrapper_start + 1)
+        wrapper_source = source[wrapper_start:wrapper_end]
+
+        self.assertIn("getattr(self, 'network', None)", iterator_source)
+        self.assertIn("'assistant_lora'", iterator_source)
+        self.assertIn("'accuracy_recovery_adapter'", iterator_source)
+        self.assertIn("_capture_comfy_auxiliary_device_state()", wrapper_source)
+        self.assertIn(
+            "_restore_comfy_auxiliary_modules(auxiliary_device_state)",
+            wrapper_source,
+        )
 
     def test_comfy_sample_generation_time_is_logged(self):
         source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
