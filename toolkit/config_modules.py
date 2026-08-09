@@ -1077,6 +1077,26 @@ class DatasetConfig:
         self.fast_image_size: bool = kwargs.get('fast_image_size', False)
         
         self.do_i2v: bool = kwargs.get('do_i2v', False)  # do image to video on models that are both t2i and i2v capable
+        # Optional MiniMax H3 Ref2VA conditioning. The data loader validates
+        # these fields for every H3 dataset, including ordinary FL2VA jobs, so
+        # keep safe defaults when no paired source/reference media is used.
+        self.i2v_last_frame: bool = kwargs.get('i2v_last_frame', False)
+        self.h3_v2v_path: Union[str, None] = kwargs.get('h3_v2v_path', None)
+        self.h3_v2v_audio: bool = kwargs.get('h3_v2v_audio', True)
+        self.h3_reference_path: Union[str, List[str], None] = kwargs.get(
+            'h3_reference_path', None
+        )
+        self.h3_reference_num_frames: int = int(
+            kwargs.get('h3_reference_num_frames', 22)
+        )
+        self.h3_reference_fps: int = int(kwargs.get('h3_reference_fps', 24))
+        self.h3_reference_audio: bool = kwargs.get('h3_reference_audio', True)
+        if self.h3_v2v_path == '':
+            self.h3_v2v_path = None
+        if self.h3_reference_path == '':
+            self.h3_reference_path = None
+        if isinstance(self.h3_reference_path, list) and not self.h3_reference_path:
+            self.h3_reference_path = None
         self.do_audio: bool = kwargs.get('do_audio', False) # load audio from video files for models that support it
         self.audio_preserve_pitch: bool = kwargs.get('audio_preserve_pitch', False) # preserve pitch when stretching audio to fit num_frames
         self.audio_normalize: bool = kwargs.get('audio_normalize', False) # normalize audio volume levels when loading
