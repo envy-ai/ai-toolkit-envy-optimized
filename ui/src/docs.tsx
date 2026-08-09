@@ -267,6 +267,16 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'model.low_vram_layer_streaming': {
+    title: 'Stream H3 Layers Through CPU RAM',
+    description: (
+      <>
+        When Low VRAM is enabled for MiniMax H3, stream transformer and text-encoder layers from pinned CPU RAM.
+        This avoids needing the full model in VRAM, but can use tens of gigabytes of system memory. Disable it only
+        when the GPU has enough free VRAM to hold the full H3 transformer during training.
+      </>
+    ),
+  },
   'model.qie.match_target_res': {
     title: 'Match Target Res',
     description: (

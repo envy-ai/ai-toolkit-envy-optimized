@@ -561,6 +561,37 @@ class ComfyApiClient:
             if not ignore_errors:
                 raise
 
+    def get_system_stats(self) -> Dict[str, Any]:
+        return self._request_json("GET", "/system_stats") or {}
+
+    def wait_for_vram_release(
+        self,
+        max_used_bytes: int = 1024 ** 3,
+        timeout: float = 120.0,
+        poll_interval: float = 0.5,
+    ) -> bool:
+        """Wait for ComfyUI's asynchronous /free request to reach the GPU.
+
+        ComfyUI acknowledges /api/free when it queues the work, rather than
+        when model unloading has completed.  A trainer that restores its model
+        immediately can therefore race ComfyUI and OOM on the shared GPU.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                stats = self.get_system_stats()
+                devices = stats.get("devices", [])
+                if devices:
+                    primary_device = devices[0]
+                    total = int(primary_device.get("vram_total", 0))
+                    free = int(primary_device.get("vram_free", 0))
+                    if total > 0 and total - free <= max_used_bytes:
+                        return True
+            except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, TypeError):
+                pass
+            time.sleep(poll_interval)
+        return False
+
 
 def load_workflow(path: str) -> Dict[str, Any]:
     with open(get_path(path), "r") as f:

@@ -885,7 +885,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     step=step,
                 )
                 if unload_models:
-                    client.unload_models()
+                    client.unload_models(free_memory=True)
+                    print_acc("Waiting for ComfyUI to release VRAM before resuming training")
+                    if not client.wait_for_vram_release():
+                        raise RuntimeError(
+                            "ComfyUI did not release its GPU models within 120 seconds; "
+                            "refusing to restore the training model to avoid a CUDA OOM."
+                        )
 
         if comfy_config.run_in_background:
             return self._run_comfy_background_task(
@@ -1113,7 +1119,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     step=step,
                 )
                 if unload_models:
-                    client.unload_models()
+                    client.unload_models(free_memory=True)
+                    print_acc("Waiting for ComfyUI to release VRAM before resuming training")
+                    if not client.wait_for_vram_release():
+                        raise RuntimeError(
+                            "ComfyUI did not release its GPU models within 120 seconds; "
+                            "refusing to restore the training model to avoid a CUDA OOM."
+                        )
 
         if comfy_config.run_in_background:
             return self._run_comfy_background_task(

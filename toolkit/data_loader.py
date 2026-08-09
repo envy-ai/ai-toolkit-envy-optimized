@@ -32,6 +32,29 @@ def is_native_windows():
 def is_macos():
     return platform.system() == "Darwin"
 
+
+def get_safe_dataloader_num_workers(dataset_config_list, sd) -> int:
+    """Return a worker count that cannot retain an H3 model through fork().
+
+    PyTorch uses fork workers on Linux by default.  H3's very large CPU-side
+    load state would then be inherited by every persistent data worker and
+    remain resident even after the parent releases it.  Cached H3 datasets do
+    not need worker processes to keep the model alive, so use the main process
+    for their training loader.
+    """
+    configured_workers = dataset_config_list[0].num_workers
+    if (
+        configured_workers > 0
+        and sd is not None
+        and getattr(sd, "arch", None) == "minimax_h3"
+    ):
+        print_acc(
+            "MiniMax H3: disabling DataLoader workers to prevent forked workers "
+            "from retaining the large model in system RAM"
+        )
+        return 0
+    return configured_workers
+
 if TYPE_CHECKING:
     from toolkit.stable_diffusion_model import StableDiffusion
     
@@ -774,7 +797,10 @@ def get_dataloader_from_datasets(
 
     dataloader_kwargs = {}
 
-    dataloader_kwargs['num_workers'] = dataset_config_list[0].num_workers
+    dataloader_kwargs['num_workers'] = get_safe_dataloader_num_workers(
+        dataset_config_list,
+        sd,
+    )
     if dataloader_kwargs['num_workers'] > 0:
         dataloader_kwargs['prefetch_factor'] = dataset_config_list[0].prefetch_factor
         # keep workers alive across epochs. Without this, spawn platforms (Windows/macOS)

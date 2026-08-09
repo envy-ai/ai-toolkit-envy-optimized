@@ -1,4 +1,6 @@
+import ctypes
 import gc
+import sys
 import torch
 from toolkit.basic import flush
 from toolkit.memory_management import MemoryManager
@@ -46,6 +48,8 @@ def unload_text_encoder(model: "BaseModel"):
     # we need to make it appear as a text encoder module without actually having one so all
     # to functions and what not will work.
 
+    is_minimax_h3 = getattr(model, "arch", None) == "minimax_h3"
+
     if model.text_encoder is not None:
         if isinstance(model.text_encoder, list):
             text_encoder_list = []
@@ -69,7 +73,21 @@ def unload_text_encoder(model: "BaseModel"):
             model.text_encoder = text_encoder_list
         else:
             # only has a single text encoder
-            _detach_and_cpu(model.text_encoder)
+            text_encoder = model.text_encoder
+            _detach_and_cpu(text_encoder)
+            # H3's Qwen3-VL conditioner is exceptionally large.  During
+            # cached-embedding training it is never needed again, but a stale
+            # reference (for example one held while a cache operation unwinds)
+            # can otherwise keep its CPU tensors resident.  Move its storage
+            # to meta before replacing the public handle so such references
+            # cannot retain tens of GB of weights.
+            if is_minimax_h3:
+                try:
+                    text_encoder.to_empty(device="meta")
+                except (AttributeError, RuntimeError):
+                    # Keep the existing safe CPU unload as a fallback for an
+                    # unusual module that cannot be moved to meta.
+                    pass
             model.text_encoder = FakeTextEncoder(
                 device=model.device_torch,
                 dtype=model.torch_dtype
@@ -77,4 +95,12 @@ def unload_text_encoder(model: "BaseModel"):
 
     torch.cuda.empty_cache()
     gc.collect()
+    # glibc may otherwise retain the freed H3 encoder allocations in its heap,
+    # even though the model is no longer reachable.  This is Linux-only and
+    # intentionally limited to the exceptionally large H3 encoder path.
+    if is_minimax_h3 and sys.platform.startswith("linux"):
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except OSError:
+            pass
     flush()

@@ -32,6 +32,7 @@ type AdditionalSections =
   | 'model.multistage'
   | 'model.layer_offloading'
   | 'model.low_vram'
+  | 'model.low_vram_layer_streaming'
   | 'model.qie.match_target_res'
   | 'model.assistant_lora_path'
   | 'model.unconditional_lora_path'
@@ -714,6 +715,7 @@ export const modelArchs: ModelArch[] = [
       'config.process[0].model.quantize_te': [true, false],
       'config.process[0].model.qtype_te': ['nvfp4', 'qfloat8'],
       'config.process[0].model.low_vram': [true, false],
+      'config.process[0].model.low_vram_layer_streaming': [true, true],
       'config.process[0].sample.sampler': ['flowmatch', 'flowmatch'],
       'config.process[0].train.noise_scheduler': ['flowmatch', 'flowmatch'],
       'config.process[0].train.cache_text_embeddings': [true, false],
@@ -765,7 +767,7 @@ export const modelArchs: ModelArch[] = [
       ],
     },
     disableSections: ['network.conv'],
-    additionalSections: ['sample.ctrl_img', 'datasets.num_frames', 'model.layer_offloading', 'model.low_vram', 'datasets.do_audio', 'datasets.audio_normalize', 'datasets.audio_preserve_pitch', 'datasets.do_i2v', 'train.audio_loss_multiplier', 'datasets.auto_frame_count', 'model.assistant_lora_path'],
+    additionalSections: ['sample.ctrl_img', 'datasets.num_frames', 'model.layer_offloading', 'model.low_vram', 'model.low_vram_layer_streaming', 'datasets.do_audio', 'datasets.audio_normalize', 'datasets.audio_preserve_pitch', 'datasets.do_i2v', 'train.audio_loss_multiplier', 'datasets.auto_frame_count', 'model.assistant_lora_path'],
     modelNotes: (
       <div className="space-y-2">
         <p>

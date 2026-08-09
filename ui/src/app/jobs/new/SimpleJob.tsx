@@ -627,6 +627,15 @@ export default function SimpleJob({
                   checked={jobConfig.config.process[0].model.low_vram}
                   onChange={value => setJobConfig(value, 'config.process[0].model.low_vram')}
                 />
+                {modelArch?.additionalSections?.includes('model.low_vram_layer_streaming') &&
+                  jobConfig.config.process[0].model.low_vram && (
+                    <Checkbox
+                      label="Stream H3 Layers Through CPU RAM"
+                      checked={jobConfig.config.process[0].model.low_vram_layer_streaming ?? true}
+                      onChange={value => setJobConfig(value, 'config.process[0].model.low_vram_layer_streaming')}
+                      docKey="model.low_vram_layer_streaming"
+                    />
+                  )}
               </FormGroup>
             )}
             {modelArch?.additionalSections?.includes('model.model_kwargs.kv_cache') && (

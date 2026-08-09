@@ -579,9 +579,13 @@ class MinimaxH3Model(BaseModel):
 
         # The 33B DiT cannot fit alongside H3's other frozen components under
         # the normal low-VRAM preset. Treat that preset as full layer streaming
-        # unless the user explicitly selected a different offload percentage.
+        # unless the user disables it or explicitly selected a different
+        # offload percentage. Layer streaming pins CPU weight storage, so it
+        # substantially increases system-RAM use.
         auto_layer_offload = (
-            self.model_config.low_vram and self.device_torch.type == "cuda"
+            self.model_config.low_vram
+            and self.model_config.low_vram_layer_streaming
+            and self.device_torch.type == "cuda"
         )
         transformer_offload_percent = (
             self.model_config.layer_offloading_transformer_percent
@@ -599,10 +603,13 @@ class MinimaxH3Model(BaseModel):
                 offload_percent=transformer_offload_percent,
             )
 
-        if self.model_config.low_vram:
-            self.print_and_status_update("Keeping transformer on CPU")
+        if transformer_offload_percent > 0:
+            self.print_and_status_update("Keeping transformer on CPU for layer streaming")
             transformer.to("cpu")
         else:
+            # Disabling H3's automatic low-VRAM streaming means the complete
+            # DiT should live on the GPU. Keeping it on CPU here would retain
+            # its full system-RAM copy until the first training forward.
             transformer.to(self.device_torch)
         flush()
 

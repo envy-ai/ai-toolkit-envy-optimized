@@ -719,6 +719,12 @@ class ModelConfig:
             "quantized_model_cache_dir", "models/.quantized_training_cache"
         )
         self.low_vram = kwargs.get("low_vram", False)
+        # MiniMax H3 normally turns low_vram into full layer streaming because
+        # its DiT and conditioner cannot coexist on modest GPUs.  Streaming
+        # pins the CPU copies of those weights, which is expensive in system
+        # RAM; allow capable systems to opt out and keep the transformer in
+        # VRAM while still using low_vram for the frozen components.
+        self.low_vram_layer_streaming = kwargs.get("low_vram_layer_streaming", True)
         self.attn_masking = kwargs.get("attn_masking", False)
         if self.attn_masking and not self.is_flux:
             raise ValueError("attn_masking is only supported with flux models currently")
