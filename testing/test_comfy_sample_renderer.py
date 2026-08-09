@@ -742,7 +742,7 @@ class ComfyApiClientTests(unittest.TestCase):
         result = client.release_vram()
 
         self.assertEqual(payloads, [
-            ("POST", "/h3-extended/release_vram", None)
+            ("POST", "/comfyui-cache-monitor/release_vram", None)
         ])
         self.assertEqual(result["released_bytes"], 123)
 
@@ -753,7 +753,7 @@ class ComfyApiClientTests(unittest.TestCase):
 
         client = ComfyApiClient()
         client._request_json = mock.Mock(side_effect=urllib.error.HTTPError(
-            "http://127.0.0.1:8188/h3-extended/release_vram",
+            "http://127.0.0.1:8188/comfyui-cache-monitor/release_vram",
             404,
             "Not Found",
             {},

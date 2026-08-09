@@ -566,19 +566,19 @@ class ComfyApiClient:
         try:
             response = self._request_json(
                 "POST",
-                "/h3-extended/release_vram",
+                "/comfyui-cache-monitor/release_vram",
             )
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 raise RuntimeError(
                     "ComfyUI is missing the cache-preserving VRAM release endpoint; "
-                    "install or restart the h3-extended custom node before sampling"
+                    "install or restart comfyui-cache-monitor before sampling"
                 ) from exc
             raise
         if not response or response.get("released") is not True:
             raise RuntimeError(
                 "ComfyUI did not confirm cache-preserving VRAM release; "
-                "install or restart the h3-extended custom node before sampling"
+                "install or restart comfyui-cache-monitor before sampling"
             )
         return response
 
