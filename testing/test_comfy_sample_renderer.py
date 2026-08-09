@@ -714,6 +714,19 @@ class ComfyApiClientTests(unittest.TestCase):
             ("POST", "/api/free", {"unload_models": True, "free_memory": True})
         ])
 
+    def test_unload_models_preserves_comfy_execution_cache_by_default(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        payloads = []
+        client = ComfyApiClient()
+        client._request_json = lambda method, path, payload=None: payloads.append((method, path, payload))
+
+        client.unload_models()
+
+        self.assertEqual(payloads, [
+            ("POST", "/api/free", {"unload_models": True})
+        ])
+
     def test_upload_image_posts_multipart_to_comfy_input_storage(self):
         from toolkit.comfy_sample import ComfyApiClient
 
@@ -739,6 +752,20 @@ class ComfyApiClientTests(unittest.TestCase):
 
 
 class ComfySampleTrainProcessTests(unittest.TestCase):
+    def test_normal_comfy_handoff_preserves_execution_cache(self):
+        source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
+        single_start = source.index("def _render_comfy_samples")
+        batch_start = source.index("def _render_comfy_sample_batch", single_start)
+        sample_start = source.index("def sample", batch_start)
+
+        single_source = source[single_start:batch_start]
+        batch_source = source[batch_start:sample_start]
+
+        self.assertIn("client.unload_models()", single_source)
+        self.assertNotIn("client.unload_models(free_memory=True)", single_source)
+        self.assertIn("client.unload_models()", batch_source)
+        self.assertNotIn("client.unload_models(free_memory=True)", batch_source)
+
     def test_train_process_offloads_models_once_before_comfy_sample_loop(self):
         source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()
         render_start = source.index("def _render_comfy_samples")
