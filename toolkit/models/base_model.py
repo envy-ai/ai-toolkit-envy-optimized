@@ -98,6 +98,10 @@ UNET_IN_CHANNELS = 4  # Stable Diffusion の in_channels は 4 で固定。XLも
 
 
 class BaseModel:
+    # Whole-module text-encoder pickles are not portable for every encoder
+    # family. Models must opt in after verifying that their encoder can be
+    # reconstructed safely from this cache format.
+    supports_quantized_text_encoder_cache = False
     # override these in child classes
     arch = None
 
@@ -1678,7 +1682,9 @@ class BaseModel:
     ) -> Optional[str]:
         if not self.model_config.cache_quantized_models:
             return None
-        if component_name == "text_encoder":
+        if component_name == "text_encoder" and not getattr(
+            self, "supports_quantized_text_encoder_cache", False
+        ):
             return None
 
         cache_root = get_path(self.model_config.quantized_model_cache_dir)

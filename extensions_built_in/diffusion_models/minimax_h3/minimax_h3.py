@@ -155,6 +155,7 @@ class MiniMaxH3VaeBundle(torch.nn.Module):
 class MinimaxH3Model(BaseModel):
     arch = "minimax_h3"
     use_old_lokr_format = False
+    supports_quantized_text_encoder_cache = True
 
     def __init__(
         self,
@@ -384,9 +385,12 @@ class MinimaxH3Model(BaseModel):
         self.assistant_lora.is_active = True
         self.invert_assistant_lora = False
 
-    def _load_transformer(self) -> MiniMaxH3Transformer:
+    def _load_transformer(
+        self, dit_path: Optional[str] = None
+    ) -> MiniMaxH3Transformer:
         dtype = self.torch_dtype
-        dit_path = self._resolve_comfy_file(self._dit_component())
+        if dit_path is None:
+            dit_path = self._resolve_comfy_file(self._dit_component())
         self.print_and_status_update(f"Loading transformer from {dit_path}")
         state_dict = load_file(dit_path)
 
@@ -426,14 +430,8 @@ class MinimaxH3Model(BaseModel):
         flush()
         return transformer
 
-    def _load_text_encoder(self):
-        from accelerate import init_empty_weights
-        from transformers import (
-            AutoConfig,
-            AutoProcessor,
-            AutoTokenizer,
-            Qwen3VLForConditionalGeneration,
-        )
+    def _load_tokenizer_processor(self):
+        from transformers import AutoProcessor, AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(
             ORIGINAL_REPO, subfolder="FL2VA/tokenizer"
@@ -441,8 +439,26 @@ class MinimaxH3Model(BaseModel):
         processor = AutoProcessor.from_pretrained(
             ORIGINAL_REPO, subfolder="FL2VA/processor"
         )
+        return tokenizer, processor
 
+    def _text_encoder_source(self):
         te_path = self.model_config.te_name_or_path
+        if te_path is not None:
+            return te_path
+        return self._resolve_comfy_file("text_encoder")
+
+    def _load_text_encoder(self, te_path=None, tokenizer=None, processor=None):
+        from accelerate import init_empty_weights
+        from transformers import (
+            AutoConfig,
+            Qwen3VLForConditionalGeneration,
+        )
+
+        if tokenizer is None or processor is None:
+            tokenizer, processor = self._load_tokenizer_processor()
+
+        if te_path is None:
+            te_path = self._text_encoder_source()
         if te_path is not None and os.path.isdir(te_path):
             # transformers-format folder (e.g. the original repo's text_encoder)
             self.print_and_status_update(
@@ -454,10 +470,7 @@ class MinimaxH3Model(BaseModel):
                 te_path, config=config, torch_dtype=self.te_torch_dtype
             )
         else:
-            if te_path is not None:
-                te_file = te_path
-            else:
-                te_file = self._resolve_comfy_file("text_encoder")
+            te_file = te_path
             self.print_and_status_update(
                 f"Loading Qwen3-VL text encoder from {te_file}"
             )
@@ -566,16 +579,49 @@ class MinimaxH3Model(BaseModel):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading MiniMax-H3 model")
 
-        transformer = self._load_transformer()
-
-        # load assistant lora if specified (merged into the quantized weights)
-        if self.model_config.assistant_lora_path is not None:
-            self.load_training_adapter(transformer)
-
+        dit_component = self._dit_component()
+        dit_path = self._resolve_comfy_file(dit_component)
+        transformer_cache_path = None
+        transformer = None
+        transformer_loaded_from_cache = False
         if self.model_config.quantize:
+            transformer_cache_path = self.get_quantized_module_cache_path(
+                component_name="transformer",
+                qtype=self.model_config.qtype,
+                source_ref={
+                    "checkpoint": dit_path,
+                    "partition": dit_component,
+                },
+                extra_cache_key={
+                    "cache_format": 3,
+                    "quantize_kwargs": self.model_config.quantize_kwargs,
+                    "quantization_exclude_modules": (
+                        self.get_quantization_exclude_modules()
+                    ),
+                    "target_lora_modules": self.target_lora_modules,
+                },
+            )
+            transformer = self.load_quantized_module_cache(
+                transformer_cache_path, "transformer"
+            )
+            transformer_loaded_from_cache = transformer is not None
+
+        if transformer is None:
+            transformer = self._load_transformer(dit_path)
+
+        if self.model_config.quantize and not transformer_loaded_from_cache:
             self.print_and_status_update("Quantizing transformer")
             quantize_model(self, transformer)
+            self.save_quantized_module_cache(
+                transformer, transformer_cache_path, "transformer"
+            )
             flush()
+
+        # The assistant is a live, frozen LoRA rather than a merged weight.
+        # Attach it after caching so every training adapter can reuse the same
+        # quantized base transformer and the cache never pickles LoRA hooks.
+        if self.model_config.assistant_lora_path is not None:
+            self.load_training_adapter(transformer)
 
         # The 33B DiT cannot fit alongside H3's other frozen components under
         # the normal low-VRAM preset. Treat that preset as full layer streaming
@@ -613,18 +659,50 @@ class MinimaxH3Model(BaseModel):
             transformer.to(self.device_torch)
         flush()
 
-        tokenizer, processor, text_encoder = self._load_text_encoder()
+        text_encoder_source = self._text_encoder_source()
+        text_encoder_cache_path = None
+        text_encoder = None
+        text_encoder_loaded_from_cache = False
+        if self.model_config.quantize_te:
+            text_encoder_cache_path = self.get_quantized_module_cache_path(
+                component_name="text_encoder",
+                qtype=self.model_config.qtype_te,
+                source_ref={
+                    "checkpoint": text_encoder_source,
+                    "layer_count": TEXT_ENCODER_LAYER,
+                },
+                extra_cache_key={
+                    "cache_format": 3,
+                    "prequantized_format": "comfy_nvfp4_awq_int8",
+                },
+            )
+            text_encoder = self.load_quantized_module_cache(
+                text_encoder_cache_path, "text encoder"
+            )
+            text_encoder_loaded_from_cache = text_encoder is not None
+
+        if text_encoder_loaded_from_cache:
+            tokenizer, processor = self._load_tokenizer_processor()
+            text_encoder.eval().requires_grad_(False)
+        else:
+            tokenizer, processor, text_encoder = self._load_text_encoder(
+                text_encoder_source
+            )
         te_prequantized = any(
             isinstance(m, OstrisLinear) for m in text_encoder.modules()
         )
-        if self.model_config.quantize_te and not te_prequantized:
-            self.print_and_status_update("Quantizing text encoder")
-            quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
-            freeze(text_encoder)
-            flush()
-        elif self.model_config.quantize_te:
-            self.print_and_status_update(
-                "Text encoder is already nvfp4/int8 quantized; skipping quantize_te"
+        if self.model_config.quantize_te and not text_encoder_loaded_from_cache:
+            if not te_prequantized:
+                self.print_and_status_update("Quantizing text encoder")
+                quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
+                freeze(text_encoder)
+                flush()
+            else:
+                self.print_and_status_update(
+                    "Text encoder is already nvfp4/int8 quantized; skipping quantize_te"
+                )
+            self.save_quantized_module_cache(
+                text_encoder, text_encoder_cache_path, "text encoder"
             )
         text_encoder_offload_percent = (
             self.model_config.layer_offloading_text_encoder_percent
