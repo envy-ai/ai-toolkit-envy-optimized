@@ -513,13 +513,26 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                         # - full_if_contains: any matching layer, INCLUDING linear/conv, overriding the
                         #   normal lora for it
                         all_layers = self.network_config is not None and getattr(self.network_config, 'all_layers', False)
-                        is_leaf_with_weight = (
-                            len(list(child_module.children())) == 0
-                            and isinstance(getattr(child_module, 'weight', None), torch.nn.Parameter)
-                        )
                         matches_full_if_contains = len(self.full_if_contains) > 0 and (
                             any([word in clean_name for word in self.full_if_contains])
                             or any([word in lora_name for word in self.full_if_contains])
+                        )
+                        # Do not read ``child_module.weight`` just to classify a
+                        # layer. OstrisLinear exposes it as a dequantizing
+                        # property, so doing that while discovering ordinary
+                        # LoRA targets reconstructs every large base-model
+                        # matrix on the CPU. Only full-weight adapters need this
+                        # check, and registered parameters plus the quantized
+                        # marker identify the supported weight-bearing leaves
+                        # without materializing their weights.
+                        needs_full_weight = all_layers or matches_full_if_contains
+                        stored_weight = child_module._parameters.get('weight', None)
+                        is_leaf_with_weight = needs_full_weight and (
+                            len(list(child_module.children())) == 0
+                            and (
+                                isinstance(stored_weight, torch.nn.Parameter)
+                                or getattr(child_module, 'is_ostris_quantized', False)
+                            )
                         )
                         is_full_layer = is_leaf_with_weight and (
                             matches_full_if_contains

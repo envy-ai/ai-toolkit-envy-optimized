@@ -18,6 +18,30 @@ class FakeTransformer(torch.nn.Module):
         )
 
 
+class OstrisLinear(torch.nn.Module):
+    """Quantized-linear stand-in whose weight must not be materialized."""
+
+    is_ostris_quantized = True
+
+    def __init__(self):
+        super().__init__()
+        self.in_features = 4
+        self.out_features = 4
+        self.bias = None
+
+    @property
+    def weight(self):
+        raise AssertionError("ordinary LoRA discovery dequantized the base weight")
+
+
+class FakeQuantizedTransformer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.transformer_blocks = torch.nn.ModuleList(
+            [torch.nn.ModuleDict({"proj": OstrisLinear()})]
+        )
+
+
 class FakeBaseModel:
     arch = "fake_transformer"
     use_old_lokr_format = False
@@ -27,6 +51,23 @@ class FakeBaseModel:
 
 
 class LoraAlphaTests(unittest.TestCase):
+    def test_quantized_lora_discovery_does_not_materialize_base_weight(self):
+        network = LoRASpecialNetwork(
+            text_encoder=[],
+            unet=FakeQuantizedTransformer(),
+            lora_dim=4,
+            alpha=4,
+            train_text_encoder=False,
+            train_unet=True,
+            target_lin_modules=["FakeQuantizedTransformer"],
+            network_config=NetworkConfig(linear=4, linear_alpha=4),
+            is_transformer=True,
+            is_assistant_adapter=True,
+            base_model=FakeBaseModel(),
+        )
+
+        self.assertEqual(len(network.unet_loras), 1)
+
     def test_peft_assistant_adapter_preserves_explicit_alpha(self):
         network = LoRASpecialNetwork(
             text_encoder=[],
