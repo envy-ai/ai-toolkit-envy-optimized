@@ -1,5 +1,7 @@
+import React from 'react';
+import Link from 'next/link';
 import { GroupedSelectOption, SelectOption, JobConfig } from '@/types';
-import { defaultDatasetConfig, defaultSliderConfig } from './jobConfig';
+import { defaultSliderConfig } from './jobConfig';
 import { defaultAudioSampleConfig, defaultSampleConfig, defaultIdeogramSamplesConfig } from '@/helpers/defaultSamples';
 
 type Control = 'depth' | 'line' | 'pose' | 'inpaint';
@@ -13,7 +15,6 @@ type DisableableSections =
   | 'train.diff_output_preservation'
   | 'train.blank_prompt_preservation'
   | 'train.unload_text_encoder'
-  | 'datasets'
   | 'slider';
 
 type AdditionalSections =
@@ -62,6 +63,7 @@ export interface ModelArch {
   accuracyRecoveryAdapters?: { [key: string]: string };
   sampleTags?: SampleTags;
   gateUrl?: string;
+  modelNotes?: React.ReactNode;
 }
 
 const defaultNameOrPath = '';
@@ -702,7 +704,11 @@ export const modelArchs: ModelArch[] = [
     group: 'video',
     isVideoModel: true,
     defaults: {
+      // default updates when [selected, unselected] in the UI
       'config.process[0].model.name_or_path': ['Comfy-Org/MiniMax-H3', defaultNameOrPath],
+      // the Comfy-Org weights are pre-quantized (int8 convrot DiT, nvfp4 TE); these
+      // qtypes match the checkpoints exactly, so the load is unchanged. Picking a
+      // different qtype re-quantizes layer by layer into that format.
       'config.process[0].model.quantize': [true, false],
       'config.process[0].model.qtype': ['convrot8', 'qfloat8'],
       'config.process[0].model.quantize_te': [true, false],
@@ -713,34 +719,13 @@ export const modelArchs: ModelArch[] = [
       'config.process[0].train.cache_text_embeddings': [true, false],
       'config.process[0].network.linear': [16, defaultLinearRank],
       'config.process[0].network.linear_alpha': [16, defaultLinearRank],
+      'config.process[0].network.network_kwargs.ignore_if_contains': [['adaln_proj'], []],
       'config.process[0].sample.num_frames': [107, 1],
       'config.process[0].sample.fps': [24, 1],
       'config.process[0].sample.width': [768, 1024],
       'config.process[0].sample.height': [768, 1024],
       'config.process[0].sample.guidance_scale': [1, 4],
       'config.process[0].sample.sample_steps': [28, 25],
-      'config.process[0].sample.comfy.workflow_path': [
-        'config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk',
-        'config/comfy_templates/krea2_lora_sample.json.njk',
-      ],
-      'config.process[0].sample.comfy.model': [
-        'minimax_h3_fl2va_pruned_int8_convrot.safetensors',
-        '',
-      ],
-      'config.process[0].sample.comfy.vae': [
-        'minimax_h3_video_vae_fp16.safetensors',
-        '',
-      ],
-      'config.process[0].sample.comfy.audio_vae': [
-        'minimax_h3_audio_vae_fp32.safetensors',
-        '',
-      ],
-      'config.process[0].sample.comfy.text_encoder': [
-        'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors',
-        '',
-      ],
-      'config.process[0].sample.comfy.sampler': ['res_multistep', 'euler'],
-      'config.process[0].sample.comfy.scheduler': ['simple', 'simple'],
       'config.process[0].train.audio_loss_multiplier': [1.0, undefined],
       'config.process[0].train.timestep_type': ['shift', 'sigmoid'],
       'config.process[0].datasets[x].do_i2v': [false, undefined],
@@ -749,9 +734,47 @@ export const modelArchs: ModelArch[] = [
       'config.process[0].datasets[x].fps': [24, undefined],
       'config.process[0].datasets[x].num_frames': [39, undefined],
       'config.process[0].datasets[x].auto_frame_count': [true, undefined],
+      'config.process[0].model.assistant_lora_path': [
+        'ostris/minimax_h3_training_adapter/minimax_h3_training_adapter_alpha.safetensors',
+        undefined,
+      ],
     },
     disableSections: ['network.conv'],
-    additionalSections: ['sample.ctrl_img', 'datasets.num_frames', 'model.layer_offloading', 'model.low_vram', 'datasets.do_audio', 'datasets.audio_normalize', 'datasets.audio_preserve_pitch', 'datasets.do_i2v', 'train.audio_loss_multiplier', 'datasets.auto_frame_count'],
+    additionalSections: ['sample.ctrl_img', 'datasets.num_frames', 'model.layer_offloading', 'model.low_vram', 'datasets.do_audio', 'datasets.audio_normalize', 'datasets.audio_preserve_pitch', 'datasets.do_i2v', 'train.audio_loss_multiplier', 'datasets.auto_frame_count', 'model.assistant_lora_path'],
+    modelNotes: (
+      <div className="space-y-2">
+        <p>
+          Weights load from the{' '}
+          <Link href="/settings" className="text-blue-400 hover:underline">
+            Models Folder Path
+          </Link>{' '}
+          set in settings. Anything missing is downloaded there from <code>Comfy-Org/MiniMax-H3</code> on first load
+          (~43GB total). Files used:
+        </p>
+        <pre className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs overflow-x-auto">
+          <code>{`<MODELS_PATH>/
+├── diffusion_models/
+│   └── minimax_h3_fl2va_pruned_int8_convrot.safetensors
+├── text_encoders/
+│   └── qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+└── vae/
+    ├── minimax_h3_video_vae_fp16.safetensors
+    └── minimax_h3_audio_vae_fp32.safetensors`}</code>
+        </pre>
+        <p>
+          The checkpoints are pre-quantized and load directly: int8 ConvRot DiT (~21GB) and nvfp4 Qwen3-VL text encoder
+          (~16GB). The default qtypes (<code>convrot8</code> / <code>nvfp4</code>) match the files exactly, so nothing
+          is re-quantized on load. Picking a different quantization re-quantizes the pre-quantized layers into that
+          format, one layer at a time.
+        </p>
+        <p>
+          Supports t2v and first-frame i2v (ctrl img / i2v datasets) with joint audio. The model is guidance-distilled —
+          keep guidance scale at 1. Video is fixed 24 fps and frame counts snap down to the 17n+5 grid (5, 22, 39, 56,
+          ..., 107, 124 ≈ 5s). Image datasets (num_frames 1) train as single frames, and a sample with num_frames 1
+          renders a single image.
+        </p>
+      </div>
+    ),
   },
   {
     name: 'ltx2',
@@ -1255,6 +1278,55 @@ export const modelArchs: ModelArch[] = [
     ],
   },
   {
+    name: 'mageflow',
+    label: 'Mage-Flow',
+    group: 'image',
+    defaults: {
+      'config.process[0].model.name_or_path': ['microsoft/Mage-Flow-Base', defaultNameOrPath],
+      'config.process[0].model.quantize': [true, false],
+      'config.process[0].model.quantize_te': [true, false],
+      'config.process[0].train.timestep_type': ['linear', 'sigmoid'],
+      'config.process[0].network.conv': [undefined, 16],
+      'config.process[0].network.conv_alpha': [undefined, 16],
+      'config.process[0].model.low_vram': [true, false],
+      'config.process[0].sample.guidance_scale': [4, 4],
+      'config.process[0].sample.sample_steps': [25, 25],
+    },
+    disableSections: [
+      'network.conv',
+    ],
+    additionalSections: [
+      'model.low_vram',
+      'model.layer_offloading',
+    ],
+  },
+  {
+    name: 'mageflow_edit',
+    label: 'Mage-Flow Edit',
+    group: 'instruction',
+    defaults: {
+      'config.process[0].model.name_or_path': ['microsoft/Mage-Flow-Edit-Base', defaultNameOrPath],
+      'config.process[0].model.quantize': [true, false],
+      'config.process[0].model.quantize_te': [true, false],
+      'config.process[0].train.timestep_type': ['linear', 'sigmoid'],
+      'config.process[0].network.conv': [undefined, 16],
+      'config.process[0].network.conv_alpha': [undefined, 16],
+      'config.process[0].model.low_vram': [true, false],
+      'config.process[0].sample.guidance_scale': [4, 4],
+      'config.process[0].sample.sample_steps': [25, 25],
+      'config.process[0].train.unload_text_encoder': [false, false],
+    },
+    disableSections: [
+      'network.conv', 'train.unload_text_encoder',
+    ],
+    additionalSections: [
+      'datasets.multi_control_paths',
+      'sample.multi_ctrl_imgs',
+      'model.low_vram',
+      'model.layer_offloading',
+    ],
+  },
+  {
     name: 'boogu_image',
     label: 'Boogu Image',
     group: 'image',
@@ -1362,28 +1434,6 @@ export const jobTypeOptions: JobTypeOption[] = [
     disableSections: ['slider'],
   },
   {
-    value: 'slider',
-    label: 'Slider LoRA',
-    disableSections: ['datasets', 'trigger_word', 'train.diff_output_preservation'],
-    onActivate: (config: JobConfig) => {
-      config.config.process[0].slider = { ...defaultSliderConfig };
-      config.config.process[0].datasets = [];
-      config.config.process[0].train.unload_text_encoder = true;
-      config.config.process[0].train.cache_text_embeddings = false;
-      config.config.process[0].train.max_denoising_steps = config.config.process[0].sample.sample_steps ?? 12;
-      return config;
-    },
-    onDeactivate: (config: JobConfig) => {
-      if (config.config.process[0].type === 'slider') {
-        delete config.config.process[0].slider;
-        if (!config.config.process[0].datasets || config.config.process[0].datasets.length === 0) {
-          config.config.process[0].datasets = [{ ...defaultDatasetConfig }];
-        }
-      }
-      return config;
-    },
-  },
-  {
     value: 'concept_slider',
     label: 'Concept Slider',
     disableSections: ['trigger_word', 'train.diff_output_preservation'],
@@ -1394,9 +1444,7 @@ export const jobTypeOptions: JobTypeOption[] = [
     },
     onDeactivate: (config: JobConfig) => {
       // remove slider config
-      if (config.config.process[0].type === 'concept_slider') {
-        delete config.config.process[0].slider;
-      }
+      delete config.config.process[0].slider;
       return config;
     },
   },

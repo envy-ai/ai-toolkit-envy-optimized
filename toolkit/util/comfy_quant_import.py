@@ -175,4 +175,3 @@ def import_comfy_quantized_layers(
         converted += 1
 
     return state_dict, converted
-

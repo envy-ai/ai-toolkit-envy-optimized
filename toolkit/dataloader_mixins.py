@@ -1,12 +1,14 @@
 import base64
 import glob
 import hashlib
+import itertools
 import json
 import math
 import os
 import random
-from collections import OrderedDict
-from typing import TYPE_CHECKING, Dict, List, Tuple, Union
+from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, List, Dict, Union
 import traceback
 
 import cv2
@@ -32,9 +34,8 @@ from toolkit.print import print_acc
 from toolkit.accelerator import get_accelerator
 from toolkit.prompt_utils import PromptEmbeds
 from torchvision.transforms import functional as TF
-from toolkit.train_tools import get_torch_dtype
 
-MINIMAX_H3_CACHE_VERSION = 2
+from toolkit.train_tools import get_torch_dtype
 
 if TYPE_CHECKING:
     from toolkit.data_loader import AiToolkitDataset
@@ -67,7 +68,7 @@ transforms_dict = {
     'RandomEqualize': transforms.RandomEqualize(p=0.2),
 }
 
-img_ext_list = ['.jpg', '.jpeg', '.png', '.webp', '.jxl']
+img_ext_list = ['.jpg', '.jpeg', '.png', '.webp']
 
 
 def standardize_images(images):
@@ -295,6 +296,9 @@ class BucketsMixin:
 
             # check if bucket exists, if not, create it
             bucket_key = f'{file_item.crop_width}x{file_item.crop_height}'
+            if self.is_video:
+                # images (1 frame) and videos must not mix in a batch
+                bucket_key += f'x{file_item.num_frames}f'
             if bucket_key not in self.buckets:
                 self.buckets[bucket_key] = Bucket(file_item.crop_width, file_item.crop_height)
             self.buckets[bucket_key].file_list_idx.append(idx)
@@ -509,23 +513,19 @@ class ImageProcessingDTOMixin:
             if self.dataset_config.auto_frame_count:
                 # allow for any length video here but make sure it is temporally compressable.
                 vid_length_seconds = total_frames / video_fps
-                
+
                 desired_num_frames = int(vid_length_seconds * self.dataset_config.fps)
-                
-                if self.minimax_h3_frame_grid:
-                    # H3's causal video VAE consumes 17-frame source chunks and
-                    # its packed DiT expects the matching 17*k + 5 endpoint grid.
-                    # Snap down so auto_frame_count never manufactures a longer
-                    # clip by duplicating/interpolating source frames.
-                    desired_num_frames = max(5, desired_num_frames)
-                    desired_num_frames -= (desired_num_frames - 5) % 17
+
+                if getattr(self, 'frame_count_snapper', None) is not None:
+                    # model-specific valid-frame-count grid (e.g. minimax_h3's 17n+5)
+                    desired_num_frames = self.frame_count_snapper(desired_num_frames)
                 else:
                     # make sure it is divisible by temporal_compression
                     desired_num_frames = desired_num_frames // self.temporal_compression * self.temporal_compression
 
                     # TODO, all models currently add a key frame, but future models may not, update here if this changes.
                     desired_num_frames += 1  # add one for the key frame that is always added
-                
+
                 self.num_frames = desired_num_frames
                 
             
@@ -569,6 +569,35 @@ class ImageProcessingDTOMixin:
             unique_frame_idxs = sorted(set(frames_to_extract))
             processed_frames = {}  # frame_idx -> processed frame (duplicates reuse it)
 
+            def process_frame(rgb_frame):
+                # Convert to PIL Image
+                img = Image.fromarray(rgb_frame)
+
+                # Apply the same processing as for single images
+                img = img.convert('RGB')
+
+                if self.flip_x:
+                    img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                if self.flip_y:
+                    img = img.transpose(Image.FLIP_TOP_BOTTOM)
+
+                # Apply bucketing
+                img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
+                img = img.crop((
+                    self.crop_x,
+                    self.crop_y,
+                    self.crop_x + self.crop_width,
+                    self.crop_y + self.crop_height
+                ))
+
+                # Apply transform if provided
+                if transform:
+                    img = transform(img)
+
+                return img
+
+            decode_with_pyav = False
+
             # Set frame position
             pos = unique_frame_idxs[0]
             if pos > 0:
@@ -589,10 +618,6 @@ class ImageProcessingDTOMixin:
                 if ret:
                     pos += 1
                 else:
-                    # Try to provide more detailed error information
-                    actual_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                    frame_pos_info = f"Requested frame: {frame_idx}, Actual frame position: {actual_frame}"
-                    
                     # Try to read the next available frame as a fallback
                     fallback_success = False
                     for fallback_offset in [1, -1, 5, -5, 10, -10]:
@@ -609,38 +634,44 @@ class ImageProcessingDTOMixin:
                             pos = fallback_pos + 1
                             break
                     else:
-                        # No fallback worked, raise a more detailed exception
-                        video_info = f"Video: {self.path}, Total frames: {total_frames}, FPS: {video_fps}"
-                        raise Exception(f"Failed to read frame {frame_idx} from video. {frame_pos_info}. {video_info}")
+                        # No fallback worked. cv2's bundled ffmpeg cannot decode some codecs
+                        # at all (e.g. AV1 has no software decoder there), so retry the
+                        # remaining frames with PyAV below.
+                        decode_with_pyav = True
+                        break
                 
                 # Convert BGR to RGB
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                # Convert to PIL Image
-                img = Image.fromarray(frame)
-                
-                # Apply the same processing as for single images
-                img = img.convert('RGB')
-                
-                if self.flip_x:
-                    img = img.transpose(Image.FLIP_LEFT_RIGHT)
-                if self.flip_y:
-                    img = img.transpose(Image.FLIP_TOP_BOTTOM)
-                
-                # Apply bucketing
-                img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
-                img = img.crop((
-                    self.crop_x,
-                    self.crop_y,
-                    self.crop_x + self.crop_width,
-                    self.crop_y + self.crop_height
-                ))
-                
-                # Apply transform if provided
-                if transform:
-                    img = transform(img)
 
-                processed_frames[frame_idx] = img
+                processed_frames[frame_idx] = process_frame(frame)
+
+            if decode_with_pyav:
+                # cv2 could not decode this video (e.g. AV1: OpenCV's bundled ffmpeg has no
+                # software AV1 decoder). Decode the still-missing frames in one sequential
+                # PyAV pass; PyAV ships libdav1d so it handles codecs cv2 cannot.
+                import av
+
+                needed = {i for i in unique_frame_idxs if i not in processed_frames}
+                last_av_frame = None
+                with av.open(self.path) as container:
+                    decoded_idx = -1
+                    for av_frame in container.decode(video=0):
+                        decoded_idx += 1
+                        last_av_frame = av_frame
+                        if decoded_idx in needed:
+                            processed_frames[decoded_idx] = process_frame(av_frame.to_ndarray(format='rgb24'))
+                            needed.discard(decoded_idx)
+                            if not needed:
+                                break
+
+                if needed:
+                    if last_av_frame is None:
+                        video_info = f"Video: {self.path}, Total frames: {total_frames}, FPS: {video_fps}"
+                        raise Exception(f"Failed to read frames {sorted(needed)} from video with both cv2 and PyAV. {video_info}")
+                    # metadata frame count overshot the real stream; reuse the last decoded frame
+                    tail_frame = process_frame(last_av_frame.to_ndarray(format='rgb24'))
+                    for frame_idx in needed:
+                        processed_frames[frame_idx] = tail_frame
 
             # assemble in extraction order; stretched clips repeat decoded frames
             frames = [processed_frames[frame_idx] for frame_idx in frames_to_extract]
@@ -683,31 +714,39 @@ class ImageProcessingDTOMixin:
                     else:
                         target_duration = source_duration
 
-                    waveform, sample_rate = torchaudio.load(self.path)  # [channels, samples]
-                    
-                    waveform = waveform_to_stereo(waveform)  # Convert to stereo if not already
-                    
-                    if self.dataset_config.audio_normalize:
-                        peak = waveform.abs().amax()  # global peak across channels
-                        eps = 1e-9
-                        target_peak = 0.999  # ~ -0.01 dBFS
-                        gain = target_peak / (peak + eps)
-                        waveform = waveform * gain
+                    # torchcodec's AudioDecoder raises when a video has no audio
+                    # track, so probe for a stream before decoding.
+                    import av
+                    with av.open(self.path) as container:
+                        has_audio_stream = len(container.streams.audio) > 0
 
-                    # Slice to the selected clip region (when we have a meaningful time range)
-                    if source_duration > 0.0:
-                        start_sample = int(round(clip_start_time * sample_rate))
-                        end_sample = int(round(clip_end_time * sample_rate))
-                        start_sample = max(0, min(start_sample, waveform.shape[-1]))
-                        end_sample = max(0, min(end_sample, waveform.shape[-1]))
-                        if end_sample > start_sample:
-                            waveform = waveform[..., start_sample:end_sample]
+                    waveform = None
+                    if has_audio_stream:
+                        waveform, sample_rate = torchaudio.load(self.path)  # [channels, samples]
+
+                        waveform = waveform_to_stereo(waveform)  # Convert to stereo if not already
+
+                        if self.dataset_config.audio_normalize:
+                            peak = waveform.abs().amax()  # global peak across channels
+                            eps = 1e-9
+                            target_peak = 0.999  # ~ -0.01 dBFS
+                            gain = target_peak / (peak + eps)
+                            waveform = waveform * gain
+
+                        # Slice to the selected clip region (when we have a meaningful time range)
+                        if source_duration > 0.0:
+                            start_sample = int(round(clip_start_time * sample_rate))
+                            end_sample = int(round(clip_end_time * sample_rate))
+                            start_sample = max(0, min(start_sample, waveform.shape[-1]))
+                            end_sample = max(0, min(end_sample, waveform.shape[-1]))
+                            if end_sample > start_sample:
+                                waveform = waveform[..., start_sample:end_sample]
+                            else:
+                                # No valid audio segment
+                                waveform = None
                         else:
-                            # No valid audio segment
+                            # If we can't compute a meaningful time range, treat as no-audio
                             waveform = None
-                    else:
-                        # If we can't compute a meaningful time range, treat as no-audio
-                        waveform = None
 
                     if waveform is not None and waveform.numel() > 0:
                         target_samples = int(round(target_duration * sample_rate))
@@ -731,7 +770,6 @@ class ImageProcessingDTOMixin:
             # Only log success in debug mode
             if hasattr(self.dataset_config, 'debug') and self.dataset_config.debug:
                 print_acc(f"Successfully loaded video with {len(frames)} frames: {self.path}")
-            self.load_h3_references(transform)
         
         except Exception as e:
             # Print full traceback
@@ -755,7 +793,7 @@ class ImageProcessingDTOMixin:
                     if cap.isOpened():
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Go to start
                         start_ret, _ = cap.read()
-
+                        
                         # Try to read the last frame to check if it's accessible
                         if reported_total > 0:
                             cap.set(cv2.CAP_PROP_POS_FRAMES, reported_total - 1)
@@ -797,17 +835,11 @@ class ImageProcessingDTOMixin:
                     self.load_mask_image()
                 if self.has_unconditional:
                     self.load_unconditional_image()
-                # Uncached H3 visual prompts must retain the target endpoint
-                # pixels as well as paired references for Qwen3-VL.  Text-cache
-                # users stay on the compact latent-only path above.
-                if self.uses_h3_visual_conditioning and not self.is_text_embedding_cached:
-                    pass
-                else:
-                    return
+                return
         if self.is_audio_model:
             self.load_and_process_audio()
             return
-        if self.dataset_config.num_frames > 1 or self.dataset_config.auto_frame_count:
+        if self.is_video:
             self.load_and_process_video(transform, only_load_latents)
             return
         try:
@@ -895,7 +927,6 @@ class ImageProcessingDTOMixin:
             img = transform(img)
 
         self.tensor = img
-        self.load_h3_references(transform)
         if not only_load_latents:
             if self.has_control_image:
                 self.load_control_image()
@@ -907,289 +938,6 @@ class ImageProcessingDTOMixin:
                 self.load_mask_image()
             if self.has_unconditional:
                 self.load_unconditional_image()
-
-
-class H3ReferenceFileItemDTOMixin:
-    """Load MiniMax H3 paired V2V source and reference media.
-
-    The source directory configured in ``h3_v2v_path`` and each optional
-    ``h3_reference_path`` directory are basename-paired, like existing control
-    directories.  H3 has one native full-video condition stream; keeping the
-    source fields separate here lets training distinguish a required V2V input
-    from optional reference images/videos.  The frozen H3 VAE later turns the
-    tensors into packed condition blocks; this mixin only performs CPU media
-    decoding and the target bucket's spatial transform.
-    """
-
-    _h3_image_extensions = ('.jpg', '.jpeg', '.png', '.webp', '.jxl', '.bmp')
-    _h3_video_extensions = ('.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv')
-
-    def __init__(self: 'FileItemDTO', *args, **kwargs):
-        if hasattr(super(), '__init__'):
-            super().__init__(*args, **kwargs)
-        self.h3_reference_paths: List[str] = []
-        self.h3_reference_tensors: List[torch.Tensor] = []
-        self.h3_reference_audio_data: List[Union[dict, None]] = []
-        self.h3_reference_is_video: List[bool] = []
-        self.h3_v2v_path: Union[str, None] = None
-        self.h3_v2v_tensor: Union[torch.Tensor, None] = None
-        self.h3_v2v_audio_data: Union[dict, None] = None
-        dataset_config: 'DatasetConfig' = kwargs.get('dataset_config', None)
-        is_h3 = bool(kwargs.get('minimax_h3_frame_grid', False))
-        is_video_dataset = bool(
-            dataset_config is not None
-            and (dataset_config.auto_frame_count or dataset_config.num_frames > 1)
-        )
-        self._uses_h3_visual_conditioning = is_h3 and (
-            (dataset_config.do_i2v and is_video_dataset)
-            or dataset_config.h3_v2v_path is not None
-            or dataset_config.h3_reference_path is not None
-        )
-        basename = os.path.splitext(os.path.basename(kwargs.get('path', self.path)))[0]
-        v2v_directory = dataset_config.h3_v2v_path if is_h3 and dataset_config is not None else None
-        if v2v_directory is not None:
-            for extension in self._h3_video_extensions:
-                candidate = os.path.join(v2v_directory, basename + extension)
-                if os.path.isfile(candidate):
-                    self.h3_v2v_path = candidate
-                    break
-            if self.h3_v2v_path is None:
-                raise FileNotFoundError(
-                    f"Could not find an H3 V2V source video named {basename} in {v2v_directory}."
-                )
-        reference_path = dataset_config.h3_reference_path if is_h3 and dataset_config is not None else None
-        if reference_path is None:
-            return
-        reference_directories = reference_path if isinstance(reference_path, list) else [reference_path]
-        for directory in reference_directories:
-            found_path = None
-            for extension in self._h3_image_extensions + self._h3_video_extensions:
-                candidate = os.path.join(directory, basename + extension)
-                if os.path.isfile(candidate):
-                    found_path = candidate
-                    break
-            if found_path is None:
-                raise FileNotFoundError(
-                    f"Could not find an H3 reference image or video named {basename} in {directory}."
-                )
-            self.h3_reference_paths.append(found_path)
-
-    @property
-    def has_h3_references(self: 'FileItemDTO') -> bool:
-        return len(self.h3_reference_paths) > 0
-
-    @property
-    def has_h3_v2v(self: 'FileItemDTO') -> bool:
-        return self.h3_v2v_path is not None
-
-    @property
-    def uses_h3_visual_conditioning(self: 'FileItemDTO') -> bool:
-        return self._uses_h3_visual_conditioning
-
-    def _process_h3_reference_image(
-        self: 'FileItemDTO',
-        image: Image.Image,
-        transform: Union[None, transforms.Compose],
-        preserve_reference_geometry: bool = False,
-    ) -> torch.Tensor:
-        image = exif_transpose(image).convert('RGB')
-        if self.flip_x:
-            image = image.transpose(Image.FLIP_LEFT_RIGHT)
-        if self.flip_y:
-            image = image.transpose(Image.FLIP_TOP_BOTTOM)
-        if preserve_reference_geometry:
-            # Ref2VA supports a canvas independent from the target. Match the
-            # native default by preserving aspect ratio, never upscaling, and
-            # limiting the reference to the target's pixel budget. The 32px
-            # grid is 16x VAE compression followed by a 2x2 DiT patch.
-            width, height = image.size
-            target_pixels = self.crop_width * self.crop_height
-            scale = min(1.0, math.sqrt(target_pixels / float(width * height)))
-            width = max(32, round(width * scale / 32) * 32)
-            height = max(32, round(height * scale / 32) * 32)
-            image = image.resize((width, height), Image.BICUBIC)
-        else:
-            image = image.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
-            image = image.crop((
-                self.crop_x,
-                self.crop_y,
-                self.crop_x + self.crop_width,
-                self.crop_y + self.crop_height,
-            ))
-        if transform is not None:
-            return transform(image)
-        return TF.to_tensor(image) * 2.0 - 1.0
-
-    def _load_h3_condition_audio(
-        self: 'FileItemDTO',
-        path: str,
-        *,
-        num_frames: int,
-        fps: int,
-        include_audio: bool,
-        label: str,
-    ) -> Union[dict, None]:
-        if not include_audio:
-            return None
-        try:
-            import torch.nn.functional as F
-            import torchaudio
-
-            waveform, sample_rate = torchaudio.load(path)
-            waveform = waveform_to_stereo(waveform)
-            target_samples = int(round(
-                float(num_frames) / float(fps)
-                * sample_rate
-            ))
-            if target_samples > 0 and waveform.shape[-1] != target_samples:
-                waveform = F.interpolate(
-                    waveform.unsqueeze(0), size=target_samples, mode='linear', align_corners=False
-                ).squeeze(0)
-            return {"waveform": waveform, "sample_rate": int(sample_rate)}
-        except Exception as error:
-            # Reference video audio is optional.  An undecodable or silent track
-            # still supplies its visual reference block.
-            if getattr(self.dataset_config, 'debug', False):
-                print_acc(f"Could not load optional H3 {label} audio from {path}: {error}")
-            return None
-
-    def _load_h3_condition_video(
-        self: 'FileItemDTO',
-        path: str,
-        transform: Union[None, transforms.Compose],
-        *,
-        num_frames: int,
-        fps: int,
-        include_audio: bool,
-        label: str,
-        preserve_reference_geometry: bool = False,
-    ) -> Tuple[torch.Tensor, Union[dict, None]]:
-        cap = cv2.VideoCapture(path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open H3 {label} video {path}")
-        try:
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames <= 0:
-                raise ValueError(f"H3 {label} video {path} has no decodable frames")
-            output_frames = int(num_frames)
-            frame_indices = [
-                min(int(round(index * (total_frames - 1) / max(output_frames - 1, 1))), total_frames - 1)
-                for index in range(output_frames)
-            ]
-            decoded: Dict[int, torch.Tensor] = {}
-            for frame_index in sorted(set(frame_indices)):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-                succeeded, frame = cap.read()
-                if not succeeded:
-                    raise ValueError(f"Could not decode frame {frame_index} from H3 {label} video {path}")
-                image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                decoded[frame_index] = self._process_h3_reference_image(
-                    image,
-                    transform,
-                    preserve_reference_geometry=preserve_reference_geometry,
-                )
-            return torch.stack([decoded[index] for index in frame_indices]), self._load_h3_condition_audio(
-                path,
-                num_frames=num_frames,
-                fps=fps,
-                include_audio=include_audio,
-                label=label,
-            )
-        finally:
-            cap.release()
-
-    def load_h3_references(
-        self: 'FileItemDTO', transform: Union[None, transforms.Compose]
-    ) -> None:
-        self.h3_reference_tensors = []
-        self.h3_reference_audio_data = []
-        self.h3_reference_is_video = []
-        for path in self.h3_reference_paths:
-            is_video = os.path.splitext(path)[1].lower() in self._h3_video_extensions
-            if is_video:
-                tensor, audio_data = self._load_h3_condition_video(
-                    path,
-                    transform,
-                    num_frames=self.dataset_config.h3_reference_num_frames,
-                    fps=self.dataset_config.h3_reference_fps,
-                    include_audio=self.dataset_config.h3_reference_audio,
-                    label='reference',
-                    preserve_reference_geometry=True,
-                )
-            else:
-                with Image.open(path) as image:
-                    tensor = self._process_h3_reference_image(
-                        image, transform, preserve_reference_geometry=True
-                    )
-                audio_data = None
-            self.h3_reference_tensors.append(tensor)
-            self.h3_reference_audio_data.append(audio_data)
-            self.h3_reference_is_video.append(is_video)
-        self.load_h3_v2v(transform)
-
-    def load_h3_v2v(
-        self: 'FileItemDTO', transform: Union[None, transforms.Compose]
-    ) -> None:
-        self.h3_v2v_tensor = None
-        self.h3_v2v_audio_data = None
-        if not self.has_h3_v2v:
-            return
-        self.h3_v2v_tensor, self.h3_v2v_audio_data = self._load_h3_condition_video(
-            self.h3_v2v_path,
-            transform,
-            num_frames=self.num_frames,
-            fps=self.dataset_config.fps,
-            include_audio=self.dataset_config.h3_v2v_audio,
-            label='V2V source',
-        )
-
-    def load_h3_i2v_prompt_images(
-        self: 'FileItemDTO', transform: Union[None, transforms.Compose]
-    ) -> List[torch.Tensor]:
-        """Return the same deterministic endpoint images used by H3 I2V.
-
-        H3 requires shrink-to-grid sampling for I2V, so source endpoints are
-        also the first/final frames of the training clip when prompt embeddings
-        are cached independently from target latents.
-        """
-        if not self.dataset_config.do_i2v:
-            return []
-        if self.tensor is not None and self.tensor.ndim == 4:
-            endpoints = [self.tensor[0]]
-            if self.dataset_config.i2v_last_frame:
-                endpoints.append(self.tensor[-1])
-            return endpoints
-        if not self.is_video:
-            raise ValueError("MiniMax H3 I2V prompt conditioning requires video source media.")
-        cap = cv2.VideoCapture(self.path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open H3 I2V source video {self.path}")
-        try:
-            final_index = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
-            if final_index < 0:
-                raise ValueError(f"H3 I2V source video {self.path} has no decodable frames")
-            indices = [0]
-            if self.dataset_config.i2v_last_frame:
-                indices.append(final_index)
-            endpoints = []
-            for frame_index in indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-                succeeded, frame = cap.read()
-                if not succeeded:
-                    raise ValueError(f"Could not decode H3 I2V frame {frame_index} from {self.path}")
-                endpoints.append(self._process_h3_reference_image(
-                    Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), transform
-                ))
-            return endpoints
-        finally:
-            cap.release()
-
-    def cleanup_h3_references(self: 'FileItemDTO') -> None:
-        self.h3_reference_tensors = []
-        self.h3_reference_audio_data = []
-        self.h3_reference_is_video = []
-        self.h3_v2v_tensor = None
-        self.h3_v2v_audio_data = None
 
 
 class InpaintControlFileItemDTOMixin:
@@ -1934,6 +1682,16 @@ def _latent_from_uint8(latent: torch.Tensor, dtype: torch.dtype = torch.float32)
     return (latent.to(torch.float32) / 127.5 - 1.0).to(dtype)
 
 
+def _waveform_to_int16(waveform: torch.Tensor) -> torch.Tensor:
+    # audio waveform in [-1, 1] -> int16 for compact caching. 8 bits is too coarse for audio.
+    return (waveform.float().clamp(-1, 1) * 32767.0).round().to(torch.int16)
+
+
+def _waveform_from_int16(waveform: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    # int16 -> audio waveform in [-1, 1]
+    return (waveform.to(torch.float32) / 32767.0).to(dtype)
+
+
 class LatentCachingFileItemDTOMixin:
     def __init__(self, *args, **kwargs):
         # if we have super, call it
@@ -1941,10 +1699,10 @@ class LatentCachingFileItemDTOMixin:
             super().__init__(*args, **kwargs)
         self._encoded_latent: Union[torch.Tensor, None] = None
         self._cached_first_frame_latent: Union[torch.Tensor, None] = None
-        self._cached_last_frame_latent: Union[torch.Tensor, None] = None
         self._cached_audio_latent: Union[torch.Tensor, None] = None
-        self._cached_h3_v2v_latent: Union[Dict[str, Union[torch.Tensor, None]], None] = None
-        self._cached_h3_reference_latents: List[Dict[str, Union[torch.Tensor, None]]] = []
+        self._cached_tensor_uint8: Union[torch.Tensor, None] = None
+        self._cached_waveform_int16: Union[torch.Tensor, None] = None
+        self._cached_waveform_sample_rate: Union[int, None] = None
         self._latent_path: Union[str, None] = None
         self.is_latent_cached = False
         self.is_caching_to_disk = False
@@ -1965,47 +1723,24 @@ class LatentCachingFileItemDTOMixin:
             ("latent_space_version", self.latent_space_version),
             ("latent_version", self.latent_version),
         ])
-        if getattr(self, 'minimax_h3_frame_grid', False):
-            item["minimax_h3_cache_version"] = MINIMAX_H3_CACHE_VERSION
         is_video = False
         # when adding items, do it after so we dont change old latents
         if self.flip_x:
             item["flip_x"] = True
         if self.flip_y:
             item["flip_y"] = True
-        if self.dataset_config.auto_frame_count:
+        if self.is_video and self.dataset_config.auto_frame_count:
             # don't store num frames here as it is calculated dynamically
             item["auto_frame_count"] = True
             is_video = True
-        elif self.dataset_config.num_frames > 1:
+        elif self.is_video and self.dataset_config.num_frames > 1:
             item["num_frames"] = self.dataset_config.num_frames
             is_video = True
         if is_video and self.dataset_config.fps != 24:
             # only add fps if it deviates from the default
             item["fps"] = self.dataset_config.fps
         if is_video and self.dataset_config.do_i2v:
-            item["do_i2v"] = True
-            if self.dataset_config.i2v_last_frame:
-                item["i2v_last_frame"] = True
-        if getattr(self, 'has_h3_v2v', False):
-            item["h3_v2v_media"] = (
-                os.path.basename(self.h3_v2v_path),
-                os.stat(self.h3_v2v_path).st_size,
-                os.stat(self.h3_v2v_path).st_mtime_ns,
-            )
-            item["h3_v2v_audio"] = self.dataset_config.h3_v2v_audio
-        if getattr(self, 'has_h3_references', False):
-            item["h3_reference_media"] = [
-                (
-                    os.path.basename(path),
-                    os.stat(path).st_size,
-                    os.stat(path).st_mtime_ns,
-                )
-                for path in self.h3_reference_paths
-            ]
-            item["h3_reference_num_frames"] = self.dataset_config.h3_reference_num_frames
-            item["h3_reference_fps"] = self.dataset_config.h3_reference_fps
-            item["h3_reference_audio"] = self.dataset_config.h3_reference_audio
+                item["do_i2v"] = True
         if is_video and self.dataset_config.do_audio:
             item["do_audio"] = True
             if self.dataset_config.audio_normalize:
@@ -2015,6 +1750,9 @@ class LatentCachingFileItemDTOMixin:
         if self.is_audio_model:
             item["is_audio_model"] = True
             item["sample_rate"] = self.sample_rate
+        if self.dataset_config.cache_tensors_to_disk:
+            # tensor is stored in the cache file, invalidate caches made without it
+            item["cache_tensors_to_disk"] = True
         return item
 
     def get_latent_path(self: 'FileItemDTO', recalculate=False):
@@ -2040,52 +1778,17 @@ class LatentCachingFileItemDTOMixin:
                 # we are caching on disk, don't save in memory
                 self._encoded_latent = None
                 self._cached_first_frame_latent = None
-                self._cached_last_frame_latent = None
                 self._cached_audio_latent = None
-                self._cached_h3_v2v_latent = None
-                self._cached_h3_reference_latents = []
+                self._cached_tensor_uint8 = None
+                self._cached_waveform_int16 = None
+                self._cached_waveform_sample_rate = None
             else:
                 # move it back to cpu
                 self._encoded_latent = self._encoded_latent.to('cpu')
                 if self._cached_first_frame_latent is not None:
                     self._cached_first_frame_latent = self._cached_first_frame_latent.to('cpu')
-                if self._cached_last_frame_latent is not None:
-                    self._cached_last_frame_latent = self._cached_last_frame_latent.to('cpu')
                 if self._cached_audio_latent is not None:
                     self._cached_audio_latent = self._cached_audio_latent.to('cpu')
-                if self._cached_h3_v2v_latent is not None:
-                    self._cached_h3_v2v_latent = {
-                        key: None if value is None else value.to('cpu')
-                        for key, value in self._cached_h3_v2v_latent.items()
-                    }
-                self._cached_h3_reference_latents = [
-                    {
-                        key: None if value is None else value.to('cpu')
-                        for key, value in reference.items()
-                    }
-                    for reference in self._cached_h3_reference_latents
-                ]
-
-    def set_h3_reference_cached_latents_from_state_dict(self: 'FileItemDTO', state_dict) -> None:
-        references: List[Dict[str, Union[torch.Tensor, None]]] = []
-        index = 0
-        while f'h3_reference_{index}_video_latent' in state_dict:
-            references.append({
-                'video_latent': state_dict[f'h3_reference_{index}_video_latent'],
-                'audio_latent': state_dict.get(f'h3_reference_{index}_audio_latent'),
-            })
-            index += 1
-        self._cached_h3_reference_latents = references
-
-    def set_h3_v2v_cached_latents_from_state_dict(self: 'FileItemDTO', state_dict) -> None:
-        video_latent = state_dict.get('h3_v2v_video_latent')
-        if video_latent is None:
-            self._cached_h3_v2v_latent = None
-            return
-        self._cached_h3_v2v_latent = {
-            'video_latent': video_latent,
-            'audio_latent': state_dict.get('h3_v2v_audio_latent'),
-        }
 
     def get_latent(self, device=None):
         if not self.is_latent_cached:
@@ -2105,16 +1808,26 @@ class LatentCachingFileItemDTOMixin:
                 self._cached_first_frame_latent = state_dict['first_frame_latent']
                 if self._cached_first_frame_latent.dtype == torch.uint8:
                     self._cached_first_frame_latent = _latent_from_uint8(self._cached_first_frame_latent)
-            if 'last_frame_latent' in state_dict:
-                self._cached_last_frame_latent = state_dict['last_frame_latent']
-                if self._cached_last_frame_latent.dtype == torch.uint8:
-                    self._cached_last_frame_latent = _latent_from_uint8(self._cached_last_frame_latent)
             if 'audio_latent' in state_dict:
                 self._cached_audio_latent = state_dict['audio_latent']
-            self.set_h3_v2v_cached_latents_from_state_dict(state_dict)
-            self.set_h3_reference_cached_latents_from_state_dict(state_dict)
             if 'num_frames' in state_dict:
                 self.num_frames = int(state_dict['num_frames'].item())
+            if 'tensor' in state_dict:
+                self._cached_tensor_uint8 = state_dict['tensor']
+            if 'waveform' in state_dict:
+                self._cached_waveform_int16 = state_dict['waveform']
+                self._cached_waveform_sample_rate = int(state_dict['waveform_sample_rate'].item())
+        if self._cached_tensor_uint8 is not None and getattr(self, 'tensor', None) is None:
+            # rebuild the pixel tensor as it would be if loaded without caching
+            self.tensor = _latent_from_uint8(self._cached_tensor_uint8)
+        if self._cached_waveform_int16 is not None and self.audio_data is None:
+            # rebuild the audio waveform as it would be if loaded without caching
+            waveform = _waveform_from_int16(self._cached_waveform_int16)
+            self.audio_tensor = waveform
+            self.audio_data = {"waveform": waveform, "sample_rate": self._cached_waveform_sample_rate}
+            if self.is_audio_model:
+                # audio-only models use the waveform as the main tensor
+                self.tensor = waveform
         return self._encoded_latent
 
 
@@ -2136,159 +1849,183 @@ class LatentCachingMixin:
                 print_acc(" - Saving latents to disk")
             if to_memory:
                 print_acc(" - Keeping latents in memory")
-            # move sd items to cpu except for vae
-            self.sd.set_device_state_preset('cache_latents')
+            # move sd items to cpu except for vae. Only done on the first item that
+            # actually needs encoding so fully cached datasets don't shuffle models around
+            did_move = False
+
+            # prep (video decode, frame extraction, audio load, disk reads) is done by a
+            # thread pool so the next items are ready while the current one is encoding.
+            # the in-flight window is bounded so decoded videos don't pile up in RAM.
+            num_workers = max(1, self.dataset_config.cache_latents_num_workers)
+
+            def _prep(prep_item: 'FileItemDTO'):
+                prep_item.is_caching_to_disk = to_disk
+                prep_item.is_caching_to_memory = to_memory
+                prep_item.latent_load_device = self.sd.device
+
+                prep_latent_path = prep_item.get_latent_path(recalculate=True)
+                try:
+                    if os.path.exists(prep_latent_path):
+                        cached_state_dict = load_file(prep_latent_path, device='cpu') if to_memory else None
+                        return prep_item, prep_latent_path, cached_state_dict, False
+                    # not saved to disk, load the image/video/audio
+                    prep_item.load_and_process_image(self.transform, only_load_latents=True)
+                except Exception as e:
+                    print_acc(f"Error processing image: {prep_item.path}")
+                    print_acc(f"Error: {str(e)}")
+                    raise e
+                return prep_item, prep_latent_path, None, True
 
             # use tqdm to show progress
             i = 0
-            for file_item in tqdm(self.file_list, desc=f'Caching latents{" to disk" if to_disk else ""}'):
-                file_item.is_caching_to_disk = to_disk
-                file_item.is_caching_to_memory = to_memory
-                file_item.latent_load_device = self.sd.device
-
-                latent_path = file_item.get_latent_path(recalculate=True)
-                # check if it is saved to disk already
-                if os.path.exists(latent_path):
-                    if to_memory:
-                        # load it into memory
-                        state_dict = load_file(latent_path, device='cpu')
-                        cached_latent = state_dict['latent']
-                        if cached_latent.dtype == torch.uint8:
-                            # pixel-space latents cached as uint8
-                            cached_latent = _latent_from_uint8(cached_latent)
-                        file_item._encoded_latent = cached_latent.to('cpu', dtype=self.sd.torch_dtype)
-                        if 'first_frame_latent' in state_dict:
-                            cached_first_frame = state_dict['first_frame_latent']
-                            if cached_first_frame.dtype == torch.uint8:
-                                cached_first_frame = _latent_from_uint8(cached_first_frame)
-                            file_item._cached_first_frame_latent = cached_first_frame.to('cpu', dtype=self.sd.torch_dtype)
-                        if 'last_frame_latent' in state_dict:
-                            cached_last_frame = state_dict['last_frame_latent']
-                            if cached_last_frame.dtype == torch.uint8:
-                                cached_last_frame = _latent_from_uint8(cached_last_frame)
-                            file_item._cached_last_frame_latent = cached_last_frame.to('cpu', dtype=self.sd.torch_dtype)
-                        if 'audio_latent' in state_dict:
-                            file_item._cached_audio_latent = state_dict['audio_latent'].to('cpu', dtype=self.sd.torch_dtype)
-                        file_item.set_h3_v2v_cached_latents_from_state_dict(state_dict)
-                        file_item.set_h3_reference_cached_latents_from_state_dict(state_dict)
-                else:
-                    # not saved to disk, calculate
-                    # load the image first
-                    file_item.load_and_process_image(self.transform, only_load_latents=True)
-                    dtype = self.sd.torch_dtype
-                    device = self.sd.device_torch
-                    state_dict = OrderedDict()
-                    first_frame_latent = None
-                    last_frame_latent = None
-                    audio_latent = None
-                    reference_latents = OrderedDict()
-                    frames = None
-                    # add batch dimension
-                    cache_uint8 = getattr(self.sd, 'cache_latents_as_uint8', False)
-                    try:
-                        imgs = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
-                        if getattr(self.sd, 'arch', None) == 'minimax_h3':
-                            latent = self.sd.encode_images(imgs, device='cpu').squeeze(0)
-                        else:
-                            latent = self.sd.encode_images(imgs).squeeze(0)
-                        if to_disk:
-                            if cache_uint8:
-                                state_dict['latent'] = _latent_to_uint8(latent).cpu()
-                            else:
-                                state_dict['latent'] = latent.clone().detach().cpu()
-                    except Exception as e:
-                        print_acc(f"Error processing image: {file_item.path}")
-                        print_acc(f"Error: {str(e)}")
-                        raise e
-                    # do first frame
-                    is_video = self.dataset_config.auto_frame_count or self.dataset_config.num_frames > 1
-                    if is_video and self.dataset_config.do_i2v:
-                        frames = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
-                        if len(frames.shape) == 4:
-                            first_frames = frames
-                        elif len(frames.shape) == 5:
-                            first_frames = frames[:, 0]
-                        else:
-                            raise ValueError(f"Unknown frame shape {frames.shape}")
-                        if hasattr(self.sd, 'encode_keyframe_latents'):
-                            first_frame_latent = self.sd.encode_keyframe_latents(
-                                first_frames.unsqueeze(2)
-                            ).squeeze(0)
-                        else:
-                            first_frame_latent = self.sd.encode_images(first_frames).squeeze(0)
-                        if to_disk:
-                            if cache_uint8:
-                                state_dict['first_frame_latent'] = _latent_to_uint8(first_frame_latent).cpu()
-                            else:
-                                state_dict['first_frame_latent'] = first_frame_latent.clone().detach().cpu()
-                        if self.dataset_config.i2v_last_frame:
-                            if len(frames.shape) == 4:
-                                last_frames = frames
-                            else:
-                                last_frames = frames[:, -1]
-                            if hasattr(self.sd, 'encode_keyframe_latents'):
-                                last_frame_latent = self.sd.encode_keyframe_latents(
-                                    last_frames.unsqueeze(2)
-                                ).squeeze(0)
-                            else:
-                                last_frame_latent = self.sd.encode_images(last_frames).squeeze(0)
-                            if to_disk:
-                                if cache_uint8:
-                                    state_dict['last_frame_latent'] = _latent_to_uint8(last_frame_latent).cpu()
-                                else:
-                                    state_dict['last_frame_latent'] = last_frame_latent.clone().detach().cpu()
-                    
-                    # audio (video+audio models only — audio-only models already encoded above via encode_images)
-                    if not self.is_audio_model and file_item.audio_data is not None:
-                        audio_latent = self.sd.encode_audio([file_item.audio_data]).squeeze(0)
-                        if to_disk:
-                            state_dict['audio_latent'] = audio_latent.clone().detach().cpu()
-
-                    if getattr(file_item, 'has_h3_v2v', False) or getattr(file_item, 'has_h3_references', False):
-                        if not hasattr(self.sd, 'get_additional_latents_for_cache'):
-                            raise ValueError("This model does not support MiniMax H3 V2V/reference-media latent caching.")
-                        reference_latents = self.sd.get_additional_latents_for_cache(file_item)
-                        if to_disk:
-                            state_dict.update(reference_latents)
-                    
-                    if is_video:
-                        state_dict['num_frames'] = torch.tensor(file_item.num_frames, dtype=torch.int32)
-                    
-                    # save_latent
-                    if to_disk:
-                        # metadata
-                        meta = get_meta_for_safetensors(file_item.get_latent_info_dict())
-                        os.makedirs(os.path.dirname(latent_path), exist_ok=True)
-                        save_file(state_dict, latent_path, metadata=meta)
-
-                    if to_memory:
-                        # keep it in memory
-                        file_item._encoded_latent = latent.to('cpu', dtype=self.sd.torch_dtype)
-                        if first_frame_latent is not None:
-                            file_item._cached_first_frame_latent = first_frame_latent.to('cpu', dtype=self.sd.torch_dtype)
-                        if last_frame_latent is not None:
-                            file_item._cached_last_frame_latent = last_frame_latent.to('cpu', dtype=self.sd.torch_dtype)
-                        if audio_latent is not None:
-                            file_item._cached_audio_latent = audio_latent.to('cpu', dtype=self.sd.torch_dtype)
-                        file_item.set_h3_v2v_cached_latents_from_state_dict(reference_latents)
-                        file_item.set_h3_reference_cached_latents_from_state_dict(reference_latents)
-
-                    del imgs
-                    del latent
-                    del frames
-                    del file_item.tensor
-                    del state_dict
-                    del first_frame_latent
-                    del last_frame_latent
-                    del audio_latent
-                    del reference_latents
-                    file_item.cleanup()
-
-                file_item.is_latent_cached = True
-                i += 1
+            pbar = tqdm(total=len(self.file_list), desc=f'Caching latents{" to disk" if to_disk else ""}')
+            executor = ThreadPoolExecutor(max_workers=num_workers)
+            try:
+                pending = deque()
+                file_iter = iter(self.file_list)
+                for queued_item in itertools.islice(file_iter, num_workers + 2):
+                    pending.append(executor.submit(_prep, queued_item))
+                while pending:
+                    file_item, latent_path, cached_state_dict, needs_encode = pending.popleft().result()
+                    # keep the window full
+                    next_item = next(file_iter, None)
+                    if next_item is not None:
+                        pending.append(executor.submit(_prep, next_item))
+                    if needs_encode and not did_move:
+                        self.sd.set_device_state_preset('cache_latents')
+                        did_move = True
+                    self._cache_one_latent(file_item, latent_path, cached_state_dict, needs_encode, to_disk, to_memory)
+                    file_item.is_latent_cached = True
+                    i += 1
+                    pbar.update(1)
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
+                pbar.close()
 
             # restore device state
-            self.sd.restore_device_state()
+            if did_move:
+                self.sd.restore_device_state()
+
+    def _cache_one_latent(
+            self: 'AiToolkitDataset',
+            file_item: 'FileItemDTO',
+            latent_path: str,
+            cached_state_dict,
+            needs_encode: bool,
+            to_disk: bool,
+            to_memory: bool,
+    ):
+        # check if it is saved to disk already
+        if not needs_encode:
+            if to_memory:
+                # load it into memory
+                state_dict = cached_state_dict
+                cached_latent = state_dict['latent']
+                if cached_latent.dtype == torch.uint8:
+                    # pixel-space latents cached as uint8
+                    cached_latent = _latent_from_uint8(cached_latent)
+                file_item._encoded_latent = cached_latent.to('cpu', dtype=self.sd.torch_dtype)
+                if 'first_frame_latent' in state_dict:
+                    cached_first_frame = state_dict['first_frame_latent']
+                    if cached_first_frame.dtype == torch.uint8:
+                        cached_first_frame = _latent_from_uint8(cached_first_frame)
+                    file_item._cached_first_frame_latent = cached_first_frame.to('cpu', dtype=self.sd.torch_dtype)
+                if 'audio_latent' in state_dict:
+                    file_item._cached_audio_latent = state_dict['audio_latent'].to('cpu', dtype=self.sd.torch_dtype)
+                if 'tensor' in state_dict:
+                    file_item._cached_tensor_uint8 = state_dict['tensor']
+                if 'waveform' in state_dict:
+                    file_item._cached_waveform_int16 = state_dict['waveform']
+                    file_item._cached_waveform_sample_rate = int(state_dict['waveform_sample_rate'].item())
+        else:
+            # not saved to disk, calculate
+            # the image/video/audio was already loaded by the prep thread
+            dtype = self.sd.torch_dtype
+            device = self.sd.device_torch
+            state_dict = OrderedDict()
+            first_frame_latent = None
+            audio_latent = None
+            frames = None
+            # add batch dimension
+            cache_uint8 = getattr(self.sd, 'cache_latents_as_uint8', False)
+            if self.dataset_config.cache_tensors_to_disk:
+                if not self.is_audio_model:
+                    tensor_uint8 = _latent_to_uint8(file_item.tensor).cpu()
+                    if to_disk:
+                        state_dict['tensor'] = tensor_uint8
+                    if to_memory:
+                        file_item._cached_tensor_uint8 = tensor_uint8
+                if file_item.audio_data is not None:
+                    # audio-only models: tensor IS the waveform, stored here as int16 instead of uint8
+                    waveform_int16 = _waveform_to_int16(file_item.audio_data['waveform']).cpu()
+                    sample_rate = int(file_item.audio_data['sample_rate'])
+                    if to_disk:
+                        state_dict['waveform'] = waveform_int16
+                        state_dict['waveform_sample_rate'] = torch.tensor(sample_rate, dtype=torch.int32)
+                    if to_memory:
+                        file_item._cached_waveform_int16 = waveform_int16
+                        file_item._cached_waveform_sample_rate = sample_rate
+            try:
+                imgs = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
+                latent = self.sd.encode_images(imgs).squeeze(0)
+                if to_disk:
+                    if cache_uint8:
+                        state_dict['latent'] = _latent_to_uint8(latent).cpu()
+                    else:
+                        state_dict['latent'] = latent.clone().detach().cpu()
+            except Exception as e:
+                print_acc(f"Error processing image: {file_item.path}")
+                print_acc(f"Error: {str(e)}")
+                raise e
+            # do first frame
+            is_video = file_item.is_video
+            if is_video and self.dataset_config.do_i2v:
+                frames = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
+                if len(frames.shape) == 4:
+                    first_frames = frames
+                elif len(frames.shape) == 5:
+                    first_frames = frames[:, 0]
+                else:
+                    raise ValueError(f"Unknown frame shape {frames.shape}")
+                first_frame_latent = self.sd.encode_images(first_frames).squeeze(0)
+                if to_disk:
+                    if cache_uint8:
+                        state_dict['first_frame_latent'] = _latent_to_uint8(first_frame_latent).cpu()
+                    else:
+                        state_dict['first_frame_latent'] = first_frame_latent.clone().detach().cpu()
+
+            # audio (video+audio models only — audio-only models already encoded above via encode_images)
+            if not self.is_audio_model and file_item.audio_data is not None:
+                audio_latent = self.sd.encode_audio([file_item.audio_data]).squeeze(0)
+                if to_disk:
+                    state_dict['audio_latent'] = audio_latent.clone().detach().cpu()
+
+            if is_video:
+                state_dict['num_frames'] = torch.tensor(file_item.num_frames, dtype=torch.int32)
+
+            # save_latent
+            if to_disk:
+                # metadata
+                meta = get_meta_for_safetensors(file_item.get_latent_info_dict())
+                os.makedirs(os.path.dirname(latent_path), exist_ok=True)
+                save_file(state_dict, latent_path, metadata=meta)
+
+            if to_memory:
+                # keep it in memory
+                file_item._encoded_latent = latent.to('cpu', dtype=self.sd.torch_dtype)
+                if first_frame_latent is not None:
+                    file_item._cached_first_frame_latent = first_frame_latent.to('cpu', dtype=self.sd.torch_dtype)
+                if audio_latent is not None:
+                    file_item._cached_audio_latent = audio_latent.to('cpu', dtype=self.sd.torch_dtype)
+
+            del imgs
+            del latent
+            del frames
+            del file_item.tensor
+            del state_dict
+            del first_frame_latent
+            del audio_latent
+            file_item.cleanup()
 
 
 class TextEmbeddingFileItemDTOMixin:
@@ -2312,30 +2049,16 @@ class TextEmbeddingFileItemDTOMixin:
             ("text_embedding_space_version", self.text_embedding_space_version),
             ("text_embedding_version", self.text_embedding_version),
         ])
-        if getattr(self, 'minimax_h3_frame_grid', False):
-            item["minimax_h3_cache_version"] = MINIMAX_H3_CACHE_VERSION
         # if we have a control image, cache the path
         if self.encode_control_in_text_embeddings and self.control_path is not None:
             item["control_path"] = self.control_path
-        if getattr(self, 'has_h3_v2v', False):
-            item["h3_v2v_media"] = (
-                os.path.basename(self.h3_v2v_path),
-                os.stat(self.h3_v2v_path).st_size,
-                os.stat(self.h3_v2v_path).st_mtime_ns,
-            )
-            item["h3_v2v_fps"] = self.dataset_config.fps
-            item["h3_v2v_audio"] = self.dataset_config.h3_v2v_audio
-        if getattr(self, 'has_h3_references', False):
-            item["h3_reference_media"] = [
-                (os.path.basename(path), os.stat(path).st_size, os.stat(path).st_mtime_ns)
-                for path in self.h3_reference_paths
-            ]
-            item["h3_reference_num_frames"] = self.dataset_config.h3_reference_num_frames
-            item["h3_reference_fps"] = self.dataset_config.h3_reference_fps
-            item["h3_reference_audio"] = self.dataset_config.h3_reference_audio
-        if getattr(self, 'uses_h3_visual_conditioning', False):
-            item["h3_i2v_visual_prompt"] = self.dataset_config.do_i2v
-            item["h3_i2v_last_frame"] = self.dataset_config.i2v_last_frame
+        # first-frame vision conditioning changes the embedding content -> new cache key
+        elif (
+            getattr(self, "encode_first_frame_in_text_embeddings", False)
+            and self.dataset_config.do_i2v
+            and self.is_video
+        ):
+            item["first_frame_in_te"] = True
         return item
 
     def get_text_embedding_path(self: 'FileItemDTO', recalculate=False):
@@ -2393,26 +2116,8 @@ class TextEmbeddingCachingMixin:
                     if not did_move:
                         self.sd.set_device_state_preset('cache_text_encoder')
                         did_move = True
-                    if getattr(file_item, 'uses_h3_visual_conditioning', False) and hasattr(self.sd, 'get_prompt_embeds_for_file_item'):
-                        file_item.load_h3_references(self.transform)
-                        prompt_embeds: PromptEmbeds = self.sd.get_prompt_embeds_for_file_item(file_item)
-                        file_item.cleanup_h3_references()
-                    elif (
-                        file_item.encode_control_in_text_embeddings
-                        and file_item.control_path is None
-                        and getattr(file_item, 'minimax_h3_frame_grid', False)
-                        and file_item.dataset_config.control_path is None
-                        and not file_item.dataset_config.control_from_same_folder
-                    ):
-                        # H3's Qwen3-VL encoder accepts optional visual inputs.
-                        # Plain T2V and single-image concept datasets therefore
-                        # cache caption-only embeddings, while H3 control-path,
-                        # I2V, V2V, and reference datasets use the branches above
-                        # or below with their actual visual conditioning.
-                        prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
-                    elif file_item.encode_control_in_text_embeddings:
-                        if file_item.control_path is None:
-                            raise Exception(f"Could not find a control image for {file_item.path} which is needed for this model")
+                        
+                    if file_item.encode_control_in_text_embeddings and file_item.control_path is not None:
                         ctrl_img_list = []
                         control_path_list = file_item.control_path
                         if not isinstance(file_item.control_path, list):
@@ -2431,7 +2136,7 @@ class TextEmbeddingCachingMixin:
                             except Exception as e:
                                 print_acc(f"Error: {e}")
                                 print_acc(f"Error loading control image: {control_path_list[i]}")
-
+                        
                         if len(ctrl_img_list) == 0:
                             ctrl_img = None
                         elif not self.sd.has_multiple_control_images:
@@ -2439,6 +2144,27 @@ class TextEmbeddingCachingMixin:
                         else:
                             ctrl_img = ctrl_img_list
                         prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)
+                    elif (
+                        getattr(self.sd, 'encode_first_frame_in_text_embeddings', False)
+                        and self.dataset_config.do_i2v
+                        and file_item.is_video
+                    ):
+                        # video item: encode the clip's FIRST FRAME into the text embeddings
+                        # as a vision reference, matching sampling (where the ctrl image goes
+                        # into the embeds and is held as the clean first frames)
+                        file_item.load_and_process_image(self.transform, only_load_latents=True)
+                        frames = file_item.tensor  # (T, C, H, W) or (C, H, W), in [-1, 1]
+                        first = frames[0] if frames.dim() == 4 else frames
+                        ctrl_img = (
+                            ((first + 1.0) / 2.0)
+                            .clamp(0, 1)
+                            .unsqueeze(0)
+                            .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
+                        )
+                        if self.sd.has_multiple_control_images:
+                            ctrl_img = [ctrl_img]
+                        prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)
+                        file_item.tensor = None
                     else:
                         prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
                     # save it
@@ -2447,8 +2173,8 @@ class TextEmbeddingCachingMixin:
                 file_item.is_text_embedding_cached = True
                 i += 1
             # restore device state
-            if did_move:
-                self.sd.restore_device_state()
+            # if did_move:
+            #     self.sd.restore_device_state()
 
 
 class CLIPCachingMixin:

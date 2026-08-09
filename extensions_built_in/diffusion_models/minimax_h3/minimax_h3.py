@@ -1,10 +1,9 @@
 """MiniMax-H3 (33B joint video+audio DiT) for ai-toolkit.
 
-Supports t2v (t2va), first/last-frame i2v (fl2va), image/video references
-(ref2va), and basename-paired source-video V2V training, with joint audio when
-the dataset provides it. Image datasets train as single latent frames
-(keyframe-row geometry) and sampling with num_frames 1 renders a single image.
-The architecture lives in ./src/:
+Supports t2v (t2va) and first-frame i2v (fl2va) training and sampling, with
+joint audio when the dataset provides it. Image datasets train as single
+latent frames (keyframe-row geometry) and sampling with num_frames 1 renders
+a single image. The architecture lives in ./src/:
 
   - transformer.py: packed-sequence DiT, weight-compatible with the original
     ``MiniMaxAI/MiniMax-H3`` checkpoint keys
@@ -22,9 +21,10 @@ nvfp4 — with dequantized-matmul fallbacks for GPUs without the fast kernels),
 and the fp16/fp32 single-file VAEs. Files are resolved under ``MODELS_PATH``
 (checked first, both at the repo-relative location and flat at the root) and
 downloaded from the hub into ``MODELS_PATH`` when missing. Individual files
-can be overridden via ``model_kwargs``: ``dit_path``, ``text_encoder_path``,
-``video_vae_path``, ``audio_vae_path``; ``model_kwargs.partition`` picks
-``fl2va`` (default) or ``ref2va``.
+can be overridden via ``model_kwargs``: ``dit_<partition>_path``,
+``text_encoder_path``, ``video_vae_path``, ``audio_vae_path``;
+``model_kwargs.partition`` picks ``fl2va``, ``fl2va_pruned`` (default),
+``ref2va``, or ``ref2va_pruned``.
 
 Conventions bridged to ai-toolkit:
   - the model consumes t = 1 - sigma in [0, 1] (t=1 clean) and predicts the
@@ -38,7 +38,7 @@ Conventions bridged to ai-toolkit:
 
 import os
 from functools import partial
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import yaml
@@ -66,8 +66,6 @@ from .src.audio_vae import MiniMaxH3AudioVAE, fold_audio_vae_weight_norm
 from .src.packing import (
     KEYFRAME_ENCODE_SEED,
     KEYFRAME_NOISE_AUG_T,
-    REFERENCE_AUDIO_NOISE_AUG_T,
-    ReferenceBlockLayout,
     build_packed_sequence,
     pack_audio_latents,
     pad_layouts_to_batch,
@@ -96,8 +94,10 @@ scheduler_config = {
 # missing.
 COMFY_REPO = "Comfy-Org/MiniMax-H3"
 COMFY_FILES = {
-    "dit_fl2va": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-    "dit_ref2va": "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+    "dit_fl2va": "diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors",
+    "dit_fl2va_pruned": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "dit_ref2va": "diffusion_models/minimax_h3_ref2va_int8_convrot.safetensors",
+    "dit_ref2va_pruned": "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
     "text_encoder": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
     "video_vae": "vae/minimax_h3_video_vae_fp16.safetensors",
     "audio_vae": "vae/minimax_h3_audio_vae_fp32.safetensors",
@@ -135,30 +135,21 @@ class MiniMaxH3VaeBundle(torch.nn.Module):
         super().__init__()
         self.video_vae = video_vae
         self.audio_vae = audio_vae
-        self.register_buffer(
-            "_released_marker", torch.empty(0, dtype=video_vae.dtype), persistent=False
-        )
 
     @property
     def device(self):
-        if self.video_vae is not None:
-            return self.video_vae.device
-        return self._released_marker.device
+        return self.video_vae.device
 
     @property
     def dtype(self):
-        if self.video_vae is not None:
-            return self.video_vae.dtype
-        return self._released_marker.dtype
+        return self.video_vae.dtype
 
-    def release(self):
-        """Drop both frozen VAE parameter sets after complete latent caching."""
-        if self.video_vae is not None:
-            self._released_marker = self._released_marker.to(
-                device=self.video_vae.device, dtype=self.video_vae.dtype
-            )
-        self.video_vae = None
-        self.audio_vae = None
+    def enable_gradient_checkpointing(self, enable: bool = True):
+        self.video_vae.enable_gradient_checkpointing(enable)
+        self.audio_vae.enable_gradient_checkpointing(enable)
+
+    def disable_gradient_checkpointing(self):
+        self.enable_gradient_checkpointing(False)
 
 
 class MinimaxH3Model(BaseModel):
@@ -185,23 +176,6 @@ class MinimaxH3Model(BaseModel):
         # sampling (and control_path datasets) pass control images to
         # get_prompt_embeds
         self.encode_control_in_text_embeddings = True
-        self.encode_first_frame_in_text_embeddings = True
-        self.has_multiple_control_images = True
-
-        self.partition = str(
-            self.model_config.model_kwargs.get("partition", "fl2va")
-        ).lower()
-        if self.partition not in ("fl2va", "ref2va"):
-            raise ValueError(
-                f"model_kwargs.partition must be fl2va or ref2va, got {self.partition}"
-            )
-
-        # H3's frozen components are individually enormous. Keep Qwen and the
-        # VAEs host-resident between calls. Low-VRAM generation activates the
-        # DiT on demand as well, so only one frozen component occupies VRAM.
-        self.generation_cpu_offload_modules = {"vae", "text_encoder"}
-        if self.model_config.low_vram:
-            self.generation_cpu_offload_modules.add("unet")
 
         self.processor = None  # Qwen3VLProcessor
         self._warned_frame_trim = False
@@ -226,27 +200,11 @@ class MinimaxH3Model(BaseModel):
 
     @property
     def video_vae(self) -> MiniMaxH3VideoVAE:
-        vae = self.vae.video_vae
-        if vae is None:
-            raise RuntimeError(
-                "MiniMax H3 video VAE was released after latent caching"
-            )
-        return vae
+        return self.vae.video_vae
 
     @property
     def audio_vae(self) -> MiniMaxH3AudioVAE:
-        vae = self.vae.audio_vae
-        if vae is None:
-            raise RuntimeError(
-                "MiniMax H3 audio VAE was released after latent caching"
-            )
-        return vae
-
-    def unload_vae_after_caching(self):
-        """Free host RAM when every training latent is cached and previews are off."""
-        self.vae.to("cpu")
-        self.vae.release()
-        flush()
+        return self.vae.audio_vae
 
     # ------------------------------------------------------------------
     # Loading
@@ -275,12 +233,6 @@ class MinimaxH3Model(BaseModel):
         downloaded to the repo-relative path under MODELS_PATH.
         """
         override = self.model_config.model_kwargs.get(f"{component}_path", None)
-        if override is None:
-            model_paths = self.model_config.model_paths or {}
-            if component.startswith("dit_"):
-                override = model_paths.get(component, model_paths.get("transformer"))
-            else:
-                override = model_paths.get(component)
         if override is not None:
             if not os.path.exists(override):
                 raise FileNotFoundError(
@@ -318,7 +270,119 @@ class MinimaxH3Model(BaseModel):
         )
 
     def _dit_component(self) -> str:
-        return f"dit_{self.partition}"
+        partition = str(
+            self.model_config.model_kwargs.get("partition", "fl2va_pruned")
+        ).lower()
+        if partition not in ("fl2va", "fl2va_pruned", "ref2va", "ref2va_pruned"):
+            raise ValueError(
+                "model_kwargs.partition must be fl2va, fl2va_pruned, ref2va, "
+                f"or ref2va_pruned, got {partition}"
+            )
+        return f"dit_{partition}"
+
+    def load_training_adapter(self, transformer: MiniMaxH3Transformer):
+        """Load an assistant LoRA (e.g. a de-distillation adapter) as a LIVE
+        module: active during training, deactivated by the sampler. It is
+        deliberately NOT merged into the base weights — the transformer is
+        pre-quantized, and a merge would resample every int8 scale.
+
+        Path resolution: a local path is used as-is; otherwise the loras
+        folder under MODELS_PATH is searched recursively for the filename;
+        otherwise a ``user/repo/file.safetensors`` hub path downloads into
+        MODELS_PATH/loras/training_adapters/.
+        """
+        from toolkit.config_modules import NetworkConfig
+        from toolkit.lora_special import LoRASpecialNetwork
+
+        self.print_and_status_update("Loading assistant LoRA")
+        lora_path = self.model_config.assistant_lora_path
+        if not os.path.exists(lora_path):
+            filename = os.path.basename(lora_path)
+            found = self._find_file_recursive(
+                os.path.join(MODELS_PATH, "loras"), filename
+            )
+            if found is not None:
+                lora_path = found
+            else:
+                lora_splits = lora_path.split("/")
+                if len(lora_splits) != 3:
+                    raise ValueError(
+                        f"Assistant LoRA path {lora_path} is not a local path, a "
+                        f"file under {os.path.join(MODELS_PATH, 'loras')}, or a "
+                        "'user/repo/file.safetensors' hub path."
+                    )
+                import huggingface_hub
+
+                target_dir = os.path.join(MODELS_PATH, "loras", "training_adapters")
+                os.makedirs(target_dir, exist_ok=True)
+                try:
+                    lora_path = huggingface_hub.hf_hub_download(
+                        repo_id="/".join(lora_splits[:2]),
+                        filename=lora_splits[2],
+                        local_dir=target_dir,
+                    )
+                except Exception as e:
+                    raise ValueError(
+                        f"Failed to download assistant LoRA from {lora_path}: {e}"
+                    )
+            self.model_config.assistant_lora_path = lora_path
+
+        # load the adapter; it stays a live module (never merged) and the
+        # sampler toggles it off for previews
+        lora_state_dict = load_file(lora_path)
+        dim_key = next(
+            k
+            for k in lora_state_dict
+            if k.endswith("lora_A.weight") or k.endswith("lora_down.weight")
+        )
+        dim = int(lora_state_dict[dim_key].shape[0])
+        lora_state_dict = self.convert_lora_weights_before_load(lora_state_dict)
+
+        network_config = NetworkConfig(
+            **{
+                "type": "lora",
+                "linear": dim,
+                "linear_alpha": dim,
+                "transformer_only": True,
+            }
+        )
+        LoRASpecialNetwork.LORA_PREFIX_UNET = "lora_transformer"
+        network = LoRASpecialNetwork(
+            text_encoder=None,
+            unet=transformer,
+            lora_dim=network_config.linear,
+            multiplier=1.0,
+            alpha=network_config.linear_alpha,
+            train_unet=True,
+            train_text_encoder=False,
+            network_config=network_config,
+            network_type=network_config.type,
+            transformer_only=network_config.transformer_only,
+            is_transformer=True,
+            target_lin_modules=self.target_lora_modules,
+            is_assistant_adapter=True,
+            is_ara=True,
+        )
+        network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
+        network.force_to(self.device_torch, dtype=self.torch_dtype)
+        network._update_torch_multiplier()
+        network.load_weights(lora_state_dict)
+
+        # frozen: the adapter shapes the training distribution but is never
+        # itself trained, so its params must not collect gradients
+        network.is_merged_in = False
+        for param in network.parameters():
+            param.requires_grad_(False)
+        network.eval()
+
+        self.assistant_lora: LoRASpecialNetwork = network
+
+        # live during training; the sampler's non-inverted assistant path
+        # (BaseModel.generate_images) deactivates it for previews and turns
+        # it back on afterwards
+        self.assistant_lora.multiplier = 1.0
+        self.assistant_lora.is_active = True
+        self.invert_assistant_lora = False
 
     def _load_transformer(self) -> MiniMaxH3Transformer:
         dtype = self.torch_dtype
@@ -462,8 +526,6 @@ class MinimaxH3Model(BaseModel):
         return tokenizer, processor, text_encoder
 
     def _load_vaes(self) -> MiniMaxH3VaeBundle:
-        from accelerate import init_empty_weights
-
         self.print_and_status_update("Loading video VAE")
         video_sd = load_file(self._resolve_comfy_file("video_vae"))
         # normalization stats ride along in the comfy file; the module holds
@@ -473,13 +535,7 @@ class MinimaxH3Model(BaseModel):
             for k in ("latents_mean", "latents_std")
             if k in video_sd
         }
-        # Parameters are replaced by the safetensors below, so allocating the
-        # default VAE weights first only creates a large, avoidable RAM peak.
-        # Keep include_buffers=False: analytic non-persistent buffers such as
-        # RoPE frequencies and normalization constants must retain their
-        # initialized CPU values because they are not present in the state dict.
-        with init_empty_weights(include_buffers=False):
-            video_vae = MiniMaxH3VideoVAE()
+        video_vae = MiniMaxH3VideoVAE()
         video_vae.load_state_dict(video_sd, strict=True, assign=True)
         for k, v in video_stats.items():
             getattr(video_vae, k).copy_(v)
@@ -497,8 +553,7 @@ class MinimaxH3Model(BaseModel):
         # raw parametrization is present (original-repo file)
         if any(k.endswith("weight_g") for k in audio_sd.keys()):
             audio_sd = fold_audio_vae_weight_norm(audio_sd)
-        with init_empty_weights(include_buffers=False):
-            audio_vae = MiniMaxH3AudioVAE()
+        audio_vae = MiniMaxH3AudioVAE()
         audio_vae.load_state_dict(audio_sd, strict=True, assign=True)
         for k, v in audio_stats.items():
             getattr(audio_vae, k).copy_(v)
@@ -513,16 +568,18 @@ class MinimaxH3Model(BaseModel):
 
         transformer = self._load_transformer()
 
+        # load assistant lora if specified (merged into the quantized weights)
+        if self.model_config.assistant_lora_path is not None:
+            self.load_training_adapter(transformer)
+
         if self.model_config.quantize:
             self.print_and_status_update("Quantizing transformer")
             quantize_model(self, transformer)
             flush()
 
-        # A quantized H3 DiT is still far too large for the usual meaning of
-        # ``low_vram``.  On CUDA, make that preset genuinely layer-streamed
-        # even when the user did not also discover the separate
-        # ``layer_offloading`` switch.  An explicit layer-offloading config
-        # retains its requested percentage.
+        # The 33B DiT cannot fit alongside H3's other frozen components under
+        # the normal low-VRAM preset. Treat that preset as full layer streaming
+        # unless the user explicitly selected a different offload percentage.
         auto_layer_offload = (
             self.model_config.low_vram and self.device_torch.type == "cuda"
         )
@@ -577,15 +634,12 @@ class MinimaxH3Model(BaseModel):
                 self.device_torch,
                 offload_percent=text_encoder_offload_percent,
             )
-        # Retaining the 32B conditioner beside the 33B DiT is not a useful
-        # fast path. Prompt encoding activates it only after offloading the
-        # transformer, then returns it to host memory.
+        # Do not retain the 32B conditioner alongside the DiT. Prompt encoding
+        # brings it on demand and returns it to the host below.
         text_encoder.to("cpu")
         flush()
 
         vae_bundle = self._load_vaes()
-        # Video and audio VAEs are activated independently by their entry
-        # points; moving the bundle would unnecessarily co-reside both.
         vae_bundle.to("cpu")
 
         self.noise_scheduler = MinimaxH3Model.get_train_scheduler()
@@ -598,18 +652,8 @@ class MinimaxH3Model(BaseModel):
         self.print_and_status_update("Model Loaded")
 
     def set_device_state_preset(self, device_state_preset):
-        """Avoid BaseModel's eager whole-bundle moves for H3.
-
-        H3's cache and generation entry points already activate the precise
-        frozen component they need. Eager presets would otherwise move both
-        VAEs together, or co-reside the 33B DiT and 32B Qwen encoder before
-        the first useful operation.
-        """
-        if device_state_preset in (
-            "cache_latents",
-            "cache_text_encoder",
-            "generate",
-        ):
+        """Avoid BaseModel's eager whole-model moves for H3 low-VRAM work."""
+        if device_state_preset in ("cache_latents", "cache_text_encoder", "generate"):
             self.save_device_state()
             self.vae.to("cpu")
             self.text_encoder.to("cpu")
@@ -618,77 +662,22 @@ class MinimaxH3Model(BaseModel):
             return
         return super().set_device_state_preset(device_state_preset)
 
-    # ------------------------------------------------------------------
-    # Text conditioning
-    # ------------------------------------------------------------------
     def _offload_transformer_for_frozen_component(self):
         model = getattr(self, "model", None)
         if model is not None and model.device != torch.device("cpu"):
             model.to("cpu")
             flush()
 
-    @staticmethod
-    def _tensor_to_pil(image) -> Image.Image:
-        if isinstance(image, Image.Image):
-            return image.convert("RGB")
-        if image.ndim == 4:
-            image = image[0]
-        image = image.detach().float().cpu()
-        if float(image.min()) < 0.0:
-            image = (image + 1.0) / 2.0
-        arr = (image.clamp(0, 1) * 255).round().to(torch.uint8)
-        return Image.fromarray(arr.permute(1, 2, 0).numpy()).convert("RGB")
-
-    def _encode_prompt_batch(
-        self,
-        prompts: List[str],
-        keyframes_per_prompt: Optional[List[Optional[List[Image.Image]]]] = None,
-        references_per_prompt: Optional[List[Optional[List[Dict]]]] = None,
-    ) -> AdvancedPromptEmbeds:
-        self._offload_transformer_for_frozen_component()
-        if keyframes_per_prompt is None:
-            keyframes_per_prompt = [None] * len(prompts)
-        if references_per_prompt is None:
-            references_per_prompt = [None] * len(prompts)
-        if not (
-            len(prompts)
-            == len(keyframes_per_prompt)
-            == len(references_per_prompt)
-        ):
-            raise ValueError("MiniMax H3 prompt-conditioning batch lengths differ")
-
-        if self.text_encoder.device == torch.device("cpu"):
-            self.text_encoder.to(self.device_torch)
-
-        embeds_list, tags_list = [], []
-        try:
-            for prompt, keyframes, references in zip(
-                prompts, keyframes_per_prompt, references_per_prompt
-            ):
-                embeds, tags = encode_minimax_h3_prompt(
-                    self.text_encoder,
-                    self.tokenizer,
-                    self.processor,
-                    prompt.strip(),
-                    keyframes=keyframes,
-                    reference_items=references,
-                    device=self.device_torch,
-                    dtype=self.torch_dtype,
-                    max_length=self.max_text_length,
-                )
-                embeds_list.append(embeds.detach().to("cpu"))
-                tags_list.append(tags.detach().to("cpu"))
-        finally:
-            self.text_encoder.to("cpu")
-            flush()
-
-        pe = AdvancedPromptEmbeds(text_embeds=embeds_list, text_token_tags=tags_list)
-        pe.frozen_dtype_keys = ["text_token_tags"]
-        return pe
-
+    # ------------------------------------------------------------------
+    # Text conditioning
+    # ------------------------------------------------------------------
     def get_prompt_embeds(self, prompt, control_images=None) -> AdvancedPromptEmbeds:
         if isinstance(prompt, str):
             prompt = [prompt]
+        if self.model_config.low_vram:
+            self._offload_transformer_for_frozen_component()
+        if self.text_encoder.device == torch.device("cpu"):
+            self.text_encoder.to(self.device_torch)
 
         # control tensors arrive in [0, 1]; the Qwen3-VL processor wants PIL
         keyframes_per_prompt = [None] * len(prompt)
@@ -704,7 +693,15 @@ class MinimaxH3Model(BaseModel):
                 images = [control_images]
             pil_images = []
             for img in images:
-                pil_images.append(self._tensor_to_pil(img))
+                if isinstance(img, torch.Tensor):
+                    if img.ndim == 4:
+                        img = img[0]
+                    arr = (img.float().clamp(0, 1) * 255).round().to(torch.uint8)
+                    pil_images.append(
+                        Image.fromarray(arr.permute(1, 2, 0).cpu().numpy())
+                    )
+                else:
+                    pil_images.append(img)
             if len(pil_images) == 1:
                 keyframes_per_prompt = [pil_images] * len(prompt)
             elif len(pil_images) == len(prompt):
@@ -712,131 +709,27 @@ class MinimaxH3Model(BaseModel):
             else:
                 keyframes_per_prompt = [pil_images] * len(prompt)
 
-        return self._encode_prompt_batch(prompt, keyframes_per_prompt)
-
-    def _qwen_reference_items(
-        self,
-        media: List[Tuple[torch.Tensor, Optional[dict], bool, int]],
-    ) -> List[Dict]:
-        """Build the Ref2VA Qwen presentation in the same order as DiT refs.
-
-        Each tuple is ``(visual_tensor, soundtrack, is_video, fps)``. A video
-        soundtrack gets its own Audio ordinal immediately before the Video
-        ordinal, matching ComfyUI's native node.
-        """
-        items: List[Dict] = []
-        for visual, soundtrack, is_video, fps in media:
-            if not is_video:
-                items.append({"type": "image", "data": self._tensor_to_pil(visual)})
-                continue
-            if soundtrack is not None:
-                items.append({"type": "audio"})
-            stride = max(1, int(round(float(fps) / 2.0)))
-            indices = list(range(0, int(visual.shape[0]), stride))
-            frames = [self._tensor_to_pil(visual[index]) for index in indices]
-            items.append(
-                {
-                    "type": "video",
-                    "data": frames,
-                    "timestamps": [index / float(fps) for index in indices],
-                }
+        embeds_list, tags_list = [], []
+        for p, keyframes in zip(prompt, keyframes_per_prompt):
+            embeds, tags = encode_minimax_h3_prompt(
+                self.text_encoder,
+                self.tokenizer,
+                self.processor,
+                p.strip(),
+                keyframes=keyframes,
+                device=self.device_torch,
+                dtype=self.torch_dtype,
+                max_length=self.max_text_length,
             )
-        return items
+            embeds_list.append(embeds)
+            tags_list.append(tags)
 
-    def _file_item_reference_media(self, file_item) -> List[Tuple]:
-        media = []
-        if file_item.has_h3_v2v:
-            if file_item.h3_v2v_tensor is None:
-                raise ValueError("MiniMax H3 V2V source media was not loaded")
-            media.append(
-                (
-                    file_item.h3_v2v_tensor,
-                    file_item.h3_v2v_audio_data,
-                    True,
-                    file_item.dataset_config.fps,
-                )
-            )
-        for tensor, audio, is_video in zip(
-            file_item.h3_reference_tensors,
-            file_item.h3_reference_audio_data,
-            file_item.h3_reference_is_video,
-        ):
-            media.append(
-                (
-                    tensor,
-                    audio,
-                    is_video,
-                    file_item.dataset_config.h3_reference_fps,
-                )
-            )
-        return media
-
-    def get_prompt_embeds_for_file_item(self, file_item) -> AdvancedPromptEmbeds:
-        """Prompt-cache hook for H3 visual conditioning."""
-        if self.partition == "ref2va":
-            if file_item.dataset_config.do_i2v:
-                raise ValueError("Ref2VA cannot be combined with FL2VA first/last keyframes")
-            refs = self._qwen_reference_items(self._file_item_reference_media(file_item))
-            if not refs:
-                raise ValueError(
-                    "The Ref2VA checkpoint requires h3_v2v_path or h3_reference_path"
-                )
-            return self._encode_prompt_batch([file_item.caption], references_per_prompt=[refs])
-
-        if file_item.has_h3_v2v or file_item.has_h3_references:
-            raise ValueError(
-                "H3 V2V/reference datasets require model.model_kwargs.partition: ref2va"
-            )
-        keyframes = [
-            self._tensor_to_pil(frame)
-            for frame in file_item.load_h3_i2v_prompt_images(None)
-        ]
-        return self._encode_prompt_batch(
-            [file_item.caption], keyframes_per_prompt=[keyframes or None]
-        )
-
-    def get_prompt_embeds_for_batch(
-        self, prompts: List[str], batch: "DataLoaderBatchDTO"
-    ) -> AdvancedPromptEmbeds:
-        """Uncached-training hook; supplies the same visual presentation as
-        prompt caching, including paired source-video V2V."""
-        if isinstance(prompts, str):
-            prompts = [prompts]
-        if len(prompts) != len(batch.file_items):
-            raise ValueError("MiniMax H3 prompt count does not match batch size")
-
-        if self.partition == "ref2va":
-            if batch.dataset_config.do_i2v:
-                raise ValueError("Ref2VA cannot be combined with FL2VA first/last keyframes")
-            references = []
-            for file_item in batch.file_items:
-                refs = self._qwen_reference_items(
-                    self._file_item_reference_media(file_item)
-                )
-                if not refs:
-                    raise ValueError(
-                        "The Ref2VA checkpoint requires h3_v2v_path or h3_reference_path"
-                    )
-                references.append(refs)
-            return self._encode_prompt_batch(
-                list(prompts), references_per_prompt=references
-            )
-
-        if any(item.has_h3_v2v or item.has_h3_references for item in batch.file_items):
-            raise ValueError(
-                "H3 V2V/reference datasets require model.model_kwargs.partition: ref2va"
-            )
-        keyframes = []
-        for index, file_item in enumerate(batch.file_items):
-            if not batch.dataset_config.do_i2v:
-                keyframes.append(None)
-                continue
-            tensor = batch.tensor[index]
-            frames = [tensor[0]] if tensor.ndim == 4 else [tensor]
-            if batch.dataset_config.i2v_last_frame and tensor.ndim == 4:
-                frames.append(tensor[-1])
-            keyframes.append([self._tensor_to_pil(frame) for frame in frames])
-        return self._encode_prompt_batch(list(prompts), keyframes_per_prompt=keyframes)
+        pe = AdvancedPromptEmbeds(text_embeds=embeds_list, text_token_tags=tags_list)
+        pe.frozen_dtype_keys = ["text_token_tags"]
+        if self.model_config.low_vram:
+            self.text_encoder.to("cpu")
+            flush()
+        return pe
 
     # ------------------------------------------------------------------
     # VAE encode / decode
@@ -850,38 +743,33 @@ class MinimaxH3Model(BaseModel):
             device = self.vae_device_torch
         if dtype is None:
             dtype = self.vae_torch_dtype
-        self._offload_transformer_for_frozen_component()
-        try:
-            self.video_vae.to(self.vae_device_torch)
-            items = []
-            for image in image_list:
-                if image.ndim == 3:
-                    items.append(image.unsqueeze(1))  # (C, 1, H, W)
-                elif image.ndim == 4:
-                    items.append(image.permute(1, 0, 2, 3))  # (C, T, H, W)
-                else:
-                    raise ValueError(f"Invalid image shape: {image.shape}")
+        if self.vae.device == torch.device("cpu"):
+            self.vae.to(self.vae_device_torch)
 
-            num_frames = items[0].shape[1]
-            if num_frames > 1:
-                aligned = packing.align_num_frames_down(num_frames)
-                if aligned != num_frames and not self._warned_frame_trim:
-                    print(
-                        f"MiniMax-H3: trimming {num_frames}-frame clips to {aligned} "
-                        f"frames (the video VAE needs 17n+5: 5, 22, 39, 56, ...). Set "
-                        f"the dataset num_frames accordingly to avoid wasted decode."
-                    )
-                    self._warned_frame_trim = True
-                items = [it[:, :aligned] for it in items]
+        items = []
+        for image in image_list:
+            if image.ndim == 3:
+                items.append(image.unsqueeze(1))  # (C, 1, H, W)
+            elif image.ndim == 4:
+                items.append(image.permute(1, 0, 2, 3))  # (C, T, H, W)
+            else:
+                raise ValueError(f"Invalid image shape: {image.shape}")
 
-            batch = torch.stack(items).to(
-                self.vae_device_torch, self.video_vae.dtype
-            )
-            latents = self.video_vae.encode(batch, sample=True)
-            return latents.to(device, dtype=dtype)
-        finally:
-            self.video_vae.to("cpu")
-            flush()
+        num_frames = items[0].shape[1]
+        if num_frames > 1:
+            aligned = packing.align_num_frames_down(num_frames)
+            if aligned != num_frames and not self._warned_frame_trim:
+                print(
+                    f"MiniMax-H3: trimming {num_frames}-frame clips to {aligned} "
+                    f"frames (the video VAE needs 17n+5: 5, 22, 39, 56, ...). Set "
+                    f"the dataset num_frames accordingly to avoid wasted decode."
+                )
+                self._warned_frame_trim = True
+            items = [it[:, :aligned] for it in items]
+
+        batch = torch.stack(items).to(self.vae_device_torch, self.video_vae.dtype)
+        latents = self.video_vae.encode(batch, sample=True)
+        return latents.to(device, dtype=dtype)
 
     @torch.no_grad()
     def encode_keyframe_latents(self, frames: torch.Tensor) -> torch.Tensor:
@@ -889,50 +777,32 @@ class MinimaxH3Model(BaseModel):
         with the released conditioning recipe: seeded posterior sample (seed
         42, independent of the request seed) rounded to fp16 before
         normalization."""
-        self._offload_transformer_for_frozen_component()
-        try:
-            self.video_vae.to(self.vae_device_torch)
-            generator = torch.Generator(device="cpu").manual_seed(
-                KEYFRAME_ENCODE_SEED
-            )
-            latents = self.video_vae.encode(
-                frames.to(self.vae_device_torch, self.video_vae.dtype),
-                sample=True,
-                generator=generator,
-                fp16_round=True,
-            )
-            return latents.float().to("cpu")
-        finally:
-            self.video_vae.to("cpu")
-            flush()
+        if self.vae.device == torch.device("cpu"):
+            self.vae.to(self.vae_device_torch)
+        generator = torch.Generator(device="cpu").manual_seed(KEYFRAME_ENCODE_SEED)
+        latents = self.video_vae.encode(
+            frames.to(self.vae_device_torch, self.video_vae.dtype),
+            sample=True,
+            generator=generator,
+            fp16_round=True,
+        )
+        return latents.float()
 
     def decode_latents(self, latents: torch.Tensor, device=None, dtype=None):
         # differentiable: pixel-space losses backprop through the video VAE
-        self._offload_transformer_for_frozen_component()
-        try:
-            self.video_vae.to(self.vae_device_torch)
-            video = self.video_vae.decode(
-                latents.to(self.video_vae.device, self.video_vae.dtype)
-            )
-            if device is not None:
-                video = video.to(device, dtype=dtype)
-            return video
-        finally:
-            self.video_vae.to("cpu")
-            flush()
+        if self.vae.device == torch.device("cpu"):
+            self.vae.to(self.vae_device_torch)
+        video = self.video_vae.decode(latents.to(self.vae.device, self.video_vae.dtype))
+        if device is not None:
+            video = video.to(device, dtype=dtype)
+        return video
 
     def decode_audio_latents(self, latents: torch.Tensor):
         # differentiable, like decode_latents
         """(B, 32, T) normalized -> waveform (B, 1, T*800) at 32 kHz."""
-        self._offload_transformer_for_frozen_component()
-        try:
-            self.audio_vae.to(self.vae_device_torch)
-            return self.audio_vae.decode(
-                latents.to(self.audio_vae.device, torch.float32)
-            )
-        finally:
-            self.audio_vae.to("cpu")
-            flush()
+        if self.vae.device == torch.device("cpu"):
+            self.vae.to(self.vae_device_torch)
+        return self.audio_vae.decode(latents.to(self.audio_vae.device, torch.float32))
 
     @property
     def audio_sample_rate(self) -> int:
@@ -957,193 +827,32 @@ class MinimaxH3Model(BaseModel):
         rows (B, 2*T, 32), normalized, channel-major stereo."""
         import torchaudio
 
-        self._offload_transformer_for_frozen_component()
-        try:
-            self.audio_vae.to(self.vae_device_torch)
-            packed = []
-            for audio_data in audio_data_list:
-                waveform = audio_data["waveform"].to(
-                    self.audio_vae.device, torch.float32
+        if self.vae.device == torch.device("cpu"):
+            self.vae.to(self.device_torch)
+
+        packed = []
+        for audio_data in audio_data_list:
+            waveform = audio_data["waveform"].to(self.audio_vae.device, torch.float32)
+            sample_rate = int(audio_data["sample_rate"])
+            if waveform.dim() == 1:
+                waveform = waveform.unsqueeze(0)
+            if waveform.shape[0] == 1:
+                waveform = waveform.repeat(2, 1)  # mono -> stereo
+            elif waveform.shape[0] > 2:
+                waveform = waveform[:2]
+            if sample_rate != packing.AUDIO_SAMPLE_RATE:
+                waveform = torchaudio.functional.resample(
+                    waveform, sample_rate, packing.AUDIO_SAMPLE_RATE
                 )
-                sample_rate = int(audio_data["sample_rate"])
-                if waveform.dim() == 1:
-                    waveform = waveform.unsqueeze(0)
-                if waveform.shape[0] == 1:
-                    waveform = waveform.repeat(2, 1)  # mono -> stereo
-                elif waveform.shape[0] > 2:
-                    waveform = waveform[:2]
-                if sample_rate != packing.AUDIO_SAMPLE_RATE:
-                    waveform = torchaudio.functional.resample(
-                        waveform, sample_rate, packing.AUDIO_SAMPLE_RATE
-                    )
-                # the mono VAE sees each stereo channel as its own batch item
-                z = self.audio_vae.encode(waveform.unsqueeze(1))  # (2, 32, T)
-                packed.append(pack_audio_latents(z.unsqueeze(0)))  # (1, 2*T, 32)
+            # the mono VAE sees each stereo channel as its own batch item
+            z = self.audio_vae.encode(waveform.unsqueeze(1))  # (2, 32, T)
+            packed.append(pack_audio_latents(z.unsqueeze(0)))  # (1, 2*T, 32)
 
-            max_len = max(p.shape[1] for p in packed)
-            packed = [
-                torch.nn.functional.pad(p, (0, 0, 0, max_len - p.shape[1]))
-                for p in packed
-            ]
-            return torch.cat(packed, dim=0).to("cpu", self.torch_dtype)
-        finally:
-            self.audio_vae.to("cpu")
-            flush()
-
-    @torch.no_grad()
-    def get_additional_latents_for_cache(self, file_item) -> Dict[str, torch.Tensor]:
-        """Latent-cache hook for paired V2V and Ref2VA media.
-
-        Values are returned without a batch axis and on CPU so the generic
-        safetensors cache never retains VAE outputs in VRAM.
-        """
-        state: Dict[str, torch.Tensor] = {}
-
-        def encode_visual(tensor: torch.Tensor) -> torch.Tensor:
-            return self.encode_images(
-                [tensor], device="cpu", dtype=self.torch_dtype
-            ).squeeze(0)
-
-        def encode_soundtrack(audio_data: Optional[dict]) -> Optional[torch.Tensor]:
-            if audio_data is None:
-                return None
-            return self.encode_audio([audio_data]).squeeze(0).to("cpu")
-
-        if file_item.has_h3_v2v:
-            if file_item.h3_v2v_tensor is None:
-                raise ValueError("MiniMax H3 V2V source media was not loaded")
-            state["h3_v2v_video_latent"] = encode_visual(file_item.h3_v2v_tensor)
-            audio = encode_soundtrack(file_item.h3_v2v_audio_data)
-            if audio is not None:
-                state["h3_v2v_audio_latent"] = audio
-
-        for index, (tensor, audio_data) in enumerate(
-            zip(file_item.h3_reference_tensors, file_item.h3_reference_audio_data)
-        ):
-            state[f"h3_reference_{index}_video_latent"] = encode_visual(tensor)
-            audio = encode_soundtrack(audio_data)
-            if audio is not None:
-                state[f"h3_reference_{index}_audio_latent"] = audio
-        return state
-
-    @staticmethod
-    def _with_batch_axis(tensor: Optional[torch.Tensor], expected_ndim: int):
-        if tensor is None:
-            return None
-        return tensor.unsqueeze(0) if tensor.ndim == expected_ndim - 1 else tensor
-
-    def _reference_condition_rows(
-        self,
-        batch: "DataLoaderBatchDTO",
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> Tuple[
-        Tuple[ReferenceBlockLayout, ...],
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
-    ]:
-        """Resolve cached or raw Ref2VA media into packed condition rows."""
-        has_v2v = any(item.has_h3_v2v for item in batch.file_items)
-        has_refs = any(item.has_h3_references for item in batch.file_items)
-        if not has_v2v and not has_refs:
-            return (), None, None
-        if self.partition != "ref2va":
-            raise ValueError(
-                "H3 V2V/reference datasets require model.model_kwargs.partition: ref2va"
-            )
-        if len(batch.file_items) != 1:
-            raise ValueError("MiniMax H3 Ref2VA currently requires batch_size: 1")
-
-        entries: List[Tuple[torch.Tensor, Optional[torch.Tensor], bool]] = []
-
-        if has_v2v:
-            cached = (
-                batch.h3_v2v_latents[0]
-                if batch.h3_v2v_latents is not None
-                else None
-            )
-            if cached is not None:
-                video = self._with_batch_axis(cached["video_latent"], 5)
-                audio = self._with_batch_axis(cached.get("audio_latent"), 3)
-            else:
-                video = self.encode_images(
-                    [batch.h3_v2v_tensors[0]],
-                    device="cpu",
-                    dtype=self.torch_dtype,
-                )
-                raw_audio = batch.h3_v2v_audio_data[0]
-                audio = None if raw_audio is None else self.encode_audio([raw_audio]).to("cpu")
-            entries.append((video, audio, True))
-
-        if has_refs:
-            cached_refs = (
-                batch.h3_reference_latents[0]
-                if batch.h3_reference_latents is not None
-                else None
-            )
-            if cached_refs:
-                for cached in cached_refs:
-                    video = self._with_batch_axis(cached["video_latent"], 5)
-                    audio = self._with_batch_axis(cached.get("audio_latent"), 3)
-                    entries.append((video, audio, int(video.shape[2]) > 1))
-            else:
-                for tensor, raw_audio, is_video in zip(
-                    batch.h3_reference_tensors[0],
-                    batch.h3_reference_audio_data[0],
-                    batch.h3_reference_is_video[0],
-                ):
-                    video = self.encode_images(
-                        [tensor], device="cpu", dtype=self.torch_dtype
-                    )
-                    audio = (
-                        None
-                        if raw_audio is None
-                        else self.encode_audio([raw_audio]).to("cpu")
-                    )
-                    entries.append((video, audio, is_video))
-
-        layouts: List[ReferenceBlockLayout] = []
-        video_rows, audio_rows = [], []
-        for video, audio, is_video in entries:
-            video = video.to(device, torch.float32)
-            visual_noise = torch.randn_like(video)
-            video = (
-                KEYFRAME_NOISE_AUG_T * video
-                + (1.0 - KEYFRAME_NOISE_AUG_T) * visual_noise
-            )
-            video_rows.append(patchify_video_latents(video).to(dtype))
-
-            audio_frames = 0
-            if audio is not None:
-                audio = audio.to(device, torch.float32)
-                if REFERENCE_AUDIO_NOISE_AUG_T < 1.0:
-                    audio_noise = torch.randn_like(audio)
-                    audio = (
-                        REFERENCE_AUDIO_NOISE_AUG_T * audio
-                        + (1.0 - REFERENCE_AUDIO_NOISE_AUG_T) * audio_noise
-                    )
-                audio_rows.append(audio.to(dtype))
-                audio_frames = audio.shape[1] // packing.AUDIO_CHANNELS
-
-            if is_video:
-                kind = "video_audio" if audio_frames else "video"
-            else:
-                kind = "image"
-            layouts.append(
-                ReferenceBlockLayout(
-                    kind=kind,
-                    latent_frames=video.shape[2],
-                    latent_height=video.shape[3],
-                    latent_width=video.shape[4],
-                    audio_frames=audio_frames,
-                )
-            )
-
-        return (
-            tuple(layouts),
-            torch.cat(video_rows, dim=1) if video_rows else None,
-            torch.cat(audio_rows, dim=1) if audio_rows else None,
-        )
+        max_len = max(p.shape[1] for p in packed)
+        packed = [
+            torch.nn.functional.pad(p, (0, 0, 0, max_len - p.shape[1])) for p in packed
+        ]
+        return torch.cat(packed, dim=0).to(self.device_torch, self.torch_dtype)
 
     # ------------------------------------------------------------------
     # Training forward
@@ -1158,6 +867,19 @@ class MinimaxH3Model(BaseModel):
     ):
         device = self.device_torch
         dtype = self.torch_dtype
+        if self.model.device == torch.device("cpu"):
+            self.model.to(device)
+
+        # a grad-enabled prediction is the primary (loss carrying) one unless
+        # the trainer declared a secondary slot on the batch (prior /
+        # guidance-unconditional / preservation passes). Trainers that make
+        # several grad predictions per step (e.g. turbo rollouts) get one
+        # primary per prediction, last writer wins.
+        is_primary_pred = (
+            torch.is_grad_enabled()
+            and batch is not None
+            and batch.audio_pred_slot is None
+        )
 
         batch_size, _, t_lat, h_lat, w_lat = latent_model_input.shape
 
@@ -1171,19 +893,14 @@ class MinimaxH3Model(BaseModel):
             t_v = 1.0 - sigma_v
             t_a = 1.0 - sigma_a
 
-            # --- FL2VA first/last keyframe conditioning rows ---------------
+            # --- i2v first-frame conditioning rows -------------------------
             do_i2v = (
                 batch is not None
                 and batch.dataset_config.do_i2v
                 and getattr(batch, "num_frames", 1) > 1
             )
-            anchors: List[str] = []
-            keyframe_rows: List[torch.Tensor] = []
+            cond_rows = None
             if do_i2v:
-                if self.partition != "fl2va":
-                    raise ValueError(
-                        "Ref2VA cannot be combined with FL2VA first/last keyframes"
-                    )
                 if batch.first_frame_latents is not None:
                     first_latents = batch.first_frame_latents.to(device, torch.float32)
                 else:
@@ -1199,65 +916,12 @@ class MinimaxH3Model(BaseModel):
                     )
                 if first_latents.ndim == 4:
                     first_latents = first_latents.unsqueeze(2)
-                first_latents = first_latents.to(device, torch.float32)
                 cond_noise = torch.randn_like(first_latents)
                 first_latents = (
                     KEYFRAME_NOISE_AUG_T * first_latents
                     + (1.0 - KEYFRAME_NOISE_AUG_T) * cond_noise
                 )
-                anchors.append("first")
-                keyframe_rows.append(patchify_video_latents(first_latents).to(dtype))
-
-                if batch.dataset_config.i2v_last_frame:
-                    if batch.last_frame_latents is not None:
-                        last_latents = batch.last_frame_latents.to(
-                            device, torch.float32
-                        )
-                    else:
-                        frames = batch.tensor
-                        if frames is None or frames.ndim != 5:
-                            raise ValueError(
-                                "i2v_last_frame needs the final video frame; no "
-                                "cached last_frame_latents or raw video tensor"
-                            )
-                        last_latents = self.encode_keyframe_latents(
-                            frames[:, -1].unsqueeze(2).to(device)
-                        )
-                    if last_latents.ndim == 4:
-                        last_latents = last_latents.unsqueeze(2)
-                    last_latents = last_latents.to(device, torch.float32)
-                    last_noise = torch.randn_like(last_latents)
-                    last_latents = (
-                        KEYFRAME_NOISE_AUG_T * last_latents
-                        + (1.0 - KEYFRAME_NOISE_AUG_T) * last_noise
-                    )
-                    anchors.append("last")
-                    keyframe_rows.append(
-                        patchify_video_latents(last_latents).to(dtype)
-                    )
-
-            reference_layouts: Tuple[ReferenceBlockLayout, ...] = ()
-            reference_video_rows = None
-            reference_audio_rows = None
-            if batch is not None:
-                (
-                    reference_layouts,
-                    reference_video_rows,
-                    reference_audio_rows,
-                ) = self._reference_condition_rows(batch, device, dtype)
-            if self.partition == "ref2va" and not reference_layouts:
-                raise ValueError(
-                    "The Ref2VA checkpoint requires h3_v2v_path or h3_reference_path"
-                )
-
-            condition_video_parts = list(keyframe_rows)
-            if reference_video_rows is not None:
-                condition_video_parts.append(reference_video_rows)
-            cond_rows = (
-                torch.cat(condition_video_parts, dim=1)
-                if condition_video_parts
-                else None
-            )
+                cond_rows = patchify_video_latents(first_latents).to(dtype)
 
             # --- audio rows -------------------------------------------------
             if batch is not None and getattr(batch, "num_frames", None):
@@ -1266,10 +930,20 @@ class MinimaxH3Model(BaseModel):
                 # invert 17n+5 -> 5n+2 from the latent frame count
                 num_frames = (t_lat - 2) // 5 * 17 + 5 if t_lat > 1 else 1
             a_lat = packing.audio_latent_num_frames(num_frames)
+            # audio only trains for video batches from datasets that asked for
+            # it. Cached latents can carry audio after do_audio was turned off,
+            # and image (single frame) batches must never pick up a soundtrack
+            # — either way it rides along as silence with no audio loss.
+            do_audio = (
+                batch is not None
+                and batch.dataset_config is not None
+                and batch.dataset_config.do_audio
+                and num_frames > 1
+            )
             raw_audio = None
-            if batch is not None and batch.audio_latents is not None:
+            if do_audio and batch.audio_latents is not None:
                 raw_audio = batch.audio_latents.to(device, torch.float32)
-            elif batch is not None and getattr(batch, "audio_data", None) is not None:
+            elif do_audio and getattr(batch, "audio_data", None) is not None:
                 raw_audio = self.encode_audio(batch.audio_data).to(
                     device, torch.float32
                 )
@@ -1283,16 +957,33 @@ class MinimaxH3Model(BaseModel):
                     raw_audio = torch.nn.functional.pad(
                         raw_audio, (0, 0, 0, expected_rows - raw_audio.shape[1])
                     )
-                audio_noise = torch.randn_like(raw_audio)
-                # model predicts clean - noise; audio_pred is negated below so
-                # the stored target follows ai-toolkit's noise - clean
-                batch.audio_target = (audio_noise - raw_audio).detach()
+                # the audio noise is drawn once per step and shared by every
+                # pass (prior, primary, cfg/guidance, preservation) so they all
+                # see the same soundtrack and the stored target keeps matching
+                if (
+                    batch.audio_noise is not None
+                    and batch.audio_noise.shape == raw_audio.shape
+                ):
+                    audio_noise = batch.audio_noise.to(device, torch.float32)
+                else:
+                    audio_noise = torch.randn_like(raw_audio)
+                    batch.audio_noise = audio_noise
                 audio_rows = (1.0 - sa) * raw_audio + sa * audio_noise
-                # expose what audio perceptual losses need to rebuild the
-                # clean estimate (x0 = noisy - sigma_a * pred) and its target
                 batch.audio_latents = raw_audio
-                batch.audio_noisy = audio_rows
-                batch.audio_sigma = sigma_a
+                if batch.audio_target is None:
+                    # model predicts clean - noise; audio_pred is negated below
+                    # so the stored target follows ai-toolkit's noise - clean.
+                    # With the shared noise this is the same value on every
+                    # pass, so first writer is fine (and it keeps a guidance
+                    # extrapolated target from being overwritten).
+                    batch.audio_target = (audio_noise - raw_audio).detach()
+                if is_primary_pred:
+                    # expose what audio perceptual losses need to rebuild the
+                    # clean estimate (x0 = noisy - sigma_a * pred). Tied to the
+                    # primary pass so they always match audio_pred, even when a
+                    # trainer makes primary predictions at several sigmas.
+                    batch.audio_noisy = audio_rows
+                    batch.audio_sigma = sigma_a
             else:
                 # no soundtrack: silence (zeros) noised at the audio sigma
                 # rides along without contributing to the loss
@@ -1306,6 +997,7 @@ class MinimaxH3Model(BaseModel):
 
             # --- packed layout (per item: text lengths differ) --------------
             layouts = []
+            anchors = ("first",) if cond_rows is not None else ()
             for i in range(batch_size):
                 layouts.append(
                     build_packed_sequence(
@@ -1314,8 +1006,7 @@ class MinimaxH3Model(BaseModel):
                         latent_height=h_lat,
                         latent_width=w_lat,
                         num_audio_latents=a_lat,
-                        keyframe_anchors=tuple(anchors),
-                        reference_blocks=reference_layouts,
+                        keyframe_anchors=anchors,
                     )
                 )
             (
@@ -1326,21 +1017,15 @@ class MinimaxH3Model(BaseModel):
                 text_indices,
                 _,
             ) = pad_layouts_to_batch(layouts)
-            num_cond_video = layouts[0].num_condition_video_rows
-            num_cond_audio = layouts[0].num_condition_audio_rows
+            num_cond = layouts[0].num_condition_video_rows
 
             # per-row timesteps: text/video rows at t_v, audio rows at t_a,
             # condition rows pinned at max(t_v, 0.999)
             row_t = t_v.view(-1, 1).expand(-1, token_tags.shape[1]).clone()
             row_t[:, audio_indices] = t_a.view(-1, 1)
-            if num_cond_video > 0:
+            if num_cond > 0:
                 cond_t = torch.maximum(t_v, torch.full_like(t_v, KEYFRAME_NOISE_AUG_T))
-                row_t[:, video_indices[:num_cond_video]] = cond_t.view(-1, 1)
-            if num_cond_audio > 0:
-                cond_t = torch.maximum(
-                    t_a, torch.full_like(t_a, REFERENCE_AUDIO_NOISE_AUG_T)
-                )
-                row_t[:, audio_indices[:num_cond_audio]] = cond_t.view(-1, 1)
+                row_t[:, video_indices[:num_cond]] = cond_t.view(-1, 1)
 
             # pad text embeds to the batch max length
             max_text = int(text_indices.shape[0])
@@ -1359,15 +1044,6 @@ class MinimaxH3Model(BaseModel):
             ).to(dtype)
             if cond_rows is not None:
                 video_rows = torch.cat([cond_rows, video_rows], dim=1)
-            if reference_audio_rows is not None:
-                audio_rows = torch.cat(
-                    [reference_audio_rows, audio_rows.to(dtype)], dim=1
-                )
-
-        # Frozen encoders have now returned to CPU. Activate the trainable DiT
-        # only after all condition latents and prompt inputs are prepared.
-        if self.model.device == torch.device("cpu"):
-            self.model.to(device)
 
         video_pred, audio_pred = self.model(
             hidden_states=video_rows,
@@ -1383,9 +1059,12 @@ class MinimaxH3Model(BaseModel):
 
         if batch is not None and batch.audio_target is not None:
             # flip to ai-toolkit's noise - clean convention
-            batch.audio_pred = -audio_pred[:, num_cond_audio:]
+            if is_primary_pred:
+                batch.audio_pred = -audio_pred
+            else:
+                batch.set_secondary_audio_pred(-audio_pred)
 
-        video_pred = video_pred[:, num_cond_video:]
+        video_pred = video_pred[:, num_cond:]
         noise_pred = unpatchify_video_tokens(video_pred, t_lat, h_lat, w_lat)
         return -noise_pred
 

@@ -61,6 +61,7 @@ This fork is optimized for advanced LoRA/DoRA training on newer transformer imag
 - [circlestone-labs/Anima-Base-v1.0-Diffusers](https://huggingface.co/circlestone-labs/Anima-Base-v1.0-Diffusers) (Anima)
 - [krea/Krea-2-Raw](https://huggingface.co/krea/Krea-2-Raw) (Krea 2)
 - [krea/Krea-2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) (Krea 2 Turbo)
+- [microsoft/Mage-Flow-Base](https://huggingface.co/microsoft/Mage-Flow-Base) (Mage-Flow)
 
 ### Instruction / Edit
 - [black-forest-labs/FLUX.1-Kontext-dev](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) (FLUX.1-Kontext-dev)
@@ -71,6 +72,7 @@ This fork is optimized for advanced LoRA/DoRA training on newer transformer imag
 - [Boogu/Boogu-Image-0.1-Edit](https://huggingface.co/Boogu/Boogu-Image-0.1-Edit) (Boogu Image Edit)
 - [krea/Krea-2-Raw](https://huggingface.co/krea/Krea-2-Raw) (Krea 2 Edit Training)
 - [krea/Krea-2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) (Krea 2 Turbo Edit Training)
+- [microsoft/Mage-Flow-Edit-Base](https://huggingface.co/microsoft/Mage-Flow-Edit-Base) (Mage-Flow Edit)
 
 ### Video
 - [Wan-AI/Wan2.1-T2V-1.3B-Diffusers](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) (Wan 2.1 1.3B)
@@ -82,6 +84,7 @@ This fork is optimized for advanced LoRA/DoRA training on newer transformer imag
 - [Wan-AI/Wan2.2-TI2V-5B-Diffusers](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers) (Wan 2.2 TI2V 5B)
 - [Lightricks/LTX-2](https://huggingface.co/Lightricks/LTX-2) (LTX-2)
 - [Lightricks/LTX-2.3](https://huggingface.co/Lightricks/LTX-2.3) (LTX-2.3)
+- [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) (MiniMaxAI/MiniMax-H3)
 
 ### Audio
 - [ACE-Step/Ace-Step1.5](https://huggingface.co/ACE-Step/Ace-Step1.5) (Ace Step 1.5)
@@ -91,6 +94,57 @@ This fork is optimized for advanced LoRA/DoRA training on newer transformer imag
 - [lodestones/Zeta-Chroma](https://huggingface.co/lodestones/Zeta-Chroma) (Zeta Chroma)
 
 ## Installation
+
+### Install with the AI Toolkit Manager (experimental)
+
+The recommended way to install and run AI Toolkit is with the **AI Toolkit
+Manager**, built into this repo. The manager detects your hardware and sets up
+the right PyTorch build, creates the python environment, and grabs local copies
+of Node.js and FFmpeg — everything stays inside the ai-toolkit folder, nothing
+is installed system-wide. On every launch the manager checks for updates and
+applies them (your local changes are never overwritten — if you have modified
+files, the update is skipped with a warning), then starts the UI at
+`http://localhost:8675`.
+
+The manager is still **experimental** — please let me know if you have any
+issues with it. The manual instructions below still work if you prefer them
+or run into problems.
+
+The only requirement is **git** (on Windows the manager can even fetch a
+portable git for updates, but you need one installed to clone the repo first).
+
+```bash
+git clone https://github.com/ostris/ai-toolkit.git
+cd ai-toolkit
+```
+
+Then start the manager with the script for your platform:
+
+Linux:
+```bash
+chmod +x run_linux.sh
+./run_linux.sh
+```
+
+MacOS (Apple Silicon, experimental):
+```bash
+chmod +x run_mac.zsh
+./run_mac.zsh
+```
+
+Windows: double-click `run_windows.bat` (or run it from a terminal).
+
+You can also use the manager directly from a terminal (handy on headless
+servers):
+
+```bash
+python3 -m manager install   # first-time setup
+python3 -m manager update    # pull updates + sync dependencies
+python3 -m manager launch    # start the UI
+python3 -m manager doctor    # diagnose problems
+```
+
+### Manual installation
 
 Requirements:
 - python >=3.10 (3.12 recommended)
@@ -114,7 +168,7 @@ cd ai-toolkit
 python3 -m venv venv
 source venv/bin/activate
 # install torch first
-pip3 install --no-cache-dir torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128
+pip3 install --no-cache-dir torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu130
 pip3 install -r requirements.txt
 ```
 
@@ -130,22 +184,8 @@ git clone https://github.com/ostris/ai-toolkit.git
 cd ai-toolkit
 python -m venv venv
 .\venv\Scripts\activate
-pip install --no-cache-dir torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128
+pip install --no-cache-dir torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt
-```
-
-MacOS:
-
-Experimental support for Silicon Macs is available. I do not have a Mac with enough RAM to fully test this
-so please let me know if there are issues. There is a convience script to install and run on MacOS 
-locates at `./run_mac.zsh` that will install the dependencies locally and run the UI. To run this, 
-do the following:
-
-```bash
-git clone https://github.com/ostris/ai-toolkit.git
-cd ai-toolkit
-chmod +x run_mac.zsh
-./run_mac.zsh
 ```
 
 

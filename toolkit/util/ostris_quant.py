@@ -32,8 +32,9 @@ class OstrisQuantizer:
     # get_ostris_quantizer); quantized saves need it to restore the backend
     qtype: Optional[str] = None
 
-    # Backends that quantize in the weight's own dtype can set this false to
-    # avoid an additional full-size float32 copy while processing each layer.
+    # backends that quantize in the weight's own dtype can set this False to
+    # receive the raw weight tensor in quantize_ instead of a float32 copy,
+    # avoiding a 2x-weight-size allocation during model quantization
     wants_fp32_weight: bool = True
 
     def can_quantize(self, module: torch.nn.Linear) -> bool:
@@ -51,7 +52,10 @@ class OstrisQuantizer:
         raise NotImplementedError
 
     def dequantize_folded(self, module: "OstrisLinear") -> torch.Tensor:
-        """Return an equivalent weight with activation-side transforms folded in."""
+        """The full weight with any ACTIVATION-side transform folded in, i.e. a
+        weight that computes the same output on raw activations. Used when
+        re-quantizing into a different backend (which won't know about this
+        backend's activation transforms). Default: same as dequantize."""
         return self.dequantize(module)
 
     def requantize_(self, module: "OstrisLinear", fp_weight: torch.Tensor) -> None:
@@ -181,10 +185,11 @@ class OstrisLazyWeight(torch.Tensor):
 def get_ostris_quantizer(qtype: str) -> Optional[OstrisQuantizer]:
     """Resolve a qtype string to a quantizer backend instance, or None if the qtype
     does not belong to a custom backend. Add new backends here."""
-    from toolkit.util.orbit_quant import ORBIT_QTYPES, OrbitQuantizer
-    from toolkit.util.orbit_vq_quant import ORBIT_VQ_QTYPES, OrbitVQQuantizer
     from toolkit.util.convrot_quant import CONVROT_QTYPES, get_convrot_quantizer
     from toolkit.util.nvfp4_quant import NVFP4_QTYPES, Nvfp4Quantizer
+    from toolkit.util.orbit_quant import ORBIT_QTYPES, OrbitQuantizer
+    from toolkit.util.orbit_vq_quant import ORBIT_VQ_QTYPES, OrbitVQQuantizer
+    from toolkit.util.uintx_quant import UINTX_QTYPES, UIntXQuantizer
 
     quantizer = None
     if qtype in ORBIT_QTYPES:
@@ -195,6 +200,8 @@ def get_ostris_quantizer(qtype: str) -> Optional[OstrisQuantizer]:
         quantizer = get_convrot_quantizer(qtype)
     elif qtype in NVFP4_QTYPES:
         quantizer = Nvfp4Quantizer()
+    elif qtype in UINTX_QTYPES:
+        quantizer = UIntXQuantizer(UINTX_QTYPES[qtype])
     if quantizer is not None:
         # quantized saves read this back to restore the backend on load
         quantizer.qtype = qtype
@@ -329,17 +336,24 @@ def convert_linear_to_ostris(
     """Quantize an nn.Linear in place (class swap). Returns True if the module was
     converted (or already was), False if it is not a candidate.
 
-    Pre-quantized modules are kept when their qtype already matches. When it
-    differs, only one layer is dequantized and re-quantized at a time."""
+    A module that is ALREADY quantized (e.g. loaded from a pre-quantized
+    checkpoint) is re-quantized into the requested backend when the qtypes
+    differ: the weight is dequantized and re-quantized layer by layer, so the
+    full-precision transient never exceeds one layer's weight. Same qtype is
+    a no-op (the shipped quantization is kept)."""
     if isinstance(module, OstrisLinear):
         current_qtype = getattr(module.ostris_quantizer, "qtype", None)
         if quantizer.qtype is None or current_qtype == quantizer.qtype:
             return True
         if not quantizer.can_quantize(module):
-            return True
+            return True  # keep the existing quantization rather than dropping it
+        # fold any activation-side transform (e.g. an AWQ pre_quant_scale) into
+        # the weight so the new backend computes the same function on raw inputs
         weight = module.ostris_quantizer.dequantize_folded(module).to(
             module.ostris_orig_dtype
         )
+        # backend state lives exclusively in buffers; leftover scalar attrs from
+        # the old backend are inert
         module._buffers.clear()
         if quantizer.wants_fp32_weight:
             quantizer.quantize_(module, weight.to(torch.float32))

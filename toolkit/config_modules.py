@@ -76,29 +76,6 @@ class SampleItem:
         # only for models that support it, (qwen image edit 2509 for now)
         self.do_cfg_norm: bool = kwargs.get('do_cfg_norm', False)
 
-
-class ComfySampleConfig:
-    def __init__(self, **kwargs):
-        self.enabled: bool = kwargs.get('enabled', False)
-        self.api_url: str = kwargs.get('api_url', 'http://127.0.0.1:8188')
-        self.workflow_path: str = kwargs.get('workflow_path', 'config/comfy_templates/krea2_lora_sample.json.njk')
-        self.model: str = kwargs.get('model', '')
-        self.vae: str = kwargs.get('vae', '')
-        self.audio_vae: str = kwargs.get('audio_vae', '')
-        self.text_encoder: str = kwargs.get('text_encoder', '')
-        self.sampler: str = kwargs.get('sampler', 'euler')
-        self.scheduler: str = kwargs.get('scheduler', 'simple')
-        self.inference_lora: str = kwargs.get('inference_lora', '')
-        self.inference_lora_strength: float = kwargs.get('inference_lora_strength', 1.0)
-        self.send_prompts_as_batch: bool = kwargs.get('send_prompts_as_batch', False)
-        self.run_in_background: bool = kwargs.get('run_in_background', False)
-        self.training_lora_path_replace_from: str = kwargs.get('training_lora_path_replace_from', '')
-        self.training_lora_path_replace_to: str = kwargs.get('training_lora_path_replace_to', '')
-        self.output_format: str = kwargs.get('output_format', 'webp_with_json')
-        self.output_quality: str = kwargs.get('output_quality', 'high')
-        self.timeout: int = kwargs.get('timeout', 30 * 60)
-
-
 class SampleConfig:
     def __init__(self, **kwargs):
         self.sampler: str = kwargs.get('sampler', 'ddpm')
@@ -115,7 +92,6 @@ class SampleConfig:
         self.guidance_rescale = kwargs.get('guidance_rescale', 0.0)
         self.ext: ImgExt = kwargs.get('format', 'jpg')
         self.adapter_conditioning_scale = kwargs.get('adapter_conditioning_scale', 1.0)
-        self.comfy = ComfySampleConfig(**kwargs.get('comfy', {}))
         self.refiner_start_at = kwargs.get('refiner_start_at',
                                            0.5)  # step to start using refiner on sample if it exists
         self.extra_values = kwargs.get('extra_values', [])
@@ -187,7 +163,7 @@ class LoRMConfig:
         })
 
 
-NetworkType = Literal['lora', 'locon', 'lorm', 'lokr', 'dora']
+NetworkType = Literal['lora', 'locon', 'lorm', 'lokr']
 
 
 class NetworkConfig:
@@ -209,7 +185,7 @@ class NetworkConfig:
         self.linear_alpha: float = kwargs.get('linear_alpha', self.alpha)
         self.conv_alpha: float = kwargs.get('conv_alpha', self.conv)
         self.dropout: Union[float, None] = kwargs.get('dropout', None)
-        self.network_kwargs: dict = kwargs.get('network_kwargs') or {}
+        self.network_kwargs: dict = kwargs.get('network_kwargs', {})
 
         self.lorm_config: Union[LoRMConfig, None] = None
         lorm = kwargs.get('lorm', None)
@@ -225,7 +201,7 @@ class NetworkConfig:
 
         self.transformer_only = kwargs.get('transformer_only', True)
         
-        self.lokr_full_rank = kwargs.get('lokr_full_rank', False)
+        self.lokr_full_rank = kwargs.get('lokr_full_rank', True)
         if self.lokr_full_rank and self.type.lower() == 'lokr':
             self.linear = 9999999999
             self.linear_alpha = 9999999999
@@ -239,16 +215,15 @@ class NetworkConfig:
         
         # for multi stage models
         self.split_multistage_loras = kwargs.get('split_multistage_loras', True)
-        self.save_magnitude_less_lora: bool = kwargs.get('save_magnitude_less_lora', False)
         
         # ramtorch, doesn't work yet
         self.layer_offloading = kwargs.get('layer_offloading', False)
-
+        
         # start from a pretrained lora
         self.pretrained_lora_path = kwargs.get('pretrained_lora_path', None)
-
+        
         # will create diffirential full weight modules for layers not conv/linear
-        # only useful in very special cases.
+        # only useful in very special cases. 
         self.all_layers = kwargs.get('all_layers', False)
 
 
@@ -615,6 +590,11 @@ class TrainConfig:
         self.do_guidance_loss = kwargs.get('do_guidance_loss', False)
         self.guidance_loss_target: Union[int, List[int, int]] = kwargs.get('guidance_loss_target', 3.0)
         self.do_guidance_loss_cfg_zero: bool = kwargs.get('do_guidance_loss_cfg_zero', False)
+        # 'constant' uses guidance_loss_target as is. 'sigma' decays the target
+        # toward 1.0 as sigma falls (effective = 1 + (target - 1) * sigma) so the
+        # extrapolation never amplifies the unpredictable fresh-noise term at low
+        # sigma. Needed for guidance-distilled models with no guidance embedding.
+        self.guidance_loss_schedule: str = kwargs.get('guidance_loss_schedule', 'sigma')
         self.unconditional_prompt: str = kwargs.get('unconditional_prompt', '')
         if isinstance(self.guidance_loss_target, tuple):
             self.guidance_loss_target = list(self.guidance_loss_target)
@@ -640,7 +620,7 @@ class TrainConfig:
             self.validation_config: ValidationConfig = ValidationConfig(**validation)
 
 
-ModelArch = Literal['sd1', 'sd2', 'sd3', 'sdxl', 'pixart', 'pixart_sigma', 'auraflow', 'flux', 'flex1', 'flex2', 'lumina2', 'vega', 'ssd', 'wan21', 'anima', 'minimax_h3']
+ModelArch = Literal['sd1', 'sd2', 'sd3', 'sdxl', 'pixart', 'pixart_sigma', 'auraflow', 'flux', 'flex1', 'flex2', 'lumina2', 'vega', 'ssd', 'wan21', 'anima']
 
 
 class ModelConfig:
@@ -706,10 +686,6 @@ class ModelConfig:
         self.quantize_te = kwargs.get("quantize_te", self.quantize)
         self.qtype = kwargs.get("qtype", "qfloat8")
         self.qtype_te = kwargs.get("qtype_te", "qfloat8")
-        self.cache_quantized_models = kwargs.get("cache_quantized_models", True)
-        self.quantized_model_cache_dir = kwargs.get(
-            "quantized_model_cache_dir", "models/.quantized_training_cache"
-        )
         self.low_vram = kwargs.get("low_vram", False)
         self.attn_masking = kwargs.get("attn_masking", False)
         if self.attn_masking and not self.is_flux:
@@ -740,11 +716,15 @@ class ModelConfig:
         if self.layer_offloading and self.qtype_te == "qfloat8":
             self.qtype_te = "float8"
             
-        # Mac mps only works with torachao uint
+        # MPS has no fp8 dtype, so qfloat8 has to become an 8 bit integer format.
+        # convrot8, not torchao int8: measured on an M3 against bf16, convrot8
+        # trains at 0.79x and holds 1.04 GB of resident weight where torchao int8
+        # trains at 0.52x and holds 1.21 GB, and convrot8 quantizes in 19ms
+        # against 2.8s. See scripts/test_quantizations.py --device mps.
         if torch.backends.mps.is_available() and self.qtype == "qfloat8":
-            self.qtype = "int8"
+            self.qtype = "convrot8"
         if torch.backends.mps.is_available() and self.qtype_te == "qfloat8":
-            self.qtype_te = "int8"
+            self.qtype_te = "convrot8"
         
         # 0 is off and 1.0 is 100% of the layers
         self.layer_offloading_transformer_percent = kwargs.get("layer_offloading_transformer_percent", 1.0)
@@ -907,7 +887,7 @@ class SliderConfig:
         self.resolutions: List[List[int]] = kwargs.get('resolutions', [[512, 512]])
         self.prompt_file: str = kwargs.get('prompt_file', None)
         self.prompt_tensors: str = kwargs.get('prompt_tensors', None)
-        self.batch_full_slide: bool = kwargs.get('batch_full_slide', False)
+        self.batch_full_slide: bool = kwargs.get('batch_full_slide', True)
         self.use_adapter: bool = kwargs.get('use_adapter', None)  # depth
         self.adapter_img_dir = kwargs.get('adapter_img_dir', None)
         self.low_ram = kwargs.get('low_ram', False)
@@ -977,7 +957,7 @@ class DatasetConfig:
         # pull a random control image from the same folder as the image. Useful for folder grouped pairs.
         self.control_from_same_folder: bool = kwargs.get('control_from_same_folder', False)
         self.num_controls_from_same_folder: int = kwargs.get('num_controls_from_same_folder', 1)
-
+        
         if self.control_path == '':
             self.control_path = None
         
@@ -1019,6 +999,9 @@ class DatasetConfig:
         self.cache_latents: bool = kwargs.get('cache_latents', False)
         # cache latents to disk will store them on disk. If both are true, it will save to disk, but keep in memory
         self.cache_latents_to_disk: bool = kwargs.get('cache_latents_to_disk', False)
+        # cache tensors to disk. Useful for saving video files tensors to the disk so we have the clean pixelspace versions of video and audio
+        self.cache_tensors_to_disk: bool = kwargs.get('cache_tensors_to_disk', False)
+        
         self.cache_clip_vision_to_disk: bool = kwargs.get('cache_clip_vision_to_disk', False)
         self.cache_text_embeddings: bool = kwargs.get('cache_text_embeddings', False)
         self.load_image_when_caching_latents: bool = kwargs.get('load_image_when_caching_latents', False)
@@ -1055,6 +1038,8 @@ class DatasetConfig:
 
         self.num_workers: int = kwargs.get('num_workers', 2)
         self.prefetch_factor: int = kwargs.get('prefetch_factor', 2)
+        # threads used to prep (decode/resize) items ahead of the VAE while caching latents
+        self.cache_latents_num_workers: int = kwargs.get('cache_latents_num_workers', min(6, os.cpu_count() or 1))
         self.extra_values: List[float] = kwargs.get('extra_values', [])
         self.square_crop: bool = kwargs.get('square_crop', False)
         # apply same augmentations to control images. Usually want this true unless special case
@@ -1091,26 +1076,7 @@ class DatasetConfig:
         # if true, will use a fask method to get image sizes. This can result in errors. Do not use unless you know what you are doing
         self.fast_image_size: bool = kwargs.get('fast_image_size', False)
         
-        self.do_i2v: bool = kwargs.get('do_i2v', True)  # do image to video on models that are both t2i and i2v capable
-        # MiniMax H3 paired conditioning.  ``h3_v2v_path`` is a directory of
-        # source videos matched to target clips by basename.  It is kept
-        # distinct from optional reference media, although both use H3's
-        # native full-video condition stream.  Each configured reference
-        # directory may contain an image or video and is likewise paired by
-        # basename.  Reference videos use H3's 17*k + 5 temporal grid.
-        self.i2v_last_frame: bool = kwargs.get('i2v_last_frame', False)
-        self.h3_v2v_path: Union[str, None] = kwargs.get('h3_v2v_path', None)
-        self.h3_v2v_audio: bool = kwargs.get('h3_v2v_audio', True)
-        self.h3_reference_path: Union[str, List[str], None] = kwargs.get('h3_reference_path', None)
-        self.h3_reference_num_frames: int = int(kwargs.get('h3_reference_num_frames', 22))
-        self.h3_reference_fps: int = int(kwargs.get('h3_reference_fps', 24))
-        self.h3_reference_audio: bool = kwargs.get('h3_reference_audio', True)
-        if self.h3_v2v_path == '':
-            self.h3_v2v_path = None
-        if self.h3_reference_path == '':
-            self.h3_reference_path = None
-        if isinstance(self.h3_reference_path, list) and len(self.h3_reference_path) == 0:
-            self.h3_reference_path = None
+        self.do_i2v: bool = kwargs.get('do_i2v', False)  # do image to video on models that are both t2i and i2v capable
         self.do_audio: bool = kwargs.get('do_audio', False) # load audio from video files for models that support it
         self.audio_preserve_pitch: bool = kwargs.get('audio_preserve_pitch', False) # preserve pitch when stretching audio to fit num_frames
         self.audio_normalize: bool = kwargs.get('audio_normalize', False) # normalize audio volume levels when loading
@@ -1274,6 +1240,58 @@ class GenerateImageConfig:
         filename += '.txt'
         # join with folder
         return os.path.join(self.output_folder, filename)
+
+    def save_image_atomic(self, image, count: int = 0, max_count=0):
+        # write into a hidden tmp subfolder, then atomically move into place so
+        # watchers (UI/CDN) never see and cache a partially written file. Wraps
+        # self.save_image so it also covers models that replace that function.
+        real_folder = self.output_folder
+        tmp_folder = os.path.join(real_folder, '.tmp')
+        os.makedirs(tmp_folder, exist_ok=True)
+        self.output_folder = tmp_folder
+        try:
+            self.save_image(image, count, max_count)
+        finally:
+            self.output_folder = real_folder
+        files = os.listdir(tmp_folder)
+        # thumbs move into place first so they already exist when the media
+        # file appears in the samples folder
+        thumbs_folder = os.path.join(real_folder, '.thumbs')
+        for file in files:
+            tmp_thumb = os.path.join(tmp_folder, file + '.thumb')
+            try:
+                if self._generate_thumbnail(os.path.join(tmp_folder, file), tmp_thumb):
+                    os.makedirs(thumbs_folder, exist_ok=True)
+                    os.replace(tmp_thumb, os.path.join(thumbs_folder, file + '.jpg'))
+            except Exception as e:
+                print(f"Failed to generate thumbnail for {file}: {e}")
+        for file in files:
+            os.replace(os.path.join(tmp_folder, file), os.path.join(real_folder, file))
+
+    def _generate_thumbnail(self, media_path, thumb_path):
+        # 300x300 center-cropped 90% jpg. Returns True if one was written.
+        from PIL import Image as PILImage
+        ext = os.path.splitext(media_path)[1].lower()
+        img = None
+        if ext in ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp']:
+            img = PILImage.open(media_path)  # animated formats open on the first frame
+        elif ext == '.mp4':
+            import cv2
+            cap = cv2.VideoCapture(media_path)
+            ok, frame = cap.read()
+            cap.release()
+            if ok:
+                img = PILImage.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        if img is None:
+            return False
+        img = img.convert('RGB')
+        w, h = img.size
+        side = min(w, h)
+        left = (w - side) // 2
+        top = (h - side) // 2
+        img = img.crop((left, top, left + side, top + side)).resize((300, 300), PILImage.LANCZOS)
+        img.save(thumb_path, format='JPEG', quality=90)
+        return True
 
     def save_image(self, image, count: int = 0, max_count=0):
         # make parent dirs

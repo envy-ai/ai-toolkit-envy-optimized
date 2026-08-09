@@ -118,7 +118,7 @@ async function serveFile(req: http.IncomingMessage, res: http.ServerResponse, pr
       .map(decodeURIComponent)
       .join('/');
 
-    const resolvedFilePath = path.resolve(decodedFilePath);
+    let resolvedFilePath = path.resolve(decodedFilePath);
     const roots = await getRoots();
     const allowedDirs = isImg ? [roots.datasets, roots.training, roots.data] : [roots.datasets, roots.training];
     const isAllowed = allowedDirs.some(
@@ -129,6 +129,17 @@ async function serveFile(req: http.IncomingMessage, res: http.ServerResponse, pr
       res.writeHead(403);
       res.end('Access denied');
       return;
+    }
+
+    // ?thumb=1 serves the pre-generated 300x300 jpg from the sibling .thumbs
+    // folder (<name>.<ext>.jpg) when it exists; otherwise falls through to
+    // the full file exactly as before. Mirrors the Next.js /api/img route.
+    if (isImg && new URL(req.url || '', 'http://localhost').searchParams.has('thumb')) {
+      const thumbPath = path.join(path.dirname(resolvedFilePath), '.thumbs', path.basename(resolvedFilePath) + '.jpg');
+      const thumbStat = await fs.promises.stat(thumbPath).catch(() => null);
+      if (thumbStat && thumbStat.isFile()) {
+        resolvedFilePath = thumbPath;
+      }
     }
 
     let stat: fs.Stats;
@@ -275,6 +286,22 @@ function proxy(req: http.IncomingMessage, res: http.ServerResponse, upstreamPort
     // bodyless requests are safe to retry (request bodies can't be replayed).
     if (err.code === 'ECONNREFUSED' && bodyless && attempt < 120 && !res.destroyed) {
       setTimeout(() => proxy(req, res, upstreamPort, attempt + 1), 250);
+      return;
+    }
+    // Keep-alive reuse race: Next.js closes pooled sockets after 5s idle, and
+    // the UI polls on ~5s intervals, so a reused socket can die the instant we
+    // write to it (ECONNRESET/EPIPE). No response bytes exist yet, so retrying
+    // immediately is safe; each retry drains one stale socket from the pool
+    // until a live or fresh connection is used.
+    if (
+      bodyless &&
+      upstreamReq.reusedSocket &&
+      (err.code === 'ECONNRESET' || err.code === 'EPIPE') &&
+      !res.headersSent &&
+      !res.destroyed &&
+      attempt < 120
+    ) {
+      proxy(req, res, upstreamPort, attempt + 1);
       return;
     }
     if (res.destroyed) return;

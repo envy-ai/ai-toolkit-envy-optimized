@@ -808,4 +808,3 @@ class MiniMaxH3VideoVAE(nn.Module):
         # out-of-place so gradients can flow through decode (pixel-space losses)
         dec = dec.float() * self.pixel_std + self.pixel_mean
         return dec.clamp(0.0, 1.0) * 2.0 - 1.0
-

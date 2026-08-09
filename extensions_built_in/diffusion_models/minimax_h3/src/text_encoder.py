@@ -13,13 +13,9 @@ The presentation is raw tokens — no chat template, no special tokens:
     ``<|vision_end|>``), then the verbatim prompt. Vision-block rows are
     tagged as *video* (0) rather than text (1) — the transformer's AdaLN
     modality selection keys off these tags.
-  - ref2va: reference images, video soundtracks/videos, and standalone audio
-    are presented in request order as ``<Picture i>`` / ``<Video j>`` /
-    ``<Audio k>``. Qwen sees videos at 2 fps in temporal pairs with timestamp
-    labels; audio itself never enters Qwen.
 """
 
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import torch
 
@@ -35,7 +31,6 @@ def encode_minimax_h3_prompt(
     processor,  # Qwen3VLProcessor (needed only when keyframes are present)
     prompt: str,
     keyframes: Optional[List] = None,  # PIL images already on the target canvas
-    reference_items: Optional[List[Dict]] = None,
     device: Optional[torch.device] = None,
     dtype: Optional[torch.dtype] = None,
     max_length: Optional[int] = None,  # cap on PROMPT tokens (vision blocks are never cut)
@@ -57,93 +52,25 @@ def encode_minimax_h3_prompt(
     if device is None:
         device = text_encoder.device
 
-    if keyframes and reference_items:
-        raise ValueError("MiniMax H3 prompt encoding cannot mix FL2VA keyframes and Ref2VA references")
-
     pixel_values, image_grid_thw = None, None
-    pixel_values_videos, video_grid_thw = None, None
     token_ids: List[int] = []
     token_tags: List[int] = []
-    vision_start = tokenizer.convert_tokens_to_ids("<|vision_start|>")
-    vision_end = tokenizer.convert_tokens_to_ids("<|vision_end|>")
-    image_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
-    video_pad = tokenizer.convert_tokens_to_ids("<|video_pad|>")
-
-    def append_text(text: str):
-        ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        token_ids.extend(ids)
-        token_tags.extend([TEXT_TAG] * len(ids))
-
-    def append_vision(pad_token: int, count: int):
-        ids = [vision_start] + [pad_token] * count + [vision_end]
-        token_ids.extend(ids)
-        token_tags.extend([VIDEO_TAG] * len(ids))
-
     if keyframes:
         vision = processor.image_processor(images=keyframes, return_tensors="pt")
         pixel_values = vision["pixel_values"]
         image_grid_thw = vision["image_grid_thw"]
         merge = processor.image_processor.merge_size**2
+        vision_start = tokenizer.convert_tokens_to_ids("<|vision_start|>")
+        vision_end = tokenizer.convert_tokens_to_ids("<|vision_end|>")
+        image_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
         for i in range(len(keyframes)):
             num_image_tokens = int(image_grid_thw[i].prod()) // merge
-            append_text(f"<Picture {i + 1}>: ")
-            append_vision(image_pad, num_image_tokens)
-
-    if reference_items:
-        images = [item["data"] for item in reference_items if item["type"] == "image"]
-        videos = [item["data"] for item in reference_items if item["type"] == "video"]
-        if images:
-            vision = processor.image_processor(images=images, return_tensors="pt")
-            pixel_values = vision["pixel_values"]
-            image_grid_thw = vision["image_grid_thw"]
-        if videos:
-            # The dataloader has already sampled each reference at 2 fps and
-            # supplies a list of PIL frames. Transformers rejects a second
-            # sampling pass for that input form, so preserve those exact
-            # frames (and the timestamps constructed alongside them).
-            vision = processor.video_processor(
-                videos=videos,
-                do_sample_frames=False,
-                return_tensors="pt",
-            )
-            pixel_values_videos = vision["pixel_values_videos"]
-            video_grid_thw = vision["video_grid_thw"]
-
-        counters = {"image": 0, "audio": 0, "video": 0}
-        image_index = 0
-        video_index = 0
-        image_merge = processor.image_processor.merge_size**2
-        video_merge = processor.video_processor.merge_size**2
-        for item in reference_items:
-            kind = item["type"]
-            counters[kind] += 1
-            if kind == "image":
-                append_text(f"<Picture {counters['image']}>: ")
-                count = int(image_grid_thw[image_index].prod()) // image_merge
-                append_vision(image_pad, count)
-                image_index += 1
-            elif kind == "audio":
-                append_text(f"<Audio {counters['audio']}>: ")
-            elif kind == "video":
-                append_text(f"<Video {counters['video']}>: ")
-                grid = video_grid_thw[video_index]
-                block_count = int(grid[0])
-                tokens_per_block = int(grid[1] * grid[2]) // video_merge
-                timestamps = list(item.get("timestamps", []))
-                if not timestamps:
-                    timestamps = [i / 2.0 for i in range(block_count * 2)]
-                if len(timestamps) % 2:
-                    timestamps.append(timestamps[-1])
-                while len(timestamps) < block_count * 2:
-                    timestamps.append(timestamps[-1])
-                for block in range(block_count):
-                    start = block * 2
-                    block_time = (timestamps[start] + timestamps[start + 1]) / 2.0
-                    append_text(f"<{block_time:.1f} seconds>")
-                    append_vision(video_pad, tokens_per_block)
-                video_index += 1
-            else:
-                raise ValueError(f"Unsupported MiniMax H3 reference item {kind!r}")
+            label_ids = tokenizer(f"<Picture {i + 1}>: ", add_special_tokens=False)[
+                "input_ids"
+            ]
+            vision_ids = [vision_start] + [image_pad] * num_image_tokens + [vision_end]
+            token_ids += label_ids + vision_ids
+            token_tags += [TEXT_TAG] * len(label_ids) + [VIDEO_TAG] * len(vision_ids)
 
     prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     if max_length is not None and max_length > 0:
@@ -174,20 +101,11 @@ def encode_minimax_h3_prompt(
         if pixel_values is None
         else pixel_values.to(device, text_encoder.dtype),
         image_grid_thw=None if image_grid_thw is None else image_grid_thw.to(device),
-        pixel_values_videos=None
-        if pixel_values_videos is None
-        else pixel_values_videos.to(device, text_encoder.dtype),
-        video_grid_thw=None
-        if video_grid_thw is None
-        else video_grid_thw.to(device),
         use_cache=False,
-        output_hidden_states=False,
+        output_hidden_states=True,
     )
-    # The loader truncates the LM to exactly 50 layers and replaces its final
-    # norm with Identity, so last_hidden_state is the required unnormalized
-    # layer-49 output. Requesting every hidden-state snapshot would otherwise
-    # retain roughly 51 copies of a vision-heavy sequence during prompt cache.
-    embeds = outputs.last_hidden_state[0]
+    layer = min(TEXT_ENCODER_LAYER, len(outputs.hidden_states) - 1)
+    embeds = outputs.hidden_states[layer][0]
     if dtype is not None:
         embeds = embeds.to(dtype)
     return embeds, torch.tensor(token_tags, dtype=torch.long)

@@ -153,4 +153,3 @@ class Nvfp4Quantizer(OstrisQuantizer):
         with torch.no_grad():
             w = self._dequantize_weight(module, x.dtype)
         return F.linear(x, w, module.bias)
-

@@ -18,6 +18,7 @@ from .ideogram4 import Ideogram4Model
 from .prx_pixel_t2i import PRXPixelT2IModel
 from .krea2 import Krea2Model
 from .boogu_image import BooguImageModel, BooguImageEditModel
+from .mageflow import MageFlowModel, MageFlowEditModel
 from .minimax_h3 import MinimaxH3Model
 
 AI_TOOLKIT_MODELS = [
@@ -52,5 +53,7 @@ AI_TOOLKIT_MODELS = [
     Krea2Model,
     BooguImageModel,
     BooguImageEditModel,
+    MageFlowModel,
+    MageFlowEditModel,
     MinimaxH3Model,
 ]

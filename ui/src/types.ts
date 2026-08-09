@@ -183,6 +183,8 @@ export interface TrainConfig {
   audio_loss_multiplier?: number;
   max_loss?: number | null;
   validation_config?: ValidationConfig;
+  do_guidance_loss?: boolean;
+  guidance_loss_target?: number;
 }
 
 export interface QuantizeKwargsConfig {

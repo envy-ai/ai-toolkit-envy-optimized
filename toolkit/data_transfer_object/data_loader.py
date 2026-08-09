@@ -12,7 +12,6 @@ from toolkit.basic import get_quick_signature_string
 from toolkit.dataloader_mixins import (
     CaptionProcessingDTOMixin,
     ImageProcessingDTOMixin,
-    H3ReferenceFileItemDTOMixin,
     LatentCachingFileItemDTOMixin,
     ControlFileItemDTOMixin,
     ArgBreakMixin,
@@ -31,6 +30,10 @@ if TYPE_CHECKING:
 
 printed_messages = []
 
+# keep in sync with video_extensions in toolkit/data_loader.py (importing it
+# here would be circular)
+video_extensions = ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv']
+
 
 def print_once(msg):
     global printed_messages
@@ -44,7 +47,6 @@ class FileItemDTO(
     TextEmbeddingFileItemDTOMixin,
     CaptionProcessingDTOMixin,
     ImageProcessingDTOMixin,
-    H3ReferenceFileItemDTOMixin,
     AudioProcessingDTOMixin,
     ControlFileItemDTOMixin,
     InpaintControlFileItemDTOMixin,
@@ -57,16 +59,29 @@ class FileItemDTO(
     def __init__(self, *args, **kwargs):
         self.path = kwargs.get("path", "")
         self.dataset_config: "DatasetConfig" = kwargs.get("dataset_config", None)
-        self.is_video = self.dataset_config.num_frames > 1 or self.dataset_config.auto_frame_count
+        # a video dataset can contain both videos and images. Images are
+        # treated as single-frame items and bucketed separately from videos
+        dataset_is_video = self.dataset_config.num_frames > 1 or self.dataset_config.auto_frame_count
+        self.is_video = dataset_is_video and os.path.splitext(self.path)[1].lower() in video_extensions
         self.is_audio_model = kwargs.get("is_audio_model", False)
         self.sample_rate = kwargs.get("sample_rate", 48000)
-        self.num_frames = self.dataset_config.num_frames
+        self.num_frames = self.dataset_config.num_frames if self.is_video else 1
         self.temporal_compression = kwargs.get("temporal_compression", 8)
-        self.minimax_h3_frame_grid = kwargs.get("minimax_h3_frame_grid", False)
+        # module-level function (picklable) for models whose valid frame
+        # counts are not temporal_compression * n + 1; None = default math
+        _sd = kwargs.get("sd", None)
+        self.frame_count_snapper = (
+            _sd.get_frame_count_snapper()
+            if _sd is not None and hasattr(_sd, "get_frame_count_snapper")
+            else None
+        )
         size_database = kwargs.get("size_database", {})
         dataset_root = kwargs.get("dataset_root", None)
         self.encode_control_in_text_embeddings = kwargs.get(
             "encode_control_in_text_embeddings", False
+        )
+        self.encode_first_frame_in_text_embeddings = kwargs.get(
+            "encode_first_frame_in_text_embeddings", False
         )
         self.te_padding_side = kwargs.get("te_padding_side", "right")
         self.latent_space_version = kwargs.get("latent_space_version", "sd1")
@@ -170,7 +185,6 @@ class FileItemDTO(
         self.audio_tensor = None
         self.cleanup_latent()
         self.cleanup_text_embedding()
-        self.cleanup_h3_references()
         self.cleanup_control()
         self.cleanup_inpaint()
         self.cleanup_clip_image()
@@ -209,31 +223,37 @@ class DataLoaderBatchDTO:
             )
             self.audio_tensor: Union[torch.Tensor, None] = None
             self.first_frame_latents: Union[torch.Tensor, None] = None
-            self.last_frame_latents: Union[torch.Tensor, None] = None
             self.audio_latents: Union[torch.Tensor, None] = None
-            # H3 source/reference media remain per-item values because their
-            # temporal lengths can differ and H3 training is batch-one only.
-            self.h3_v2v_latents: Union[List[dict], None] = None
-            self.h3_v2v_tensors: Union[List[torch.Tensor], None] = None
-            self.h3_v2v_audio_data: Union[List[Union[dict, None]], None] = None
-            self.h3_reference_latents: Union[List[List[dict]], None] = None
-            self.h3_reference_tensors: Union[List[List[torch.Tensor]], None] = None
-            self.h3_reference_audio_data: Union[List[List[Union[dict, None]]], None] = None
-            self.h3_reference_is_video: Union[List[List[bool]], None] = None
 
             # just for holding noise and preds during training
             self.audio_target: Union[torch.Tensor, None] = None
             self.audio_pred: Union[torch.Tensor, None] = None
-            
+            # the noise drawn for the audio stream on the primary (grad enabled)
+            # prediction. Secondary passes (cfg / guidance loss / prior preds)
+            # reuse it so their noisy audio matches the stored audio_target.
+            self.audio_noise: Union[torch.Tensor, None] = None
+            # audio predictions from the non primary passes. Kept separate so
+            # they cannot stomp the primary pred we backprop through.
+            self.audio_pred_uncond: Union[torch.Tensor, None] = None
+            self.audio_pred_prior: Union[torch.Tensor, None] = None
+            self.audio_pred_preservation: Union[torch.Tensor, None] = None
+            # which of the above the current secondary pass writes to. None (the
+            # default) means no secondary pass is in flight: any grad-enabled
+            # prediction is a primary one and writes audio_pred (and the
+            # noisy/sigma bookkeeping) directly. The trainer sets this around
+            # its prior / guidance-unconditional / preservation passes.
+            self.audio_pred_slot: Union[str, None] = None
+            # noisy audio rows and audio sigma of the primary pass, used to
+            # rebuild the clean audio estimate for perceptual losses
+            self.audio_noisy: Union[torch.Tensor, None] = None
+            self.audio_sigma: Union[torch.Tensor, None] = None
+
             self.num_frames: int = self.file_items[0].num_frames
 
             if (
                 not is_latents_cached
                 or self.file_items[0].dataset_config.load_image_when_caching_latents
-                or (
-                    self.file_items[0].uses_h3_visual_conditioning
-                    and not self.file_items[0].is_text_embedding_cached
-                )
+                or self.file_items[0].dataset_config.cache_tensors_to_disk
             ):
                 # only return a tensor if latents are not cached, or if we are explicitly
                 # loading the raw image alongside the cached latents
@@ -250,51 +270,35 @@ class DataLoaderBatchDTO:
                 if any(
                     [x._cached_first_frame_latent is not None for x in self.file_items]
                 ):
+                    # find one to use as a base; item 0 may not have one
+                    base_first_frame_latent = None
+                    for x in self.file_items:
+                        if x._cached_first_frame_latent is not None:
+                            base_first_frame_latent = x._cached_first_frame_latent
+                            break
                     self.first_frame_latents = torch.cat(
                         [
                             x._cached_first_frame_latent.unsqueeze(0)
                             if x._cached_first_frame_latent is not None
-                            else torch.zeros_like(
-                                self.file_items[0]._cached_first_frame_latent
-                            ).unsqueeze(0)
-                            for x in self.file_items
-                        ]
-                    )
-                if any(
-                    [x._cached_last_frame_latent is not None for x in self.file_items]
-                ):
-                    self.last_frame_latents = torch.cat(
-                        [
-                            x._cached_last_frame_latent.unsqueeze(0)
-                            if x._cached_last_frame_latent is not None
-                            else torch.zeros_like(
-                                self.file_items[0]._cached_last_frame_latent
-                            ).unsqueeze(0)
+                            else torch.zeros_like(base_first_frame_latent).unsqueeze(0)
                             for x in self.file_items
                         ]
                     )
                 if any([x._cached_audio_latent is not None for x in self.file_items]):
+                    # find one to use as a base; item 0 may not have one
+                    base_audio_latent = None
+                    for x in self.file_items:
+                        if x._cached_audio_latent is not None:
+                            base_audio_latent = x._cached_audio_latent
+                            break
                     self.audio_latents = torch.cat(
                         [
                             x._cached_audio_latent.unsqueeze(0)
                             if x._cached_audio_latent is not None
-                            else torch.zeros_like(
-                                self.file_items[0]._cached_audio_latent
-                            ).unsqueeze(0)
+                            else torch.zeros_like(base_audio_latent).unsqueeze(0)
                             for x in self.file_items
                         ]
                     )
-                if any([len(x._cached_h3_reference_latents) > 0 for x in self.file_items]):
-                    self.h3_reference_latents = [x._cached_h3_reference_latents for x in self.file_items]
-                if any([x._cached_h3_v2v_latent is not None for x in self.file_items]):
-                    self.h3_v2v_latents = [x._cached_h3_v2v_latent for x in self.file_items]
-            if any([x.has_h3_v2v for x in self.file_items]):
-                self.h3_v2v_tensors = [x.h3_v2v_tensor for x in self.file_items]
-                self.h3_v2v_audio_data = [x.h3_v2v_audio_data for x in self.file_items]
-            if any([x.has_h3_references for x in self.file_items]):
-                self.h3_reference_tensors = [x.h3_reference_tensors for x in self.file_items]
-                self.h3_reference_audio_data = [x.h3_reference_audio_data for x in self.file_items]
-                self.h3_reference_is_video = [x.h3_reference_is_video for x in self.file_items]
 
             self.prompt_embeds: Union[PromptEmbeds, None] = None
             # if self.file_items[0].control_tensor is not None:
@@ -502,6 +506,15 @@ class DataLoaderBatchDTO:
     ):
         return [x.caption_short for x in self.file_items]
 
+    def set_secondary_audio_pred(self, pred):
+        """Route an audio prediction from a non primary pass (prior,
+        unconditional/guidance, preservation) to its own slot so it cannot
+        stomp the primary prediction the loss backprops through. Passes that
+        did not declare a slot (e.g. a trainer's extra no_grad prediction)
+        are simply not stored."""
+        if self.audio_pred_slot is not None:
+            setattr(self, self.audio_pred_slot, pred)
+
     def cleanup(self):
         del self.latents
         del self.tensor
@@ -510,16 +523,14 @@ class DataLoaderBatchDTO:
         del self.audio_data
         del self.audio_target
         del self.audio_pred
+        del self.audio_noise
+        del self.audio_pred_uncond
+        del self.audio_pred_prior
+        del self.audio_pred_preservation
+        del self.audio_noisy
+        del self.audio_sigma
         del self.first_frame_latents
-        del self.last_frame_latents
         del self.audio_latents
-        del self.h3_v2v_latents
-        del self.h3_v2v_tensors
-        del self.h3_v2v_audio_data
-        del self.h3_reference_latents
-        del self.h3_reference_tensors
-        del self.h3_reference_audio_data
-        del self.h3_reference_is_video
         for file_item in self.file_items:
             file_item.cleanup()
 

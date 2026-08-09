@@ -5,18 +5,15 @@
   "scripts": {
     "dev": "concurrently -k -n WORKER,UI \"ts-node-dev --project tsconfig.worker.json --respawn --watch cron --transpile-only cron/worker.ts\" \"ts-node-dev --project tsconfig.worker.json --respawn --watch cron --transpile-only cron/fileServer.ts dev --port 3000\"",
     "build": "tsc -p tsconfig.worker.json && next build",
-    "build_if_needed": "node scripts/build-if-needed.mjs",
     "start": "concurrently --restart-tries -1 --restart-after 1000 -n WORKER,UI \"node dist/cron/worker.js\" \"node dist/cron/fileServer.js start --port 8675\"",
-    "start_if_needed": "npm run build_if_needed && npm run start",
-    "build_and_start": "npm install && npm run update_db && npm run build_if_needed && npm run start",
+    "install_deps": "npm install --no-save --no-audit --no-fund",
+    "db_build_start": "npm run update_db && npm run build && npm run start",
+    "build_and_start": "npm run install_deps && npm run db_build_start",
     "lint": "next lint",
     "update_db": "npx prisma generate && npx prisma db push",
     "format": "prettier --write \"**/*.{js,jsx,ts,tsx,css,scss}\""
   },
   "dependencies": {
-    "@dnd-kit/core": "^6.3.1",
-    "@dnd-kit/sortable": "^10.0.0",
-    "@dnd-kit/utilities": "^3.2.2",
     "@headlessui/react": "^2.2.0",
     "@monaco-editor/react": "^4.7.0",
     "@prisma/client": "^6.3.1",
@@ -26,7 +23,6 @@
     "lucide-react": "^0.475.0",
     "next": "^15.5.9",
     "node-cache": "^5.1.2",
-    "nunjucks": "^3.2.4",
     "prisma": "^6.3.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -40,8 +36,7 @@
     "systeminformation": "^5.27.11",
     "uplot": "^1.6.32",
     "uuid": "^11.1.0",
-    "yaml": "^2.7.0",
-    "yet-another-react-lightbox": "^3.32.0"
+    "yaml": "^2.7.0"
   },
   "devDependencies": {
     "@types/archiver": "^6.0.3",

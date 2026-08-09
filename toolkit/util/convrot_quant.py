@@ -48,17 +48,6 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-# Triton JIT compiles kernel source in this module's global namespace. Keep these
-# names global while retaining the optional-Triton fallback path.
-try:
-    import triton
-    import triton.language as tl
-    from triton.language.extra import libdevice
-except ImportError:
-    triton = None
-    tl = None
-    libdevice = None
-
 from toolkit.print import print_acc
 from toolkit.util.ostris_quant import OstrisQuantizer
 
@@ -106,9 +95,17 @@ def regular_hadamard(rot_size: int, device, dtype=torch.bfloat16) -> torch.Tenso
     key = (rot_size, str(device), dtype)
 
     def build():
+        # fp32, not fp64: entries stay exactly +-1 through the krons and rot_size
+        # is a power of 4, so dividing by its (power-of-two) root is exact — this
+        # build is bit-identical to an fp64 one at every supported rot_size, and
+        # verified so. fp64 is not merely unnecessary here but harmful: MPS has no
+        # float64, and on a cache miss inside a torch.compile trace inductor lifts
+        # the matrix in as a graph constant and dies moving it to the device
+        # ("Cannot convert a MPS Tensor to float64").
         r4 = torch.tensor(
             [[1.0, 1, 1, -1], [1, 1, -1, 1], [1, -1, 1, 1], [-1, 1, 1, 1]],
-            dtype=torch.float64,
+            dtype=torch.float32,
+            device="cpu",
         )
         h = r4.clone()
         while h.shape[0] < rot_size:
@@ -214,6 +211,22 @@ def quantize_nvfp4(
     return packed, scales, pts
 
 
+_e4m3_triton_ok_cache = {}
+
+
+def _e4m3_triton_ok(device) -> bool:
+    """Whether triton can compile kernels that touch fp8e4nv (e4m3) on this
+    device — sm_89+ (Ada and newer). Older architectures raise a
+    CompilationError at kernel-build time, so they must take the torch path."""
+    key = str(device)
+    if key not in _e4m3_triton_ok_cache:
+        try:
+            _e4m3_triton_ok_cache[key] = torch.cuda.get_device_capability(device) >= (8, 9)
+        except Exception:
+            _e4m3_triton_ok_cache[key] = False
+    return _e4m3_triton_ok_cache[key]
+
+
 def dequantize_nvfp4(
     packed: torch.Tensor,
     scales: torch.Tensor,
@@ -229,6 +242,7 @@ def dequantize_nvfp4(
         _triton_available()
         and packed.is_cuda
         and dtype in (torch.bfloat16, torch.float16, torch.float32)
+        and _e4m3_triton_ok(packed.device)
     ):
         return _fp4_dequant_op(
             packed,
@@ -273,6 +287,21 @@ def _triton_available() -> bool:
     return _triton_ok
 
 
+def _import_triton():
+    """Lazy triton import for the kernel builders. The names are ALSO published
+    as module globals: older triton versions resolve a jit kernel's free
+    variables through ``fn.__globals__`` only (no closure capture), so ``tl``
+    referenced inside a kernel defined in a builder function must exist at
+    module scope or those versions die with ``NameError: 'tl' is not defined``
+    at first compile."""
+    import triton as _triton
+    import triton.language as _tl
+
+    globals()["triton"] = _triton
+    globals()["tl"] = _tl
+    return _triton, _tl
+
+
 _kernel = None
 
 
@@ -280,8 +309,7 @@ def _get_kernel():
     global _kernel
     if _kernel is not None:
         return _kernel
-    import triton
-    import triton.language as tl
+    triton, tl = _import_triton()
 
     @triton.jit
     def nvfp4_act_quant_kernel(
@@ -453,8 +481,7 @@ def _get_dequant_kernel():
     global _dequant_kernel
     if _dequant_kernel is not None:
         return _dequant_kernel
-    import triton
-    import triton.language as tl
+    triton, tl = _import_triton()
 
     @triton.jit
     def nvfp4_dequant_kernel(
@@ -821,8 +848,7 @@ def _get_int8_kernels():
     global _int8_kernels
     if _int8_kernels is not None:
         return _int8_kernels
-    import triton
-    import triton.language as tl
+    triton, tl = _import_triton()
     from triton.language.extra import libdevice
 
     @triton.jit
@@ -1051,17 +1077,221 @@ def _int8_gemm_supported(device) -> bool:
     global _warned_no_int8
     if not supported and not _warned_no_int8:
         _warned_no_int8 = True
-        print_acc(
-            f"ConvRot: int8 matmul (torch._int_mm) is not usable on this device "
-            f"({device}). Inference falls back to dequantized bf16 matmuls: correct "
-            "output but NO speedup, and inference activations stay unquantized "
-            "(W8A16 numerics instead of W8A8). The training path is unaffected "
-            "(it always simulates W8A8 via fake-quant)."
-        )
+        if _mps_int8pack_device_ok(device):
+            print_acc(
+                f"ConvRot: int8 tensor-core matmul (torch._int_mm) is not implemented "
+                f"on this device ({device}). Inference uses torch._weight_int8pack_mm "
+                "instead — the int8 weight feeds the gemm directly, with no bf16 "
+                "dequant transient, which is the whole win on a bandwidth-bound Apple "
+                "GPU. Activations stay unquantized (W8A16 numerics instead of W8A8); "
+                "Apple GPUs have no int8 tensor cores, so quantizing them would only "
+                "add overhead. Layers whose in/out features are not both divisible by "
+                "32 still use a dequantized bf16 matmul. The training path is "
+                "unaffected (it always simulates W8A8 via fake-quant)."
+            )
+        else:
+            print_acc(
+                f"ConvRot: int8 matmul (torch._int_mm) is not usable on this device "
+                f"({device}). Inference falls back to dequantized bf16 matmuls: correct "
+                "output but NO speedup, and inference activations stay unquantized "
+                "(W8A16 numerics instead of W8A8). The training path is unaffected "
+                "(it always simulates W8A8 via fake-quant)."
+            )
     return supported
 
 
 _warned_no_int8 = False
+
+
+# ---------------- mps int8-weight gemm ----------------
+#
+# Apple GPUs have no int8 tensor cores and torch._int_mm has no MPS kernel, so
+# there is no W8A8 path here and no reason to want one: a quantized activation
+# would buy nothing back on hardware that multiplies in fp anyway. What DOES pay
+# on a unified-memory Apple GPU is not materializing the dequantized weight —
+# torch._weight_int8pack_mm (int8 (out, in) weight + per-row scales, exactly the
+# layout convrot8/convrotint already store) feeds the codes to the gemm directly.
+#
+# Measured on an M3, convrot8 3072x3072, vs the dequant+F.linear fallback it
+# replaces: 18x at M=1, 5.7x at M=64, 1.2x at M=1024, ~1.0x at M=4096. The
+# fallback's dequant is a fixed ~2.7ms that amortizes away as M grows, so the win
+# concentrates at decode/small-batch shapes and large batches are a wash. The
+# bitpacked convrotint*/bitnet backends see only 1.1-1.4x — their per-forward
+# weight unpack dominates on MPS (no triton fused gemv path there). Error vs the
+# unquantized bf16 reference is marginally LOWER than the fallback's. Holding no
+# dequantized weight transient is a win at every M on unified memory.
+
+_int8pack_mm_ok = None
+
+
+def _mps_int8pack_device_ok(device) -> bool:
+    """Whether torch._weight_int8pack_mm has a working kernel on this device."""
+    global _int8pack_mm_ok
+    if torch.device(device).type != "mps":
+        return False
+    if _int8pack_mm_ok is None:
+        try:
+            torch._weight_int8pack_mm(
+                torch.zeros(1, 32, dtype=torch.bfloat16, device=device),
+                torch.zeros(32, 32, dtype=torch.int8, device=device),
+                torch.ones(32, dtype=torch.bfloat16, device=device),
+            )
+            _int8pack_mm_ok = True
+        except Exception:
+            _int8pack_mm_ok = False
+    return _int8pack_mm_ok
+
+
+def _mps_int8pack_usable(device, in_f: int, out_f: int, dtype: torch.dtype) -> bool:
+    # the kernel asserts N % 32 == 0 && K % 32 == 0; can_quantize only guarantees
+    # in % 16 and out % 8, so the odd layer still needs the dequant fallback
+    return (
+        in_f % 32 == 0
+        and out_f % 32 == 0
+        and dtype in (torch.bfloat16, torch.float16, torch.float32)
+        and _mps_int8pack_device_ok(device)
+    )
+
+
+# registered as a custom op so torch.compile treats it as an opaque node with a
+# known output shape (see _nvfp4_act_quant_op). Calling the aten op directly
+# compiles fine on cuda but inductor's MPS lowering asserts on it as soon as its
+# input is an unrealized Pointwise — which is exactly what the rotate() feeding
+# it produces, so every compiled convrot8 inference on mac fell back to eager.
+@torch.library.custom_op("ostris::convrot_mps_int8pack_mm", mutates_args=())
+def _mps_int8pack_mm_op(
+    x2d: torch.Tensor, qdata: torch.Tensor, scales: torch.Tensor
+) -> torch.Tensor:
+    # scales is cast to x2d's dtype deliberately: the kernel reads the scale
+    # buffer AS the activation dtype with no check, so handing it the fp32 scales
+    # convrot stores returns silent garbage (nan / zeros) rather than an error —
+    # the one sharp edge here. It also rejects non-contiguous operands outright;
+    # both are contiguous today, so those calls are free no-ops that keep this
+    # correct if a caller's layout ever changes.
+    return torch._weight_int8pack_mm(
+        x2d.contiguous(), qdata.contiguous(), scales.to(x2d.dtype)
+    )
+
+
+@_mps_int8pack_mm_op.register_fake
+def _mps_int8pack_mm_fake(x2d, qdata, scales):
+    return torch.empty(
+        x2d.shape[0], qdata.shape[0], device=x2d.device, dtype=x2d.dtype
+    )
+
+
+def _mps_int8pack_linear(x2d, qdata, scales, bias) -> torch.Tensor:
+    """out = x2d @ dequant(qdata).T (+ bias) via the MPS int8-weight gemm."""
+    out = _mps_int8pack_mm_op(x2d, qdata, scales)
+    if bias is not None:
+        out = out + bias
+    return out
+
+
+# ---------------- mps: fused elementwise chains ----------------
+#
+# On MPS the gemm runs in bf16 whatever the weight storage is, so there is no
+# matmul-level win to chase: torch._weight_int8pack_mm measures within 2% of an
+# equal-shape bf16 F.linear for M >= 256 (it only pulls ahead at decode-size
+# batches — 2.1x at M=1, 1.2x at M=64, measured on an M3 at 3072x3072). What
+# separates convrot8 from plain bf16 at training shapes is therefore ENTIRELY the
+# elementwise work wrapped around the gemm: the activation fake-quant and the
+# weight dequant.
+#
+# Eager runs each of those as a chain of ~8 kernels over full-size fp32
+# temporaries, which on unified memory costs more than the quantization saves —
+# the activation fake-quant alone measures 9.1ms against a 25.8ms bf16 gemm (35%
+# overhead for one of two chains). Inductor's MPS backend fuses each chain into a
+# single Metal kernel and takes that 9.1ms to 1.0ms, which is what moves convrot8
+# training from 0.69x of bf16 to ~0.99x.
+#
+# The two chains want OPPOSITE compile modes, both for measured reasons — hence
+# the per-chain `dynamic` below rather than one global setting:
+#
+#   activations (_fake_quant_rows), dynamic=True: the batch dim genuinely varies,
+#     and a static compile lowers the fp32 divide to a reciprocal-multiply, which
+#     shifts ~0.002% of codes by 1. (Towards an fp64 reference, as it happens —
+#     but it is still a silent numerics change, and bit-identity with the cuda
+#     path is this backend's whole contract.) dynamic=True keeps the divide and
+#     is bit-identical, one compile covers every shape, and it costs ~0.4ms on a
+#     52ms step against the static build.
+#
+#   weights (_dequant_rows), dynamic=False: here dynamic shapes destroy the win
+#     outright — 2.5ms vs 0.38ms static, against 2.8ms eager, i.e. no better than
+#     not compiling at all (inductor cannot vectorize the broadcast multiply
+#     without a static inner width). All modes are bit-identical for this chain,
+#     so static is free of the numerics objection. Weight shapes are also fixed
+#     per layer, so this only recompiles once per distinct layer shape.
+#
+# The static build does hit dynamo's recompile limit (8) on a model with more
+# than 8 distinct linear shapes. That degrades gracefully and was measured, not
+# assumed: the first 8 shapes keep their compiled kernels and everything past
+# them runs the eager chain, which is exactly today's behaviour. Nothing silently
+# breaks, the tail just stops getting faster.
+
+_mps_fused_cache = {}
+_mps_fuse_disabled = False
+
+
+def _mps_fused(fn, dynamic):
+    """Run `fn` through inductor, falling back to eager for good on error.
+
+    Callers reach these only on mps — cuda has the triton kernels above and keeps
+    its existing code path untouched. Compilation is also skipped while tracing,
+    so an outer torch.compile fuses the chain into its own graph rather than
+    meeting an opaque nested compile.
+    """
+
+    def run(*args):
+        global _mps_fuse_disabled
+        if _mps_fuse_disabled or torch.compiler.is_compiling():
+            return fn(*args)
+        compiled = _mps_fused_cache.get(fn)
+        if compiled is None:
+            compiled = torch.compile(fn, dynamic=dynamic)
+            _mps_fused_cache[fn] = compiled
+        try:
+            return compiled(*args)
+        except Exception as e:
+            _mps_fuse_disabled = True
+            print_acc(
+                f"ConvRot: inductor fusion is unavailable on this mps build "
+                f"({type(e).__name__}: {e}) — falling back to the eager "
+                "elementwise path. Output is unchanged; expect roughly 0.7x bf16 "
+                "training speed instead of ~1.0x."
+            )
+            return fn(*args)
+
+    return run
+
+
+def _fake_quant_rows_impl(x: torch.Tensor, qmax: int) -> torch.Tensor:
+    """dequant(quant(x)) per row, returned in x's dtype — the value half of the
+    activation STE.
+
+    Bit-identical to quantize_int8_rows followed by the dequant it feeds, with
+    both full-size fp32 temporaries dropped: amax over the input equals amax over
+    its fp32 upcast (bf16 -> fp32 is exact and a max is a selection, not an
+    accumulation), and the int8 round trip is lossless on a value already rounded
+    and clamped into [-qmax, qmax].
+    """
+    scales = x.abs().amax(dim=1).float() / qmax
+    scales = torch.where(scales > 0, scales, torch.ones_like(scales))
+    s = scales.unsqueeze(1)
+    return (torch.round(x.float() / s).clamp_(-qmax, qmax) * s).to(x.dtype)
+
+
+_fake_quant_rows = _mps_fused(_fake_quant_rows_impl, dynamic=True)
+
+
+def _dequant_rows_impl(
+    qdata: torch.Tensor, scales: torch.Tensor, dtype: torch.dtype
+) -> torch.Tensor:
+    """dequant of per-row-scaled integer codes: the weight-side chain."""
+    return (qdata.float() * scales.unsqueeze(1)).to(dtype)
+
+
+_dequant_rows = _mps_fused(_dequant_rows_impl, dynamic=False)
 
 
 class ConvRotInt8Quantizer(OstrisQuantizer):
@@ -1135,7 +1365,10 @@ class ConvRotInt8Quantizer(OstrisQuantizer):
         return torch.round(w_rot.float() / s).clamp_(-127, 127) * s
 
     def _dequantize_rotated(self, module, dtype: torch.dtype) -> torch.Tensor:
-        w = self._qdata(module).float() * self._scales(module).unsqueeze(1)
+        qdata, scales = self._qdata(module), self._scales(module)
+        if qdata.device.type == "mps":
+            return _dequant_rows(qdata, scales, dtype)
+        w = qdata.float() * scales.unsqueeze(1)
         return w.to(dtype)
 
     def dequantize(self, module) -> torch.Tensor:
@@ -1187,8 +1420,13 @@ class ConvRotInt8Quantizer(OstrisQuantizer):
             # no int8 hardware: straight-through fake-quant + bf16 matmul
             x2d = rotate(x, rot).reshape(-1, in_f)
             with torch.no_grad():
-                aq, a_s = quantize_int8_rows(x2d.detach(), self.act_qmax)
-                x_dq = (aq.float() * a_s.unsqueeze(1)).to(x.dtype)
+                if x.device.type == "mps":
+                    # same arithmetic, as one fused Metal kernel instead of a
+                    # chain over full-size fp32 temporaries (see _mps_fused)
+                    x_dq = _fake_quant_rows(x2d.detach(), self.act_qmax)
+                else:
+                    aq, a_s = quantize_int8_rows(x2d.detach(), self.act_qmax)
+                    x_dq = (aq.float() * a_s.unsqueeze(1)).to(x.dtype)
                 w = self._dequantize_rotated(module, x.dtype)
             x_ste = x2d + (x_dq - x2d).detach()
             out = F.linear(x_ste, w, module.bias)
@@ -1222,6 +1460,16 @@ class ConvRotInt8Quantizer(OstrisQuantizer):
             i32 = torch._int_mm(aq, self._qdata(module).t())
             out = _int8_epilogue(
                 i32[:m], a_s[:m], self._scales(module), module.bias, x.dtype
+            )
+            return out.reshape(*x.shape[:-1], out_f)
+
+        if _mps_int8pack_usable(x.device, in_f, out_f, x.dtype):
+            # W8A16 on the int8 weight codes, no dequantized weight transient
+            out = _mps_int8pack_linear(
+                rotate(x, rot).reshape(-1, in_f),
+                self._qdata(module),
+                self._scales(module),
+                module.bias,
             )
             return out.reshape(*x.shape[:-1], out_f)
 
@@ -1395,8 +1643,7 @@ def _get_intn_kernel():
     global _intn_kernel
     if _intn_kernel is not None:
         return _intn_kernel
-    import triton
-    import triton.language as tl
+    triton, tl = _import_triton()
 
     @triton.jit
     def intn_unpack_kernel(
@@ -1439,8 +1686,7 @@ def _get_intn_grouped_kernel():
     global _intn_grouped_kernel
     if _intn_grouped_kernel is not None:
         return _intn_grouped_kernel
-    import triton
-    import triton.language as tl
+    triton, tl = _import_triton()
     from triton.language.extra import libdevice
 
     @triton.jit
@@ -1492,8 +1738,7 @@ def _get_bitnet_kernel():
     global _bitnet_kernel
     if _bitnet_kernel is not None:
         return _bitnet_kernel
-    import triton
-    import triton.language as tl
+    triton, tl = _import_triton()
     from triton.language.extra import libdevice
 
     @triton.jit
@@ -1619,10 +1864,16 @@ FUSED_GEMV_MAX_M = 16
 
 _int_gemv_kernel = None
 
-if triton is not None:
+
+def _get_int_gemv_kernel():
+    global _int_gemv_kernel
+    if _int_gemv_kernel is not None:
+        return _int_gemv_kernel
+    triton, tl = _import_triton()
+    from triton.language.extra import libdevice
 
     @triton.jit
-    def _int_gemv_unpack_lane(
+    def _unpack_lane(
         word,
         ratio,
         J: tl.constexpr,
@@ -1637,16 +1888,8 @@ if triton is not None:
             cf = libdevice.rint(code.to(tl.float32) * ratio)
             cf = tl.minimum(tl.maximum(cf, -127.0), 127.0)
             return cf.to(tl.int8)
-        return code.to(tl.int8)
-
-
-def _get_int_gemv_kernel():
-    global _int_gemv_kernel
-    if _int_gemv_kernel is not None:
-        return _int_gemv_kernel
-    import triton
-    import triton.language as tl
-    from triton.language.extra import libdevice
+        else:
+            return code.to(tl.int8)
 
     @triton.jit
     def int_gemv_kernel(
@@ -1730,14 +1973,14 @@ def _get_int_gemv_kernel():
                     )
                 else:
                     ratio = word  # unused (DCE'd); any tensor satisfies the call
-                c0 = _int_gemv_unpack_lane(word, ratio, 0, BITS, qmax_w, GROUPED)
-                c1 = _int_gemv_unpack_lane(word, ratio, 1, BITS, qmax_w, GROUPED)
-                c2 = _int_gemv_unpack_lane(word, ratio, 2, BITS, qmax_w, GROUPED)
-                c3 = _int_gemv_unpack_lane(word, ratio, 3, BITS, qmax_w, GROUPED)
-                c4 = _int_gemv_unpack_lane(word, ratio, 4, BITS, qmax_w, GROUPED)
-                c5 = _int_gemv_unpack_lane(word, ratio, 5, BITS, qmax_w, GROUPED)
-                c6 = _int_gemv_unpack_lane(word, ratio, 6, BITS, qmax_w, GROUPED)
-                c7 = _int_gemv_unpack_lane(word, ratio, 7, BITS, qmax_w, GROUPED)
+                c0 = _unpack_lane(word, ratio, 0, BITS, qmax_w, GROUPED)
+                c1 = _unpack_lane(word, ratio, 1, BITS, qmax_w, GROUPED)
+                c2 = _unpack_lane(word, ratio, 2, BITS, qmax_w, GROUPED)
+                c3 = _unpack_lane(word, ratio, 3, BITS, qmax_w, GROUPED)
+                c4 = _unpack_lane(word, ratio, 4, BITS, qmax_w, GROUPED)
+                c5 = _unpack_lane(word, ratio, 5, BITS, qmax_w, GROUPED)
+                c6 = _unpack_lane(word, ratio, 6, BITS, qmax_w, GROUPED)
+                c7 = _unpack_lane(word, ratio, 7, BITS, qmax_w, GROUPED)
                 # interleave tree: (BLOCK_N, KG) j-lanes -> (BLOCK_N, BLOCK_K)
                 # with columns in k order (j cycling fastest within each word)
                 ev = tl.interleave(tl.interleave(c0, c4), tl.interleave(c2, c6))

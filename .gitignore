@@ -124,6 +124,9 @@ celerybeat.pid
 .venv
 .python
 .node
+.ffmpeg
+.mingit
+.uv
 env/
 venv/
 ENV/
@@ -171,12 +174,9 @@ cython_debug/
 /venv.*
 /config/*
 !/config/examples
-!/config/comfy_templates
-!/config/comfy_templates/**
 !/config/_PUT_YOUR_CONFIGS_HERE).txt
 /output/*
 !/output/.gitkeep
-/output_backups
 /extensions/*
 !/extensions/example
 /temp
@@ -188,5 +188,7 @@ aitk_db.db*
 /notes.md
 /data
 .claude
+original_repo
+/output_backups
 /tmp
 *.bak
