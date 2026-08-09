@@ -366,12 +366,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
             (first_sample_comfy is not None and first_sample_comfy.enabled)
         )
 
-    def _get_comfy_config_for_unload(self):
+    def _get_comfy_config_for_startup_release(self):
         sample_comfy = getattr(getattr(self, 'sample_config', None), 'comfy', None)
         first_sample_comfy = getattr(getattr(self, 'first_sample_config', None), 'comfy', None)
-        if sample_comfy is not None and sample_comfy.enabled and not sample_comfy.run_in_background:
+        if sample_comfy is not None and sample_comfy.enabled:
             return sample_comfy
-        if first_sample_comfy is not None and first_sample_comfy.enabled and not first_sample_comfy.run_in_background:
+        if first_sample_comfy is not None and first_sample_comfy.enabled:
             return first_sample_comfy
         return None
 
@@ -1724,10 +1724,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     # Called before the model is loaded
     def hook_before_model_load(self):
-        comfy_config = self._get_comfy_config_for_unload()
+        comfy_config = self._get_comfy_config_for_startup_release()
         if self.accelerator.is_main_process and comfy_config is not None:
-            print_acc("Requesting ComfyUI model unload before training model load")
-            ComfyApiClient(api_url=comfy_config.api_url, timeout=10).unload_models(ignore_errors=True)
+            print_acc("Releasing ComfyUI VRAM before training model load")
+            ComfyApiClient(api_url=comfy_config.api_url, timeout=10).release_vram()
 
     def hook_after_model_load(self):
         # override in subclass

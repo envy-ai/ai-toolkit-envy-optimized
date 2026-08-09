@@ -1050,9 +1050,9 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         sample_start = source.index("def sample", batch_start)
         single_source = source[single_start:batch_start]
         batch_source = source[batch_start:sample_start]
-        unload_start = source.index("def _get_comfy_config_for_unload")
-        unload_end = source.index("\n    def ", unload_start + 1)
-        unload_source = source[unload_start:unload_end]
+        startup_release_start = source.index("def _get_comfy_config_for_startup_release")
+        startup_release_end = source.index("\n    def ", startup_release_start + 1)
+        startup_release_source = source[startup_release_start:startup_release_end]
 
         self.assertIn("import threading", source)
         self.assertIn("def _run_comfy_background_task", source)
@@ -1063,7 +1063,7 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         self.assertIn("unload_models=False", single_source)
         self.assertIn("offload_models=False", batch_source)
         self.assertIn("unload_models=False", batch_source)
-        self.assertIn("not sample_comfy.run_in_background", unload_source)
+        self.assertNotIn("run_in_background", startup_release_source)
 
     def test_comfy_prompt_waits_are_cancelled_when_training_stops(self):
         source = (REPO_ROOT / "jobs/process/BaseSDTrainProcess.py").read_text()

@@ -32,6 +32,44 @@ class FakeNetwork:
 
 
 class ComfyTrainingOffloadTests(unittest.TestCase):
+    def test_startup_releases_comfy_vram_before_training_model_load(self):
+        process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
+        process.accelerator = SimpleNamespace(is_main_process=True)
+        process.sample_config = SimpleNamespace(
+            comfy=SimpleNamespace(
+                enabled=True,
+                api_url="http://comfy.test:8188",
+                run_in_background=True,
+            )
+        )
+        process.first_sample_config = process.sample_config
+
+        with mock.patch(
+            "jobs.process.BaseSDTrainProcess.ComfyApiClient"
+        ) as client_class:
+            process.hook_before_model_load()
+
+        client_class.assert_called_once_with(
+            api_url="http://comfy.test:8188",
+            timeout=10,
+        )
+        client_class.return_value.release_vram.assert_called_once_with()
+        client_class.return_value.unload_models.assert_not_called()
+
+    def test_startup_release_hook_precedes_training_model_creation_and_load(self):
+        import inspect
+
+        source = inspect.getsource(BaseSDTrainProcess.run)
+
+        self.assertLess(
+            source.index("self.hook_before_model_load()"),
+            source.index("ModelClass("),
+        )
+        self.assertLess(
+            source.index("self.hook_before_model_load()"),
+            source.index("self.sd.load_model()"),
+        )
+
     def test_training_and_assistant_networks_are_offloaded_and_restored(self):
         training_child = FakeNetwork("cuda:0")
         training_network = FakeNetwork("cuda:0", children=[training_child])
