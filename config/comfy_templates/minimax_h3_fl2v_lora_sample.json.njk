@@ -1,0 +1,272 @@
+{
+  {% if control_image %}
+  "10": {
+    "inputs": {
+      "image": {{ control_image | json }}
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load First Frame"
+    }
+  },
+  {% endif %}
+  {% if control_image_2 %}
+  "11": {
+    "inputs": {
+      "image": {{ control_image_2 | json }}
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Last Frame"
+    }
+  },
+  {% endif %}
+  "20": {
+    "inputs": {
+      "unet_name": {{ model | json }},
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load MiniMax H3 FL2VA Model"
+    }
+  },
+  "21": {
+    "inputs": {
+      "clip_name": {{ text_encoder | json }},
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load MiniMax H3 Text Encoder"
+    }
+  },
+  "22": {
+    "inputs": {
+      "vae_name": {{ vae | json }}
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load MiniMax H3 Video VAE"
+    }
+  },
+  "23": {
+    "inputs": {
+      "vae_name": {{ audio_vae | json }}
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load MiniMax H3 Audio VAE"
+    }
+  },
+  "30": {
+    "inputs": {
+      "absolute_path": {{ training_lora_path | json }},
+      "lora_strength": {{ training_lora_strength }},
+      "model": [
+        "20",
+        0
+      ],
+      "clip": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "load_lora_from_absolute_path",
+    "_meta": {
+      "title": "Load Training LoRA From Absolute Path"
+    }
+  },
+  {% if inference_lora_enabled %}
+  "31": {
+    "inputs": {
+      "lora_name": {{ inference_lora | json }},
+      "strength_model": {{ inference_lora_strength }},
+      "strength_clip": {{ inference_lora_strength }},
+      "model": [
+        "30",
+        0
+      ],
+      "clip": [
+        "30",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Load Inference LoRA"
+    }
+  },
+  {% endif %}
+  "40": {
+    "inputs": {
+      "prompt": {{ prompt | json }},
+      "width": {{ h3_width }},
+      "height": {{ h3_height }},
+      "length": {{ h3_num_frames }},
+      "clip": [
+        {% if inference_lora_enabled %}"31"{% else %}"30"{% endif %},
+        1
+      ],
+      "vae": [
+        "22",
+        0
+      ]{% if control_image %},
+      "first_frame": [
+        "10",
+        0
+      ]{% endif %}{% if control_image_2 %},
+      "last_frame": [
+        "11",
+        0
+      ]{% endif %}
+    },
+    "class_type": "MiniMaxH3ImageToVideo",
+    "_meta": {
+      "title": "MiniMax H3 Text / Keyframes to Video"
+    }
+  },
+  "50": {
+    "inputs": {
+      "noise_seed": {{ seed }}
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "Random Noise"
+    }
+  },
+  "51": {
+    "inputs": {
+      "sampler_name": {{ sampler | json }}
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "52": {
+    "inputs": {
+      "scheduler": {{ scheduler | json }},
+      "steps": {{ steps }},
+      "denoise": 1,
+      "model": [
+        {% if inference_lora_enabled %}"31"{% else %}"30"{% endif %},
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "Scheduler"
+    }
+  },
+  "53": {
+    "inputs": {
+      "model": [
+        {% if inference_lora_enabled %}"31"{% else %}"30"{% endif %},
+        0
+      ],
+      "conditioning": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "H3 Distilled Guider"
+    }
+  },
+  "54": {
+    "inputs": {
+      "noise": [
+        "50",
+        0
+      ],
+      "guider": [
+        "53",
+        0
+      ],
+      "sampler": [
+        "51",
+        0
+      ],
+      "sigmas": [
+        "52",
+        0
+      ],
+      "latent_image": [
+        "40",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "Sample MiniMax H3"
+    }
+  },
+  "60": {
+    "inputs": {
+      "samples": [
+        "54",
+        0
+      ],
+      "vae": [
+        "22",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "Decode Video"
+    }
+  },
+  "61": {
+    "inputs": {
+      "samples": [
+        "54",
+        0
+      ],
+      "vae": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "Decode Audio"
+    }
+  },
+  "62": {
+    "inputs": {
+      "fps": {{ h3_fps }},
+      "bit_depth": 8,
+      "images": [
+        "60",
+        0
+      ],
+      "audio": [
+        "61",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Audio Video"
+    }
+  },
+  "63": {
+    "inputs": {
+      "filename_prefix": {{ filename_prefix | json }},
+      "format": "auto",
+      "codec": "auto",
+      "video": [
+        "62",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Save H3 Sample Video"
+    }
+  }
+}

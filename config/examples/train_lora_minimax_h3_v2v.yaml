@@ -1,0 +1,74 @@
+# MiniMax H3 paired-source V2V LoRA training.
+#
+# Each input source video is matched to the target clip by basename:
+#   targets/scene_001.mp4
+#   sources/scene_001.mp4
+#
+# H3 has no separate V2V DiT segment. The source is supplied through H3's
+# native full-video condition block, before any optional reference media. Both
+# videos are sampled to the same 17*k + 5 target grid at 24 fps.
+---
+job: extension
+config:
+  name: "my_minimax_h3_v2v_lora"
+  process:
+    - type: "sd_trainer"
+      training_folder: "output"
+      device: cuda:0
+      network:
+        type: "lora"
+        linear: 16
+        linear_alpha: 16
+        transformer_only: true
+      save:
+        dtype: bfloat16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      datasets:
+        - folder_path: "/path/to/target-videos"
+          caption_ext: "txt"
+          resolution: [512, 768]
+          buckets: true
+          num_frames: 124          # 17 * 7 + 5
+          fps: 24
+          shrink_video_to_frames: true
+          do_i2v: false
+          do_audio: true
+          h3_v2v_path: "/path/to/paired-source-videos"
+          h3_v2v_audio: true
+          cache_latents_to_disk: true
+          cache_text_embeddings: true
+      train:
+        batch_size: 1
+        steps: 2000
+        gradient_accumulation: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+        timestep_type: "shift"
+        optimizer: "adamw8bit"
+        lr: 1.0e-4
+        optimizer_params:
+          weight_decay: 1.0e-4
+        audio_loss_multiplier: 1.0
+        cache_text_embeddings: true
+        disable_sampling: true
+        dtype: bf16
+      model:
+        name_or_path: "Comfy-Org/MiniMax-H3"
+        arch: "minimax_h3"
+        dtype: bf16
+        vae_dtype: bf16
+        te_dtype: bf16
+        quantize: true
+        qtype: convrot8
+        quantize_te: true
+        qtype_te: nvfp4
+        low_vram: true
+        model_kwargs:
+          partition: ref2va
+          max_text_length: 512
+meta:
+  name: "[name]"
+  architecture: "MiniMax H3 V2V"

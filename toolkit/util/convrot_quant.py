@@ -48,6 +48,17 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
+# Triton JIT compiles kernel source in this module's global namespace. Keep these
+# names global while retaining the optional-Triton fallback path.
+try:
+    import triton
+    import triton.language as tl
+    from triton.language.extra import libdevice
+except ImportError:
+    triton = None
+    tl = None
+    libdevice = None
+
 from toolkit.print import print_acc
 from toolkit.util.ostris_quant import OstrisQuantizer
 
@@ -1608,17 +1619,10 @@ FUSED_GEMV_MAX_M = 16
 
 _int_gemv_kernel = None
 
-
-def _get_int_gemv_kernel():
-    global _int_gemv_kernel
-    if _int_gemv_kernel is not None:
-        return _int_gemv_kernel
-    import triton
-    import triton.language as tl
-    from triton.language.extra import libdevice
+if triton is not None:
 
     @triton.jit
-    def _unpack_lane(
+    def _int_gemv_unpack_lane(
         word,
         ratio,
         J: tl.constexpr,
@@ -1633,8 +1637,16 @@ def _get_int_gemv_kernel():
             cf = libdevice.rint(code.to(tl.float32) * ratio)
             cf = tl.minimum(tl.maximum(cf, -127.0), 127.0)
             return cf.to(tl.int8)
-        else:
-            return code.to(tl.int8)
+        return code.to(tl.int8)
+
+
+def _get_int_gemv_kernel():
+    global _int_gemv_kernel
+    if _int_gemv_kernel is not None:
+        return _int_gemv_kernel
+    import triton
+    import triton.language as tl
+    from triton.language.extra import libdevice
 
     @triton.jit
     def int_gemv_kernel(
@@ -1718,14 +1730,14 @@ def _get_int_gemv_kernel():
                     )
                 else:
                     ratio = word  # unused (DCE'd); any tensor satisfies the call
-                c0 = _unpack_lane(word, ratio, 0, BITS, qmax_w, GROUPED)
-                c1 = _unpack_lane(word, ratio, 1, BITS, qmax_w, GROUPED)
-                c2 = _unpack_lane(word, ratio, 2, BITS, qmax_w, GROUPED)
-                c3 = _unpack_lane(word, ratio, 3, BITS, qmax_w, GROUPED)
-                c4 = _unpack_lane(word, ratio, 4, BITS, qmax_w, GROUPED)
-                c5 = _unpack_lane(word, ratio, 5, BITS, qmax_w, GROUPED)
-                c6 = _unpack_lane(word, ratio, 6, BITS, qmax_w, GROUPED)
-                c7 = _unpack_lane(word, ratio, 7, BITS, qmax_w, GROUPED)
+                c0 = _int_gemv_unpack_lane(word, ratio, 0, BITS, qmax_w, GROUPED)
+                c1 = _int_gemv_unpack_lane(word, ratio, 1, BITS, qmax_w, GROUPED)
+                c2 = _int_gemv_unpack_lane(word, ratio, 2, BITS, qmax_w, GROUPED)
+                c3 = _int_gemv_unpack_lane(word, ratio, 3, BITS, qmax_w, GROUPED)
+                c4 = _int_gemv_unpack_lane(word, ratio, 4, BITS, qmax_w, GROUPED)
+                c5 = _int_gemv_unpack_lane(word, ratio, 5, BITS, qmax_w, GROUPED)
+                c6 = _int_gemv_unpack_lane(word, ratio, 6, BITS, qmax_w, GROUPED)
+                c7 = _int_gemv_unpack_lane(word, ratio, 7, BITS, qmax_w, GROUPED)
                 # interleave tree: (BLOCK_N, KG) j-lanes -> (BLOCK_N, BLOCK_K)
                 # with columns in k order (j cycling fastest within each word)
                 ev = tl.interleave(tl.interleave(c0, c4), tl.interleave(c2, c6))

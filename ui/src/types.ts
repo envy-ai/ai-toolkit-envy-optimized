@@ -237,6 +237,7 @@ export interface ComfySampleConfig {
   workflow_path: string;
   model: string;
   vae: string;
+  audio_vae: string;
   text_encoder: string;
   sampler: string;
   scheduler: string;

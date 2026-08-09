@@ -85,6 +85,7 @@ from toolkit.comfy_sample import (
     ComfyPromptWaitCancelled,
     ComfySampleRequest,
     DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
+    DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,
@@ -748,6 +749,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         is_qwen_image_edit_plus_workflow = (
             workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH
         )
+        is_minimax_h3_fl2v_workflow = (
+            workflow_path == DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH
+        )
 
         sample_folder = os.path.join(self.save_root, 'samples')
         self._cleanup_legacy_comfy_sample_loras(sample_folder)
@@ -797,17 +801,27 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 f"Qwen Image Edit Plus ComfyUI sample {i + 1} has "
                                 "ctrl_img_3 without ctrl_img_2."
                             )
+                    elif is_minimax_h3_fl2v_workflow and control_image_path_3 is not None:
+                        raise ValueError(
+                            f"MiniMax H3 ComfyUI sample {i + 1} supports at most "
+                            "a first frame in ctrl_img/ctrl_img_1 and a last frame in ctrl_img_2."
+                        )
 
                     uploaded_control_image = (
                         client.upload_image(control_image_path)
                         if control_image_path and (
-                            is_qwen_image_edit_workflow or is_qwen_image_edit_plus_workflow
+                            is_qwen_image_edit_workflow
+                            or is_qwen_image_edit_plus_workflow
+                            or is_minimax_h3_fl2v_workflow
                         )
                         else None
                     )
                     uploaded_control_image_2 = (
                         client.upload_image(control_image_path_2)
-                        if control_image_path_2 and is_qwen_image_edit_plus_workflow
+                        if control_image_path_2 and (
+                            is_qwen_image_edit_plus_workflow
+                            or is_minimax_h3_fl2v_workflow
+                        )
                         else None
                     )
                     uploaded_control_image_3 = (
@@ -824,6 +838,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         seed=gen_config.seed,
                         model=comfy_config.model,
                         vae=comfy_config.vae,
+                        audio_vae=comfy_config.audio_vae,
                         text_encoder=comfy_config.text_encoder,
                         sampler=comfy_config.sampler,
                         scheduler=comfy_config.scheduler,
@@ -837,6 +852,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         control_image=uploaded_control_image,
                         control_image_2=uploaded_control_image_2,
                         control_image_3=uploaded_control_image_3,
+                        num_frames=gen_config.num_frames,
+                        fps=gen_config.fps,
+                        training_lora_strength=gen_config.network_multiplier,
                     )
                     patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)
                     prompt_id = client.post_prompt(patched_workflow)
@@ -884,6 +902,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         comfy_config = sample_config.comfy
         workflow_path = self._get_comfy_workflow_path(comfy_config, batch=True)
+        if workflow_path == DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH:
+            print_acc(
+                "MiniMax H3 ComfyUI sampling supports optional per-prompt keyframes. "
+                "Falling back to individual prompts."
+            )
+            return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
         if not workflow_path_is_template(workflow_path):
             print_acc("ComfyUI prompt batching requires a .njk workflow template. Falling back to individual prompts.")
             return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
@@ -999,6 +1023,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             seeds=[gen_config.seed for gen_config in group_configs],
                             model=comfy_config.model,
                             vae=comfy_config.vae,
+                            audio_vae=comfy_config.audio_vae,
                             text_encoder=comfy_config.text_encoder,
                             sampler=comfy_config.sampler,
                             scheduler=comfy_config.scheduler,
@@ -1012,6 +1037,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             control_images=uploaded_control_images,
                             control_images_2=uploaded_control_images_2,
                             control_images_3=uploaded_control_images_3,
+                            num_frames=first_config.num_frames,
+                            fps=first_config.fps,
+                            training_lora_strength=first_config.network_multiplier,
                         )
                         patched_workflow = get_workflow_for_samples(workflow_path, request)
                     else:
@@ -1024,6 +1052,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             seed=first_config.seed,
                             model=comfy_config.model,
                             vae=comfy_config.vae,
+                            audio_vae=comfy_config.audio_vae,
                             text_encoder=comfy_config.text_encoder,
                             sampler=comfy_config.sampler,
                             scheduler=comfy_config.scheduler,
@@ -1037,6 +1066,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             control_image=uploaded_control_images[0] if uploaded_control_images else None,
                             control_image_2=uploaded_control_images_2[0] if uploaded_control_images_2 else None,
                             control_image_3=uploaded_control_images_3[0] if uploaded_control_images_3 else None,
+                            num_frames=first_config.num_frames,
+                            fps=first_config.fps,
+                            training_lora_strength=first_config.network_multiplier,
                         )
                         single_workflow_path = self._get_comfy_workflow_path(comfy_config, batch=False)
                         single_workflow = None

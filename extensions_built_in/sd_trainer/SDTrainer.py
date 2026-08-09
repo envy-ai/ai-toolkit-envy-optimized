@@ -294,6 +294,15 @@ class SDTrainer(BaseSDTrainProcess):
             # offload it. Already cached
             self.sd.vae.to('cpu')
             flush()
+            if (
+                self.train_config.disable_sampling
+                and hasattr(self.sd, 'unload_vae_after_caching')
+            ):
+                print_acc(
+                    "All latents are cached and sampling is disabled; "
+                    "unloading frozen VAEs"
+                )
+                self.sd.unload_vae_after_caching()
         add_all_snr_to_noise_scheduler(self.sd.noise_scheduler, self.device_torch)
         if self.adapter is not None:
             self.adapter.to(self.device_torch)
@@ -1690,14 +1699,17 @@ class SDTrainer(BaseSDTrainProcess):
                                 self.adapter.is_unconditional_run = False
                             if self.sd.encode_control_in_text_embeddings and batch.control_tensor_list is not None:
                                 prompt_kwargs['control_images'] = batch.control_tensor_list
-                            conditional_embeds = self.sd.encode_prompt(
-                                conditioned_prompts, prompt_2,
-                                dropout_prob=self.train_config.prompt_dropout_prob,
-                                long_prompts=self.do_long_prompts,
-                                **prompt_kwargs
-                            ).to(
-                                self.device_torch,
-                                dtype=dtype)
+                            if hasattr(self.sd, 'get_prompt_embeds_for_batch') and batch.file_items[0].uses_h3_visual_conditioning:
+                                conditional_embeds = self.sd.get_prompt_embeds_for_batch(
+                                    conditioned_prompts, batch
+                                ).to(self.device_torch, dtype=dtype)
+                            else:
+                                conditional_embeds = self.sd.encode_prompt(
+                                    conditioned_prompts, prompt_2,
+                                    dropout_prob=self.train_config.prompt_dropout_prob,
+                                    long_prompts=self.do_long_prompts,
+                                    **prompt_kwargs
+                                ).to(self.device_torch, dtype=dtype)
                             if self.train_config.do_cfg:
                                 if isinstance(self.adapter, CustomAdapter):
                                     self.adapter.is_unconditional_run = True

@@ -32,6 +32,9 @@ DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH = (
 DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH = (
     "config/comfy_templates/qwen_image_edit_plus_lora_sample_batch_easy_use.json.njk"
 )
+DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH = (
+    "config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk"
+)
 NUNJUCKS_RENDERER_PATH = "ui/scripts/render_comfy_template.mjs"
 
 
@@ -62,6 +65,10 @@ class ComfySampleRequest:
     control_image: Optional[str] = None
     control_image_2: Optional[str] = None
     control_image_3: Optional[str] = None
+    audio_vae: str = ""
+    num_frames: int = 1
+    fps: int = 1
+    training_lora_strength: float = 1.0
 
 
 @dataclass
@@ -87,6 +94,21 @@ class ComfyBatchSampleRequest:
     control_images: Optional[List[str]] = None
     control_images_2: Optional[List[str]] = None
     control_images_3: Optional[List[str]] = None
+    audio_vae: str = ""
+    num_frames: int = 1
+    fps: int = 1
+    training_lora_strength: float = 1.0
+
+
+def _minimax_h3_sample_dimensions(width: int, height: int) -> tuple[int, int]:
+    """Match the H3 canvas granularity without ever enlarging a requested side."""
+    return max(32, int(width) // 32 * 32), max(32, int(height) // 32 * 32)
+
+
+def _minimax_h3_sample_num_frames(num_frames: int) -> int:
+    """Snap up to ComfyUI H3's required 17*k+5 frame grid."""
+    num_frames = max(5, int(num_frames))
+    return num_frames + (5 - num_frames) % 17
 
 
 def _find_node_id(workflow: Dict[str, Any], class_type: str) -> Optional[str]:
@@ -163,6 +185,7 @@ def build_template_context(request: Any) -> Dict[str, Any]:
                 )
         if control_images_3 and not control_images_2:
             raise ValueError("ComfyUI batch control image 3 requires control image 2")
+        h3_width, h3_height = _minimax_h3_sample_dimensions(request.width, request.height)
         lora_context = _training_lora_context(request.training_lora_filename, request.training_lora_path)
         return {
             "prompts": request.prompts,
@@ -177,6 +200,7 @@ def build_template_context(request: Any) -> Dict[str, Any]:
                 3.1 if "2511" in (request.model or "").lower() else 3.0
             ),
             "vae": request.vae,
+            "audio_vae": request.audio_vae,
             "text_encoder": request.text_encoder,
             "sampler": request.sampler,
             "scheduler": request.scheduler,
@@ -186,6 +210,13 @@ def build_template_context(request: Any) -> Dict[str, Any]:
             "output_format": request.output_format,
             "output_quality": request.output_quality,
             "filename_prefix": request.filename_prefix,
+            "training_lora_strength": request.training_lora_strength,
+            "num_frames": request.num_frames,
+            "fps": request.fps,
+            "h3_width": h3_width,
+            "h3_height": h3_height,
+            "h3_num_frames": _minimax_h3_sample_num_frames(request.num_frames),
+            "h3_fps": 24,
             "control_images": control_images,
             "control_images_2": control_images_2,
             "control_images_3": control_images_3,
@@ -198,6 +229,7 @@ def build_template_context(request: Any) -> Dict[str, Any]:
     training_lora_stem = _strip_safetensors(training_lora_filename)
     if request.control_image_3 and not request.control_image_2:
         raise ValueError("ComfyUI control image 3 requires control image 2")
+    h3_width, h3_height = _minimax_h3_sample_dimensions(request.width, request.height)
     return {
         "prompt": request.prompt,
         "width": request.width,
@@ -207,6 +239,7 @@ def build_template_context(request: Any) -> Dict[str, Any]:
         "seed": request.seed,
         "model": request.model,
         "vae": request.vae,
+        "audio_vae": request.audio_vae,
         "text_encoder": request.text_encoder,
         "sampler": request.sampler,
         "scheduler": request.scheduler,
@@ -218,7 +251,14 @@ def build_template_context(request: Any) -> Dict[str, Any]:
         "training_lora_path": request.training_lora_path,
         "training_lora_filename": training_lora_filename,
         "training_lora_stem": training_lora_stem,
+        "training_lora_strength": request.training_lora_strength,
         "filename_prefix": request.filename_prefix,
+        "num_frames": request.num_frames,
+        "fps": request.fps,
+        "h3_width": h3_width,
+        "h3_height": h3_height,
+        "h3_num_frames": _minimax_h3_sample_num_frames(request.num_frames),
+        "h3_fps": 24,
         "control_image": request.control_image,
         "control_image_2": request.control_image_2,
         "control_image_3": request.control_image_3,

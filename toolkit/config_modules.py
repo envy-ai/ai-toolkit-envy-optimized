@@ -84,6 +84,7 @@ class ComfySampleConfig:
         self.workflow_path: str = kwargs.get('workflow_path', 'config/comfy_templates/krea2_lora_sample.json.njk')
         self.model: str = kwargs.get('model', '')
         self.vae: str = kwargs.get('vae', '')
+        self.audio_vae: str = kwargs.get('audio_vae', '')
         self.text_encoder: str = kwargs.get('text_encoder', '')
         self.sampler: str = kwargs.get('sampler', 'euler')
         self.scheduler: str = kwargs.get('scheduler', 'simple')
@@ -639,7 +640,7 @@ class TrainConfig:
             self.validation_config: ValidationConfig = ValidationConfig(**validation)
 
 
-ModelArch = Literal['sd1', 'sd2', 'sd3', 'sdxl', 'pixart', 'pixart_sigma', 'auraflow', 'flux', 'flex1', 'flex2', 'lumina2', 'vega', 'ssd', 'wan21', 'anima']
+ModelArch = Literal['sd1', 'sd2', 'sd3', 'sdxl', 'pixart', 'pixart_sigma', 'auraflow', 'flux', 'flex1', 'flex2', 'lumina2', 'vega', 'ssd', 'wan21', 'anima', 'minimax_h3']
 
 
 class ModelConfig:
@@ -1091,6 +1092,25 @@ class DatasetConfig:
         self.fast_image_size: bool = kwargs.get('fast_image_size', False)
         
         self.do_i2v: bool = kwargs.get('do_i2v', True)  # do image to video on models that are both t2i and i2v capable
+        # MiniMax H3 paired conditioning.  ``h3_v2v_path`` is a directory of
+        # source videos matched to target clips by basename.  It is kept
+        # distinct from optional reference media, although both use H3's
+        # native full-video condition stream.  Each configured reference
+        # directory may contain an image or video and is likewise paired by
+        # basename.  Reference videos use H3's 17*k + 5 temporal grid.
+        self.i2v_last_frame: bool = kwargs.get('i2v_last_frame', False)
+        self.h3_v2v_path: Union[str, None] = kwargs.get('h3_v2v_path', None)
+        self.h3_v2v_audio: bool = kwargs.get('h3_v2v_audio', True)
+        self.h3_reference_path: Union[str, List[str], None] = kwargs.get('h3_reference_path', None)
+        self.h3_reference_num_frames: int = int(kwargs.get('h3_reference_num_frames', 22))
+        self.h3_reference_fps: int = int(kwargs.get('h3_reference_fps', 24))
+        self.h3_reference_audio: bool = kwargs.get('h3_reference_audio', True)
+        if self.h3_v2v_path == '':
+            self.h3_v2v_path = None
+        if self.h3_reference_path == '':
+            self.h3_reference_path = None
+        if isinstance(self.h3_reference_path, list) and len(self.h3_reference_path) == 0:
+            self.h3_reference_path = None
         self.do_audio: bool = kwargs.get('do_audio', False) # load audio from video files for models that support it
         self.audio_preserve_pitch: bool = kwargs.get('audio_preserve_pitch', False) # preserve pitch when stretching audio to fit num_frames
         self.audio_normalize: bool = kwargs.get('audio_normalize', False) # normalize audio volume levels when loading

@@ -210,6 +210,107 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(rendered["17"]["inputs"]["model"], ["36", 0])
         self.assertNotIn("37", rendered)
 
+    def test_renders_minimax_h3_fl2v_video_template(self):
+        from toolkit.comfy_sample import render_nunjucks_workflow
+
+        request = replace(
+            self.request,
+            model="minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            vae="minimax_h3_video_vae_fp16.safetensors",
+            audio_vae="minimax_h3_audio_vae_fp32.safetensors",
+            text_encoder="qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            sampler="res_multistep",
+            scheduler="simple",
+            control_image="ai-toolkit/uploaded_first_frame.png",
+            num_frames=100,
+            fps=12,
+            training_lora_strength=0.7,
+        )
+        rendered = render_nunjucks_workflow(
+            "config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk",
+            request,
+        )
+
+        self.assertEqual(rendered["10"]["inputs"]["image"], "ai-toolkit/uploaded_first_frame.png")
+        self.assertEqual(rendered["20"]["inputs"]["unet_name"], request.model)
+        self.assertEqual(rendered["21"]["inputs"]["clip_name"], request.text_encoder)
+        self.assertEqual(rendered["22"]["inputs"]["vae_name"], request.vae)
+        self.assertEqual(rendered["23"]["inputs"]["vae_name"], request.audio_vae)
+        self.assertEqual(rendered["30"]["inputs"]["absolute_path"], request.training_lora_path)
+        self.assertEqual(rendered["30"]["inputs"]["lora_strength"], 0.7)
+        self.assertEqual(rendered["40"]["inputs"]["prompt"], request.prompt)
+        self.assertEqual(rendered["40"]["inputs"]["width"], 896)
+        self.assertEqual(rendered["40"]["inputs"]["height"], 1440)
+        self.assertEqual(rendered["40"]["inputs"]["length"], 107)
+        self.assertEqual(rendered["40"]["inputs"]["first_frame"], ["10", 0])
+        self.assertEqual(rendered["50"]["inputs"]["noise_seed"], request.seed)
+        self.assertEqual(rendered["51"]["inputs"]["sampler_name"], "res_multistep")
+        self.assertEqual(rendered["52"]["inputs"]["steps"], request.steps)
+        self.assertEqual(rendered["52"]["inputs"]["model"], ["31", 0])
+        self.assertEqual(rendered["62"]["inputs"]["fps"], 24)
+        self.assertEqual(rendered["63"]["class_type"], "SaveVideo")
+        self.assertEqual(rendered["63"]["inputs"]["filename_prefix"], request.filename_prefix)
+
+    def test_minimax_h3_fl2v_template_can_skip_optional_inference_lora(self):
+        from toolkit.comfy_sample import render_nunjucks_workflow
+
+        request = replace(
+            self.request,
+            inference_lora="",
+            audio_vae="minimax_h3_audio_vae_fp32.safetensors",
+            control_image="ai-toolkit/uploaded_first_frame.png",
+            num_frames=107,
+            fps=24,
+        )
+        rendered = render_nunjucks_workflow(
+            "config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk",
+            request,
+        )
+
+        self.assertNotIn("31", rendered)
+        self.assertEqual(rendered["40"]["inputs"]["clip"], ["30", 1])
+        self.assertEqual(rendered["52"]["inputs"]["model"], ["30", 0])
+
+    def test_minimax_h3_fl2v_template_supports_text_only_video(self):
+        from toolkit.comfy_sample import render_nunjucks_workflow
+
+        request = replace(
+            self.request,
+            audio_vae="minimax_h3_audio_vae_fp32.safetensors",
+            control_image=None,
+            control_image_2=None,
+            num_frames=107,
+            fps=24,
+        )
+        rendered = render_nunjucks_workflow(
+            "config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk",
+            request,
+        )
+
+        self.assertNotIn("10", rendered)
+        self.assertNotIn("11", rendered)
+        self.assertNotIn("first_frame", rendered["40"]["inputs"])
+        self.assertNotIn("last_frame", rendered["40"]["inputs"])
+
+    def test_minimax_h3_fl2v_template_supports_last_frame(self):
+        from toolkit.comfy_sample import render_nunjucks_workflow
+
+        request = replace(
+            self.request,
+            audio_vae="minimax_h3_audio_vae_fp32.safetensors",
+            control_image="ai-toolkit/uploaded_first_frame.png",
+            control_image_2="ai-toolkit/uploaded_last_frame.png",
+            num_frames=107,
+            fps=24,
+        )
+        rendered = render_nunjucks_workflow(
+            "config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk",
+            request,
+        )
+
+        self.assertEqual(rendered["11"]["inputs"]["image"], request.control_image_2)
+        self.assertEqual(rendered["40"]["inputs"]["last_frame"], ["11", 0])
+
     def test_renders_easy_use_batch_template_workflow(self):
         import toolkit.comfy_sample as comfy_sample
 

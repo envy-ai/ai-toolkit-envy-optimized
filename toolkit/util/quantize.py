@@ -424,7 +424,13 @@ def quantize(
         try:
             # check if m is QLinear or QConv2d
             if m.__class__.__name__ in Q_MODULES:
-                continue
+                # A pre-quantized OstrisLinear may still need conversion to a
+                # different Ostris backend. Matching backends are cheap no-ops.
+                if not (
+                    isinstance(weights, ostristype)
+                    and isinstance(m, OstrisLinear)
+                ):
+                    continue
             if (
                 isinstance(weights, aotype)
                 and not isinstance(m, torch.nn.Linear)
@@ -442,6 +448,8 @@ def quantize(
             orig_device = None
             if quantize_device is not None and next(m.children(), None) is None:
                 param = next(m.parameters(recurse=False), None)
+                if param is None:
+                    param = next(m.buffers(recurse=False), None)
                 if param is not None:
                     orig_device = param.device
                     m.to(quantize_device)
@@ -467,6 +475,31 @@ def quantize(
         except Exception as e:
             print(f"Failed to quantize {name}: {e}")
             # raise e
+
+
+def _has_quantizable_linear(module: torch.nn.Module, weights, exclude=None) -> bool:
+    """Return whether an Ostris quantization pass would change this module.
+
+    Matching pre-quantized H3 blocks can be skipped before any CPU/GPU move,
+    avoiding a model-sized allocator churn during startup.
+    """
+    if not isinstance(weights, ostristype):
+        return True
+    for name, child in module.named_modules():
+        if not isinstance(child, torch.nn.Linear):
+            continue
+        if exclude is not None and any(fnmatch(name, pattern) for pattern in exclude):
+            continue
+        if isinstance(child, OstrisLinear):
+            current = getattr(child.ostris_quantizer, "qtype", None)
+            if current != weights.quantizer.qtype and weights.quantizer.can_quantize(child):
+                return True
+            continue
+        if child.__class__.__name__ in Q_MODULES:
+            continue
+        if weights.quantizer.can_quantize(child):
+            return True
+    return False
 
 
 def quantize_model(
@@ -661,9 +694,13 @@ def quantize_model(
             f" - quantizing {len(all_blocks)} transformer blocks"
         )
         raw_expert_count = 0
+        already_quantized = 0
         for block in tqdm(all_blocks):
+            if not _has_quantizable_linear(block, quantization_type, exclude_modules):
+                already_quantized += 1
+                continue
             block.to(base_model.device_torch, dtype=base_model.torch_dtype, non_blocking=True)
-            quantize(block, weights=quantization_type)
+            quantize(block, weights=quantization_type, exclude=exclude_modules)
             raw_expert_count += quantize_nucleus_moe_experts(
                 block,
                 keep_on_cpu=keep_nucleus_moe_on_cpu,
@@ -674,6 +711,10 @@ def quantize_model(
             # bucket rounding on top) — that silently retained a model-sized chunk of
             # host ram after the weights moved back to the gpu for training
             block.to("cpu")
+        if already_quantized:
+            base_model.print_and_status_update(
+                f" - {already_quantized} blocks already use the requested qtype; left on CPU"
+            )
 
         # todo, on extras find a universal way to quantize them on device and move them back to their original
         # device without having to move the transformer blocks to the device first

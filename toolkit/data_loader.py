@@ -391,6 +391,61 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             sd: 'StableDiffusion' = None,
     ):
         self.dataset_config = dataset_config
+        if sd is not None and sd.arch == "minimax_h3":
+            is_h3_video = dataset_config.auto_frame_count or dataset_config.num_frames > 1
+            if batch_size != 1:
+                raise ValueError("MiniMax H3 LoRA training requires dataset batch_size: 1.")
+            if is_h3_video and dataset_config.fps != 24:
+                raise ValueError("MiniMax H3 requires dataset.fps: 24.")
+            if is_h3_video and dataset_config.do_i2v and not dataset_config.shrink_video_to_frames:
+                raise ValueError(
+                    "MiniMax H3 I2V requires shrink_video_to_frames: true so its visual prompt and anchor frames match."
+                )
+            if not dataset_config.auto_frame_count and (
+                dataset_config.num_frames != 1
+                and (dataset_config.num_frames < 5 or dataset_config.num_frames % 17 != 5)
+            ):
+                raise ValueError(
+                    "MiniMax H3 requires num_frames: 1 for images or the 17*k + 5 grid for video."
+                )
+            uses_ref2va = (
+                dataset_config.h3_v2v_path is not None
+                or dataset_config.h3_reference_path is not None
+            )
+            partition = getattr(sd, 'partition', 'fl2va')
+            if uses_ref2va and partition != 'ref2va':
+                raise ValueError(
+                    "MiniMax H3 V2V/reference conditioning requires model.model_kwargs.partition: ref2va."
+                )
+            if partition == 'ref2va' and not uses_ref2va:
+                raise ValueError(
+                    "The MiniMax H3 Ref2VA checkpoint requires h3_v2v_path or h3_reference_path."
+                )
+            if partition == 'ref2va' and not is_h3_video:
+                raise ValueError(
+                    "MiniMax H3 Ref2VA training requires a video target; use FL2VA with num_frames: 1 for image concepts."
+                )
+            if uses_ref2va and is_h3_video and dataset_config.do_i2v:
+                raise ValueError(
+                    "MiniMax H3 Ref2VA sources/references cannot be combined with FL2VA do_i2v keyframes."
+                )
+            if dataset_config.h3_v2v_path is not None and dataset_config.auto_frame_count:
+                raise ValueError(
+                    "MiniMax H3 paired V2V requires a fixed dataset.num_frames; auto_frame_count is unsupported."
+                )
+            if dataset_config.h3_v2v_path is not None and not dataset_config.shrink_video_to_frames:
+                raise ValueError(
+                    "MiniMax H3 paired V2V requires shrink_video_to_frames: true so source and target clips share a timeline."
+                )
+            if dataset_config.h3_reference_path is not None and (
+                dataset_config.h3_reference_num_frames < 5
+                or dataset_config.h3_reference_num_frames % 17 != 5
+            ):
+                raise ValueError(
+                    "MiniMax H3 reference videos require h3_reference_num_frames on the 17*k + 5 grid."
+                )
+            if dataset_config.h3_reference_fps <= 0:
+                raise ValueError("MiniMax H3 requires h3_reference_fps to be positive.")
         # update bucket divisibility
         self.dataset_config.bucket_tolerance = sd.get_bucket_divisibility()
         self.is_video = dataset_config.num_frames > 1 or dataset_config.auto_frame_count
@@ -537,6 +592,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                     te_padding_side=self.sd.te_padding_side if self.sd else "right",
                     latent_space_version=latent_space_version,
                     temporal_compression=temporal_compression,
+                    minimax_h3_frame_grid=(self.sd is not None and self.sd.arch == "minimax_h3"),
                     sample_rate=self.sd.sample_rate if self.is_audio_model and self.sd is not None else 48000,
                 )
                 self.file_list.append(file_item)

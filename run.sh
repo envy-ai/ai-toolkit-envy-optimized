@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+declare -x HF_HUB_ENABLE_HF_TRANSFER=1
 
 if command -v conda >/dev/null 2>&1; then
     CONDA_BASE="$(conda info --base)"

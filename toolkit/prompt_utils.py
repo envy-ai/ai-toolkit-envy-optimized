@@ -36,6 +36,10 @@ class PromptEmbeds:
             self.pooled_embeds = None
 
         self.attention_mask = attention_mask
+        # MiniMax H3 uses an integer modality tag alongside every text token.
+        # Keeping it on the generic container lets the normal on-disk prompt
+        # cache preserve it without adding an H3-only cache format.
+        self.minimax_token_tags = None
 
     def to(self, *args, **kwargs):
         if isinstance(self.text_embeds, list) or isinstance(self.text_embeds, tuple):
@@ -49,6 +53,10 @@ class PromptEmbeds:
                 self.attention_mask = [t.to(*args, **kwargs) for t in self.attention_mask]
             else:
                 self.attention_mask = self.attention_mask.to(*args, **kwargs)
+        if self.minimax_token_tags is not None:
+            # Tags are categorical, never cast them to the embedding dtype.
+            target = self.text_embeds[0] if isinstance(self.text_embeds, (list, tuple)) else self.text_embeds
+            self.minimax_token_tags = self.minimax_token_tags.to(device=target.device)
         return self
 
     def detach(self):
@@ -64,6 +72,8 @@ class PromptEmbeds:
                 new_embeds.attention_mask = [t.detach() for t in new_embeds.attention_mask]
             else:
                 new_embeds.attention_mask = new_embeds.attention_mask.detach()
+        if new_embeds.minimax_token_tags is not None:
+            new_embeds.minimax_token_tags = new_embeds.minimax_token_tags.detach()
         return new_embeds
 
     def clone(self):
@@ -84,6 +94,8 @@ class PromptEmbeds:
                 prompt_embeds.attention_mask = [t.clone() for t in self.attention_mask]
             else:
                 prompt_embeds.attention_mask = self.attention_mask.clone()
+        if self.minimax_token_tags is not None:
+            prompt_embeds.minimax_token_tags = self.minimax_token_tags.clone()
         return prompt_embeds
 
     def expand_to_batch(self, batch_size):
@@ -114,6 +126,8 @@ class PromptEmbeds:
                 pe.attention_mask = [t.expand(batch_size, -1) for t in pe.attention_mask]
             else:
                 pe.attention_mask = pe.attention_mask.expand(batch_size, -1)
+        if pe.minimax_token_tags is not None:
+            pe.minimax_token_tags = pe.minimax_token_tags.expand(batch_size, -1)
         return pe
 
     def save(self, path: str):
@@ -137,6 +151,8 @@ class PromptEmbeds:
                     state_dict[f"attention_mask_{i}"] = attn.cpu()
             else:
                 state_dict["attention_mask"] = pe.attention_mask.cpu()
+        if pe.minimax_token_tags is not None:
+            state_dict["minimax_token_tags"] = pe.minimax_token_tags.cpu()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         save_file(state_dict, path)
     
@@ -161,6 +177,7 @@ class PromptEmbeds:
         text_embeds = []
         pooled_embeds = None
         attention_mask = []
+        minimax_token_tags = None
         is_list = False
         for key in sorted(state_dict.keys()):
             if key.startswith("text_embed_"):
@@ -174,6 +191,8 @@ class PromptEmbeds:
                 attention_mask.append(state_dict[key])
             elif key == "attention_mask":
                 attention_mask.append(state_dict[key])
+            elif key == "minimax_token_tags":
+                minimax_token_tags = state_dict[key]
         pe = cls(None)
         pe.text_embeds = text_embeds
         if len(text_embeds) == 1 and not is_list:
@@ -185,6 +204,7 @@ class PromptEmbeds:
                 pe.attention_mask = attention_mask[0]
             else:
                 pe.attention_mask = attention_mask
+        pe.minimax_token_tags = minimax_token_tags
         return pe
 
 
@@ -324,6 +344,20 @@ def concat_prompt_embeds(prompt_embeds: list["PromptEmbeds"], padding_side: str 
     # wrap back into PromptEmbeds
     pe = PromptEmbeds([text_embeds, pooled_embeds])
     pe.attention_mask = attention_mask
+    if all(p.minimax_token_tags is not None for p in prompt_embeds):
+        max_len = max(p.minimax_token_tags.shape[1] for p in prompt_embeds)
+        tag_rows = []
+        for prompt in prompt_embeds:
+            tags = prompt.minimax_token_tags
+            if tags.shape[1] < max_len:
+                pad = torch.ones(
+                    (tags.shape[0], max_len - tags.shape[1]),
+                    dtype=tags.dtype,
+                    device=tags.device,
+                )
+                tags = torch.cat((tags, pad), dim=1) if padding_side == "right" else torch.cat((pad, tags), dim=1)
+            tag_rows.append(tags)
+        pe.minimax_token_tags = torch.cat(tag_rows, dim=0)
     return pe
 
 
@@ -388,6 +422,10 @@ def split_prompt_embeds(concatenated: PromptEmbeds, num_parts=None) -> List[Prom
         PromptEmbeds([text, pooled])
         for text, pooled in zip(text_embeds_splits, pooled_embeds_splits)
     ]
+
+    if concatenated.minimax_token_tags is not None:
+        for prompt, tags in zip(prompt_embeds_list, torch.chunk(concatenated.minimax_token_tags, num_parts, dim=0)):
+            prompt.minimax_token_tags = tags
 
     return prompt_embeds_list
 

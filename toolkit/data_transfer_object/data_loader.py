@@ -12,6 +12,7 @@ from toolkit.basic import get_quick_signature_string
 from toolkit.dataloader_mixins import (
     CaptionProcessingDTOMixin,
     ImageProcessingDTOMixin,
+    H3ReferenceFileItemDTOMixin,
     LatentCachingFileItemDTOMixin,
     ControlFileItemDTOMixin,
     ArgBreakMixin,
@@ -43,6 +44,7 @@ class FileItemDTO(
     TextEmbeddingFileItemDTOMixin,
     CaptionProcessingDTOMixin,
     ImageProcessingDTOMixin,
+    H3ReferenceFileItemDTOMixin,
     AudioProcessingDTOMixin,
     ControlFileItemDTOMixin,
     InpaintControlFileItemDTOMixin,
@@ -60,6 +62,7 @@ class FileItemDTO(
         self.sample_rate = kwargs.get("sample_rate", 48000)
         self.num_frames = self.dataset_config.num_frames
         self.temporal_compression = kwargs.get("temporal_compression", 8)
+        self.minimax_h3_frame_grid = kwargs.get("minimax_h3_frame_grid", False)
         size_database = kwargs.get("size_database", {})
         dataset_root = kwargs.get("dataset_root", None)
         self.encode_control_in_text_embeddings = kwargs.get(
@@ -167,6 +170,7 @@ class FileItemDTO(
         self.audio_tensor = None
         self.cleanup_latent()
         self.cleanup_text_embedding()
+        self.cleanup_h3_references()
         self.cleanup_control()
         self.cleanup_inpaint()
         self.cleanup_clip_image()
@@ -205,7 +209,17 @@ class DataLoaderBatchDTO:
             )
             self.audio_tensor: Union[torch.Tensor, None] = None
             self.first_frame_latents: Union[torch.Tensor, None] = None
+            self.last_frame_latents: Union[torch.Tensor, None] = None
             self.audio_latents: Union[torch.Tensor, None] = None
+            # H3 source/reference media remain per-item values because their
+            # temporal lengths can differ and H3 training is batch-one only.
+            self.h3_v2v_latents: Union[List[dict], None] = None
+            self.h3_v2v_tensors: Union[List[torch.Tensor], None] = None
+            self.h3_v2v_audio_data: Union[List[Union[dict, None]], None] = None
+            self.h3_reference_latents: Union[List[List[dict]], None] = None
+            self.h3_reference_tensors: Union[List[List[torch.Tensor]], None] = None
+            self.h3_reference_audio_data: Union[List[List[Union[dict, None]]], None] = None
+            self.h3_reference_is_video: Union[List[List[bool]], None] = None
 
             # just for holding noise and preds during training
             self.audio_target: Union[torch.Tensor, None] = None
@@ -213,7 +227,14 @@ class DataLoaderBatchDTO:
             
             self.num_frames: int = self.file_items[0].num_frames
 
-            if not is_latents_cached or self.file_items[0].dataset_config.load_image_when_caching_latents:
+            if (
+                not is_latents_cached
+                or self.file_items[0].dataset_config.load_image_when_caching_latents
+                or (
+                    self.file_items[0].uses_h3_visual_conditioning
+                    and not self.file_items[0].is_text_embedding_cached
+                )
+            ):
                 # only return a tensor if latents are not cached, or if we are explicitly
                 # loading the raw image alongside the cached latents
                 self.tensor: torch.Tensor = torch.cat(
@@ -239,6 +260,19 @@ class DataLoaderBatchDTO:
                             for x in self.file_items
                         ]
                     )
+                if any(
+                    [x._cached_last_frame_latent is not None for x in self.file_items]
+                ):
+                    self.last_frame_latents = torch.cat(
+                        [
+                            x._cached_last_frame_latent.unsqueeze(0)
+                            if x._cached_last_frame_latent is not None
+                            else torch.zeros_like(
+                                self.file_items[0]._cached_last_frame_latent
+                            ).unsqueeze(0)
+                            for x in self.file_items
+                        ]
+                    )
                 if any([x._cached_audio_latent is not None for x in self.file_items]):
                     self.audio_latents = torch.cat(
                         [
@@ -250,6 +284,17 @@ class DataLoaderBatchDTO:
                             for x in self.file_items
                         ]
                     )
+                if any([len(x._cached_h3_reference_latents) > 0 for x in self.file_items]):
+                    self.h3_reference_latents = [x._cached_h3_reference_latents for x in self.file_items]
+                if any([x._cached_h3_v2v_latent is not None for x in self.file_items]):
+                    self.h3_v2v_latents = [x._cached_h3_v2v_latent for x in self.file_items]
+            if any([x.has_h3_v2v for x in self.file_items]):
+                self.h3_v2v_tensors = [x.h3_v2v_tensor for x in self.file_items]
+                self.h3_v2v_audio_data = [x.h3_v2v_audio_data for x in self.file_items]
+            if any([x.has_h3_references for x in self.file_items]):
+                self.h3_reference_tensors = [x.h3_reference_tensors for x in self.file_items]
+                self.h3_reference_audio_data = [x.h3_reference_audio_data for x in self.file_items]
+                self.h3_reference_is_video = [x.h3_reference_is_video for x in self.file_items]
 
             self.prompt_embeds: Union[PromptEmbeds, None] = None
             # if self.file_items[0].control_tensor is not None:
@@ -466,7 +511,15 @@ class DataLoaderBatchDTO:
         del self.audio_target
         del self.audio_pred
         del self.first_frame_latents
+        del self.last_frame_latents
         del self.audio_latents
+        del self.h3_v2v_latents
+        del self.h3_v2v_tensors
+        del self.h3_v2v_audio_data
+        del self.h3_reference_latents
+        del self.h3_reference_tensors
+        del self.h3_reference_audio_data
+        del self.h3_reference_is_video
         for file_item in self.file_items:
             file_item.cleanup()
 

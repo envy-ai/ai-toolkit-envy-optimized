@@ -82,6 +82,25 @@ const modelPathSourceOptions: SelectOption[] = [
   { value: 'comfy_checkpoint', label: 'ComfyUI Checkpoint Path' },
 ];
 
+const comfyWorkflowOptions: SelectOption[] = [
+  {
+    value: 'config/comfy_templates/krea2_lora_sample.json.njk',
+    label: 'Krea 2 LoRA image',
+  },
+  {
+    value: 'config/comfy_templates/qwen_image_edit_lora_sample.json.njk',
+    label: 'Qwen Image Edit LoRA',
+  },
+  {
+    value: 'config/comfy_templates/qwen_image_edit_plus_lora_sample.json.njk',
+    label: 'Qwen Image Edit Plus LoRA',
+  },
+  {
+    value: 'config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk',
+    label: 'MiniMax H3 T2V / FL2V LoRA video',
+  },
+];
+
 export default function SimpleJob({
   jobConfig,
   setJobConfig,
@@ -1887,11 +1906,11 @@ export default function SimpleJob({
                   onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.api_url')}
                   placeholder="http://127.0.0.1:8188"
                 />
-                <TextInput
-                  label="Workflow Path"
+                <CreatableSelectInput
+                  label="Sample Renderer Workflow"
                   value={comfyConfig?.workflow_path || 'config/comfy_templates/krea2_lora_sample.json.njk'}
                   onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.workflow_path')}
-                  placeholder="config/comfy_templates/krea2_lora_sample.json.njk"
+                  options={comfyWorkflowOptions}
                 />
                 <Checkbox
                   label="Send Prompts as Batch"
@@ -1933,6 +1952,14 @@ export default function SimpleJob({
                   onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.vae')}
                   options={toOptions(comfyOptions.vae)}
                 />
+                {modelArch?.name === 'minimax_h3' && (
+                  <CreatableSelectInput
+                    label="Comfy Audio VAE"
+                    value={comfyConfig?.audio_vae || ''}
+                    onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.audio_vae')}
+                    options={toOptions(comfyOptions.vae)}
+                  />
+                )}
                 <CreatableSelectInput
                   label="Comfy Text Encoder"
                   value={comfyConfig?.text_encoder || ''}

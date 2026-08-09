@@ -6,6 +6,7 @@ export const defaultComfySampleConfig: ComfySampleConfig = {
   workflow_path: 'config/comfy_templates/krea2_lora_sample.json.njk',
   model: '',
   vae: '',
+  audio_vae: '',
   text_encoder: '',
   sampler: 'euler',
   scheduler: 'simple',
