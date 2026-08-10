@@ -1382,6 +1382,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         o_dict = OrderedDict({
             "training_info": self.get_training_info()
         })
+        o_dict['ss_base_model'] = self.model_config.name_or_path
         o_dict['ss_base_model_version'] = self.sd.get_base_model_version()
 
         # o_dict = add_base_model_info_to_meta(
