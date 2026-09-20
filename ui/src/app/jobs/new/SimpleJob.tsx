@@ -1,14 +1,13 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import {
-  modelArchs,
   ModelArch,
-  groupedModelOptions,
   quantizationOptions,
   defaultQtype,
   jobTypeOptions,
   SampleTags,
 } from './options';
+import { useModelArchs } from '@/extensions/modelArchs';
 import { defaultCompileOptions, defaultDatasetConfig, defaultSliderConfig } from './jobConfig';
 import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
 import { objectCopy, tagsToObj, objToTags } from '@/utils/basic';
@@ -114,9 +113,10 @@ export default function SimpleJob({
   sampleOnlyMode = false,
   isLoading,
 }: Props) {
+  const { archs: modelArchs, groupedModelOptions } = useModelArchs();
   const modelArch = useMemo(() => {
     return modelArchs.find(a => a.name === jobConfig.config.process[0].model.arch) as ModelArch;
-  }, [jobConfig.config.process[0].model.arch]);
+  }, [modelArchs, jobConfig.config.process[0].model.arch]);
 
   const jobType = useMemo(() => {
     return jobTypeOptions.find(j => j.value === jobConfig.config.process[0].type);

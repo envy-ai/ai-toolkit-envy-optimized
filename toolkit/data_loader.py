@@ -473,6 +473,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         self.dataset_config.bucket_tolerance = sd.get_bucket_divisibility()
         self.is_video = dataset_config.num_frames > 1 or dataset_config.auto_frame_count
         self.is_audio_model = hasattr(sd, 'is_audio_model') and sd.is_audio_model if sd is not None else False
+        # text-generating multimodal models take audio, image and video files in one dataset
+        self.is_multimodal_llm = getattr(sd, 'is_multimodal_llm', False) if sd is not None else False
         super().__init__()
         folder_path = dataset_config.folder_path
         self.dataset_path = dataset_config.dataset_path
@@ -508,11 +510,17 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             if self.is_audio_model:
                 # only look for audio files
                 extensions = audio_extensions
+            elif self.is_multimodal_llm:
+                extensions = audio_extensions + image_extensions + (video_extensions if self.is_video else [])
             elif self.is_video:
                 # look for videos and images. Video models can train on both;
                 # images are bucketed separately as single-frame items
                 extensions = video_extensions + image_extensions
-            file_list = [os.path.join(root, file) for root, _, files in os.walk(self.dataset_path) for file in files if file.lower().endswith(tuple(extensions)) and not file.startswith('.')]
+            # prune hidden dirs (.thumbs, .tmp) so their contents never train
+            file_list = []
+            for root, dirs, files in os.walk(self.dataset_path):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                file_list.extend(os.path.join(root, file) for file in files if file.lower().endswith(tuple(extensions)) and not file.startswith('.'))
         else:
             # assume json
             with open(self.dataset_path, 'r') as f:
@@ -574,24 +582,9 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         
         self.size_database["__version__"] = dataloader_version
 
-        # set latent space version
-        latent_space_version = "sd1"
-        if self.sd is not None and self.sd.model_config.latent_space_version is not None:
-            latent_space_version = self.sd.model_config.latent_space_version
-        elif self.sd is not None and self.sd.latent_space_version is not None:
-            latent_space_version = self.sd.latent_space_version
-        elif self.sd.is_xl:
-            latent_space_version = 'sdxl'
-        elif self.sd.is_v3:
-            latent_space_version = 'sd3'
-        elif self.sd.is_auraflow:
-            latent_space_version = 'sdxl'
-        elif self.sd.is_flux:
-            latent_space_version = 'flux1'
-        elif self.sd.model_config.is_pixart_sigma:
-            latent_space_version = 'sdxl'
-        else:
-            latent_space_version = self.sd.model_config.arch if self.sd is not None else "sd1"
+        # cache keys come from the model so a model can invalidate them on its own kwargs
+        latent_space_version = self.sd.get_latent_space_version() if self.sd is not None else "sd1"
+        text_embedding_space_version = self.sd.get_text_embedding_space_version() if self.sd is not None else "sd1"
             
         temporal_compression = 8
         if self.sd is not None:
@@ -606,19 +599,20 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 file_item = FileItemDTO(
                     sd=self.sd,
                     path=file,
-                    is_audio_model=self.is_audio_model,
+                    is_audio_model=self.is_audio_model or (self.is_multimodal_llm and file.lower().endswith(tuple(audio_extensions))),
                     dataset_config=dataset_config,
                     dataloader_transforms=self.transform,
                     size_database=self.size_database,
                     dataset_root=dataset_folder,
                     encode_control_in_text_embeddings=self.sd.encode_control_in_text_embeddings if self.sd else False,
                     encode_first_frame_in_text_embeddings=getattr(self.sd, 'encode_first_frame_in_text_embeddings', False) if self.sd else False,
-                    text_embedding_space_version=self.sd.text_embedding_space_version if self.sd else "sd1",
+                    dopsd_self_ref=getattr(self.sd, 'dopsd_self_ref', False) if self.sd else False,
+                    text_embedding_space_version=text_embedding_space_version,
                     te_padding_side=self.sd.te_padding_side if self.sd else "right",
                     latent_space_version=latent_space_version,
                     temporal_compression=temporal_compression,
                     minimax_h3_frame_grid=(self.sd is not None and self.sd.arch == "minimax_h3"),
-                    sample_rate=self.sd.sample_rate if self.is_audio_model and self.sd is not None else 48000,
+                    sample_rate=self.sd.sample_rate if (self.is_audio_model or self.is_multimodal_llm) and self.sd is not None else 48000,
                 )
                 self.file_list.append(file_item)
             except Exception as e:
@@ -779,7 +773,9 @@ def get_dataloader_from_datasets(
     for config in dataset_config_list:
 
         if config.type == 'image':
-            dataset = AiToolkitDataset(config, batch_size=batch_size, sd=sd)
+            # dataset level batch_size overrides the train config batch_size when set
+            dataset_batch_size = config.batch_size if config.batch_size is not None else batch_size
+            dataset = AiToolkitDataset(config, batch_size=dataset_batch_size, sd=sd)
             datasets.append(dataset)
             if config.buckets:
                 has_buckets = True
@@ -817,6 +813,16 @@ def get_dataloader_from_datasets(
         os.environ.setdefault('DIFFUSERS_VERBOSITY', 'error')
         os.environ.setdefault('NO_ALBUMENTATIONS_UPDATE', '1')
 
+    # Enable pinned memory only when explicitly opted in via dataset config and
+    # CUDA is available. pin_memory speeds up CPU->GPU transfer (helpful even at
+    # num_workers=0), but page-locked RAM cannot be relocated by NVIDIA's
+    # Windows driver shared-memory VRAM-overflow fallback, which can cause
+    # severe PCIe thrashing for users at the VRAM ceiling. Off by default; opt
+    # in via 'pin_memory: true' on the dataset config when VRAM headroom is
+    # stable.
+    if torch.cuda.is_available() and dataset_config_list[0].pin_memory:
+        dataloader_kwargs['pin_memory'] = True
+
     if has_buckets:
         # make sure they all have buckets
         for dataset in datasets:
@@ -831,6 +837,13 @@ def get_dataloader_from_datasets(
             **dataloader_kwargs
         )
     else:
+        # without buckets the dataloader batches across all datasets at once,
+        # so a dataset level batch_size cannot apply
+        for config in dataset_config_list:
+            if config.batch_size is not None:
+                raise ValueError(
+                    f"Dataset level batch_size requires buckets to be enabled. Dataset {config.folder_path or config.dataset_path} has buckets disabled."
+                )
         data_loader = DataLoader(
             concatenated_dataset,
             batch_size=batch_size,

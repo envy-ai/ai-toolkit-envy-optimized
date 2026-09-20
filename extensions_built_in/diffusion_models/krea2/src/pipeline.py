@@ -367,7 +367,8 @@ class Krea2Pipeline:
             ref_cache = {"kv": None, "mask": None}
 
         # Euler integration of the flow ODE (with optional CFG).
-        for tcurr, tprev in zip(ts[:-1], ts[1:]):
+        num_steps = len(ts) - 1
+        for i, (tcurr, tprev) in enumerate(zip(ts[:-1], ts[1:])):
             t = torch.full((latents.shape[0],), tcurr, dtype=dtype, device=device)
             v_cond = predict_velocity(
                 transformer,
@@ -393,7 +394,12 @@ class Krea2Pipeline:
                 v = v_cond + guidance_scale * (v_cond - v_uncond)
             else:
                 v = v_cond
-            latents = latents + (tprev - tcurr) * v.to(torch.float32)
+            v = v.to(torch.float32)
+            # inference engine preview: x0 estimate for this step
+            emit = getattr(model, "_emit_sample_step", None)
+            if emit is not None and getattr(model, "sample_step_hook", None) is not None:
+                emit(latents - float(tcurr) * v, i, num_steps)
+            latents = latents + (tprev - tcurr) * v
 
         if model.model_config.low_vram:
             transformer.to("cpu")

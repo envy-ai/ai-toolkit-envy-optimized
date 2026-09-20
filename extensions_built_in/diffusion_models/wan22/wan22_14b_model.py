@@ -17,11 +17,12 @@ from toolkit.samplers.custom_flowmatch_sampler import (
 )
 from toolkit.util.quantize import quantize_model
 from .wan22_pipeline import Wan22Pipeline
-from diffusers import WanTransformer3DModel
+from toolkit.models.v2.diffusion_models.wan import WanTransformer3DModel
 
 from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO
 from torchvision.transforms import functional as TF
 
+from toolkit.metadata import get_meta_for_safetensors
 from toolkit.models.wan21.wan21 import Wan21
 from .wan22_5b_model import (
     scheduler_config,
@@ -94,6 +95,13 @@ class DualWanTransformer3DModel(torch.nn.Module):
     def dtype(self) -> torch.dtype:
         return self.torch_dtype
 
+    def get_offload_ignore_modules(self):
+        # both DiTs' fp32 modulation tables stay resident on the compute device
+        return (
+            self.transformer_1.get_offload_ignore_modules()
+            + self.transformer_2.get_offload_ignore_modules()
+        )
+
     @property
     def config(self):
         return self.transformer_1.config
@@ -127,17 +135,26 @@ class DualWanTransformer3DModel(torch.nn.Module):
             else:
                 t_name = "transformer_2"
 
+            # memory-managed transformers own their placement (layers bounce
+            # from cpu per forward); whole-model swaps would haul the full
+            # 14B up and defeat the offloading
+            managed = (
+                hasattr(self, "_memory_manager")
+                or hasattr(self.transformer_1, "_memory_manager")
+                or hasattr(self.transformer_2, "_memory_manager")
+            )
+
             # check if we are changing the active transformer, if so, we need to swap the one in
             # vram if low_vram is enabled
             # todo swap the loras as well
             if t_name != self._active_transformer_name:
-                if self.low_vram:
+                if self.low_vram and not managed:
                     getattr(self, self._active_transformer_name).to("cpu")
                     getattr(self, t_name).to(self.device_torch)
                     torch.cuda.empty_cache()
                 self._active_transformer_name = t_name
 
-        if self.transformer.device != hidden_states.device:
+        if not managed and self.transformer.device != hidden_states.device:
             if self.low_vram:
                 # move other transformer to cpu
                 other_tname = (
@@ -285,6 +302,13 @@ class Wan2214bModel(Wan21):
             # we have a hf path, replace it with transformer_2 subfolder
             subfolder_2 = "transformer_2"
 
+        # per-transformer load kwargs; the ARA (if any) applies to the combined
+        # dual model below, offload attaches per transformer after that
+        per_kwargs = self.component_load_kwargs("transformer")
+        per_kwargs["offload"] = 0.0
+        if self.model_config.accuracy_recovery_adapter is not None:
+            per_kwargs["qtype"] = None
+
         self.print_and_status_update("Loading transformer 1")
         dtype = self.torch_dtype
         transformer_1_cache_path = None
@@ -415,18 +439,13 @@ class Wan2214bModel(Wan21):
             
         
         if layer_offloading_transformer:
-            MemoryManager.attach(
-                transformer_1,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_transformer_percent,
-                ignore_modules=[transformer_1.scale_shift_table] + [block.scale_shift_table for block in transformer_1.blocks]
-            )
-            MemoryManager.attach(
-                transformer_2,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_transformer_percent,
-                ignore_modules=[transformer_2.scale_shift_table] + [block.scale_shift_table for block in transformer_2.blocks]
-            )
+            for t in (transformer_1, transformer_2):
+                MemoryManager.attach(
+                    t,
+                    self.device_torch,
+                    offload_percent=self.model_config.layer_offloading_transformer_percent,
+                    ignore_modules=t.get_offload_ignore_modules(),
+                )
 
         return transformer
 
@@ -485,19 +504,19 @@ class Wan2214bModel(Wan21):
         return False
 
     def save_model(self, output_path, meta, save_dtype):
+        # comfy-format single-file saves, one per DiT (comfy convention:
+        # separate high/low noise files)
         transformer_combo: DualWanTransformer3DModel = unwrap_model(self.model)
-        transformer_combo.transformer_1.save_pretrained(
-            save_directory=os.path.join(output_path, "transformer"),
-            safe_serialization=True,
+        base = output_path
+        if base.endswith(".safetensors"):
+            base = base[: -len(".safetensors")]
+        metadata = get_meta_for_safetensors(meta, name=self.arch)
+        transformer_combo.transformer_1.save_model(
+            f"{base}_high_noise.safetensors", dtype=save_dtype, metadata=metadata
         )
-        transformer_combo.transformer_2.save_pretrained(
-            save_directory=os.path.join(output_path, "transformer_2"),
-            safe_serialization=True,
+        transformer_combo.transformer_2.save_model(
+            f"{base}_low_noise.safetensors", dtype=save_dtype, metadata=metadata
         )
-
-        meta_path = os.path.join(output_path, "aitk_meta.yaml")
-        with open(meta_path, "w") as f:
-            yaml.dump(meta, f)
 
     def save_lora(
         self,

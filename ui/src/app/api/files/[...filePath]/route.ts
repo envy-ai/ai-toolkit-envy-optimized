@@ -4,12 +4,17 @@ import fs from 'fs';
 import path from 'path';
 import { Readable } from 'stream';
 import { getDatasetsRoot, getTrainingFolder } from '@/server/settings';
+import { catchAllToFilePath } from '@/server/catchAllPath';
 
-export async function GET(request: NextRequest, { params }: { params: Promise<{ filePath: string[] }> }) {
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ filePath: string | string[] }> },
+) {
   const { filePath } = await params;
   try {
-    // Decode the path
-    const decodedFilePath = decodeURIComponent(filePath.join('/'));
+    // Segments are already URL-decoded by Next.js; accepts both the legacy
+    // single-segment form and the `<folder>/<filename>` form.
+    const decodedFilePath = catchAllToFilePath(filePath);
 
     // Get allowed directories
     const datasetRoot = await getDatasetsRoot();

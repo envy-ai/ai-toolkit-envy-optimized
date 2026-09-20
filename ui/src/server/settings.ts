@@ -1,3 +1,4 @@
+import path from 'path';
 import prisma from '@/server/prisma';
 import { defaultDatasetsFolder, defaultDataRoot } from '@/paths';
 import { defaultTrainFolder } from '@/paths';
@@ -24,6 +25,9 @@ export const getDatasetsRoot = async () => {
   if (row?.value && row.value !== '') {
     datasetsPath = row.value;
   }
+  // Strip trailing slashes; the routes' `root + path.sep` prefix checks 403
+  // on every file if the stored path ends with a separator.
+  datasetsPath = path.resolve(datasetsPath);
   myCache.set(key, datasetsPath);
   return datasetsPath as string;
 };
@@ -43,6 +47,7 @@ export const getTrainingFolder = async () => {
   if (row?.value && row.value !== '') {
     trainingRoot = row.value;
   }
+  trainingRoot = path.resolve(trainingRoot);
   myCache.set(key, trainingRoot);
   return trainingRoot as string;
 };
@@ -81,6 +86,15 @@ export const getDataRoot = async () => {
   if (row?.value && row.value !== '') {
     dataRoot = row.value;
   }
+  dataRoot = path.resolve(dataRoot);
   myCache.set(key, dataRoot);
   return dataRoot;
+};
+
+// MODELS_PATH: env wins, then the setting, then <toolkit>/models
+export const getModelsPath = async () => {
+  if (process.env.MODELS_PATH && process.env.MODELS_PATH.trim() !== '') return process.env.MODELS_PATH;
+  const row = await prisma.settings.findFirst({ where: { key: 'MODELS_PATH' } });
+  if (row?.value && row.value !== '') return row.value;
+  return path.join(process.cwd(), '..', 'models');
 };

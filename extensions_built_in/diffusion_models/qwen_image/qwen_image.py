@@ -9,28 +9,25 @@ from toolkit import train_tools
 from toolkit.config_modules import GenerateImageConfig, ModelConfig
 from PIL import Image
 from toolkit.models.base_model import BaseModel
+from toolkit.models.v2.vae.qwen_image import QwenImageVAE, QwenImageVAEHolderMixin
 from toolkit.basic import flush
 from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
 )
 from toolkit.accelerator import get_accelerator, unwrap_model
-from optimum.quanto import freeze, QTensor
-from toolkit.util.quantize import quantize, get_qtype, quantize_model
 import torch.nn.functional as F
 from toolkit.memory_management import MemoryManager
+from toolkit.metadata import get_meta_for_safetensors
 from safetensors.torch import load_file
 
 from diffusers import (
     QwenImagePipeline,
-    QwenImageTransformer2DModel,
     AutoencoderKLQwenImage,
 )
-from transformers import (
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen2Tokenizer,
-    Qwen2VLProcessor,
-)
+from transformers import Qwen2VLProcessor
+from toolkit.models.v2.diffusion_models.qwen_image import QwenImageTransformer2DModel
+from toolkit.models.v2.text_encoders.qwen25_vl import Qwen25VLTextEncoder
 from tqdm import tqdm
 from toolkit.util.qwen_vae_gradient_checkpointing import patch_qwen_vae_gradient_checkpointing
 
@@ -311,7 +308,7 @@ def _quanto_skip_missing_base_weight_load():
         QModuleMixin._load_from_state_dict = original_load_from_state_dict
 
 
-class QwenImageModel(BaseModel):
+class QwenImageModel(QwenImageVAEHolderMixin, BaseModel):
     arch = "qwen_image"
     _qwen_image_keep_visual = False
     _qwen_pipeline = QwenImagePipeline
@@ -356,154 +353,33 @@ class QwenImageModel(BaseModel):
         transformer = None
         transformer_loaded_from_cache = False
 
-        if model_path.endswith(".safetensors"):
-            if self.model_config.quantize:
-                transformer_cache_path = self.get_quantized_module_cache_path(
-                    component_name="transformer",
-                    qtype=self.model_config.qtype,
-                    source_ref={
-                        "single_file_path": model_path,
-                        "config": "Qwen/Qwen-Image",
-                        "transformer_subfolder": "transformer",
-                    },
-                    extra_cache_key={
-                        "quantize_kwargs": self.model_config.quantize_kwargs,
-                        "target_lora_modules": getattr(self, "target_lora_modules", None),
-                    },
-                )
-                transformer = self.load_quantized_module_cache(
-                    transformer_cache_path, "transformer"
-                )
-            transformer_loaded_from_cache = transformer is not None
-            if transformer is None:
-                transformer = QwenImageTransformer2DModel.from_single_file(
-                    model_path,
-                    config="Qwen/Qwen-Image",
-                    subfolder="transformer",
-                    torch_dtype=model_dtype,
-                )
-                transformer.to(model_dtype)
+        if not model_path.endswith(".safetensors") and os.path.exists(model_path):
+            # check if the path is a full checkpoint.
+            te_folder_path = os.path.join(model_path, "text_encoder")
+            # if we have the te, this folder is a full checkpoint, use it as the base
+            if os.path.exists(te_folder_path):
+                base_model_path = model_path
 
-        else:
-            transformer_path = model_path
-            transformer_subfolder = "transformer"
-            if os.path.exists(transformer_path):
-                transformer_subfolder = None
-                transformer_path = os.path.join(transformer_path, "transformer")
-                # check if the path is a full checkpoint.
-                te_folder_path = os.path.join(model_path, "text_encoder")
-                # if we have the te, this folder is a full checkpoint, use it as the base
-                if os.path.exists(te_folder_path):
-                    base_model_path = model_path
-
-            if self.model_config.quantize:
-                transformer_cache_path = self.get_quantized_module_cache_path(
-                    component_name="transformer",
-                    qtype=self.model_config.qtype,
-                    source_ref={
-                        "transformer_path": transformer_path,
-                        "transformer_subfolder": transformer_subfolder,
-                    },
-                    extra_cache_key={
-                        "quantize_kwargs": self.model_config.quantize_kwargs,
-                        "target_lora_modules": getattr(self, "target_lora_modules", None),
-                    },
-                )
-                transformer = self.load_quantized_module_cache(
-                    transformer_cache_path, "transformer"
-                )
-            transformer_loaded_from_cache = transformer is not None
-            if transformer is None:
-                transformer = QwenImageTransformer2DModel.from_pretrained(
-                    transformer_path, subfolder=transformer_subfolder, torch_dtype=dtype
-                )
-
-        if self.model_config.quantize:
-            if not transformer_loaded_from_cache:
-                self.print_and_status_update("Quantizing Transformer")
-                quantize_model(self, transformer)
-                self.save_quantized_module_cache(
-                    transformer, transformer_cache_path, "transformer"
-                )
-                flush()
-
-        if (
-            self.model_config.layer_offloading
-            and self.model_config.layer_offloading_transformer_percent > 0
-        ):
-            MemoryManager.attach(
-                transformer,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_transformer_percent,
-            )
-
-        if self.model_config.low_vram:
-            self.print_and_status_update("Moving transformer to CPU")
-            transformer.to("cpu")
-
+        # load + quantize + offload + placement, all driven by model_config
+        transformer = QwenImageTransformer2DModel.load(
+            model_path, **self.component_load_kwargs("transformer")
+        )
         flush()
 
         self.print_and_status_update("Text Encoder")
-        tokenizer = Qwen2Tokenizer.from_pretrained(
-            base_model_path, subfolder="tokenizer", torch_dtype=dtype
-        )
-        text_encoder_cache_path = None
-        text_encoder = None
-        if self.model_config.quantize_te:
-            text_encoder_cache_path = self.get_quantized_module_cache_path(
-                component_name="text_encoder",
-                qtype=self.model_config.qtype_te,
-                source_ref={
-                    "base_model_path": base_model_path,
-                    "text_encoder_subfolder": "text_encoder",
-                },
-                extra_cache_key={"keep_visual": self._qwen_image_keep_visual},
-            )
-            text_encoder = self.load_quantized_module_cache(
-                text_encoder_cache_path, "text encoder"
-            )
-        text_encoder_loaded_from_cache = text_encoder is not None
+        tokenizer = Qwen25VLTextEncoder.load_tokenizer(base_model_path, use_fast=False)
+        text_encoder = Qwen25VLTextEncoder.load_model(base_model_path, dtype=dtype)
 
-        if text_encoder is None:
-            text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                base_model_path, subfolder="text_encoder", torch_dtype=dtype
-            )
-
-            # remove the visual model as it is not needed for image generation
-            if not self._qwen_image_keep_visual:
-                text_encoder.model.visual = None
-
+        # remove the visual model as it is not needed for image generation
+        # (before quantization, so the dead tower is never quantized)
         self.processor = None
+        if not self._qwen_image_keep_visual:
+            text_encoder.drop_vision_tower()
 
-        if self.model_config.quantize_te:
-            if not text_encoder_loaded_from_cache:
-                text_encoder.to(self.device_torch, dtype=dtype)
-                flush()
-                self.print_and_status_update("Quantizing Text Encoder")
-                quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
-                freeze(text_encoder)
-                self.save_quantized_module_cache(
-                    text_encoder, text_encoder_cache_path, "text encoder"
-                )
-                flush()
-        else:
-            text_encoder.to(self.device_torch, dtype=dtype)
-            flush()
-
-        if (
-            self.model_config.layer_offloading
-            and self.model_config.layer_offloading_text_encoder_percent > 0
-        ):
-            MemoryManager.attach(
-                text_encoder,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_text_encoder_percent,
-            )
+        text_encoder.aitk_post_load(**self.component_load_kwargs("te"))
 
         self.print_and_status_update("Loading VAE")
-        vae = AutoencoderKLQwenImage.from_pretrained(
-            base_model_path, subfolder="vae", torch_dtype=dtype
-        )
+        vae = QwenImageVAE.load_model(base_model_path, dtype=dtype)
 
         self.noise_scheduler = QwenImageModel.get_train_scheduler()
 
@@ -544,9 +420,10 @@ class QwenImageModel(BaseModel):
             pipe.transformer = pipe.transformer.to(self.device_torch)
 
         flush()
-        # just to make sure everything is on the right device and dtype
-        text_encoder_device = "cpu" if self.low_vram else self.device_torch
-        text_encoder[0].to(text_encoder_device)
+        # low_vram: the text encoder stays on cpu; get_prompt_embeds moves it
+        # to the gpu on demand
+        if not self.low_vram:
+            text_encoder[0].to(self.device_torch)
         text_encoder[0].requires_grad_(False)
         text_encoder[0].eval()
         flush()
@@ -863,16 +740,16 @@ class QwenImageModel(BaseModel):
         return False
 
     def save_model(self, output_path, meta, save_dtype):
-        # only save the unet
+        # comfy-format single-file save (diffusers keys ARE the comfy layout
+        # for qwen image); prequantized layers keep their quantized storage
         transformer: QwenImageTransformer2DModel = unwrap_model(self.model)
-        transformer.save_pretrained(
-            save_directory=os.path.join(output_path, "transformer"),
-            safe_serialization=True,
+        if not output_path.endswith(".safetensors"):
+            output_path += ".safetensors"
+        transformer.save_model(
+            output_path,
+            dtype=save_dtype,
+            metadata=get_meta_for_safetensors(meta, name=self.arch),
         )
-
-        meta_path = os.path.join(output_path, "aitk_meta.yaml")
-        with open(meta_path, "w") as f:
-            yaml.dump(meta, f)
 
     def get_loss_target(self, *args, **kwargs):
         noise = kwargs.get("noise")
@@ -885,85 +762,4 @@ class QwenImageModel(BaseModel):
     def get_transformer_block_names(self) -> Optional[List[str]]:
         return ["transformer_blocks"]
 
-    def convert_lora_weights_before_save(self, state_dict):
-        new_sd = {}
-        for key, value in state_dict.items():
-            new_key = key.replace("transformer.", "diffusion_model.")
-            new_sd[new_key] = value
-        return new_sd
-
-    def convert_lora_weights_before_load(self, state_dict):
-        new_sd = {}
-        for key, value in state_dict.items():
-            new_key = key.replace("diffusion_model.", "transformer.")
-            if new_key.startswith("transformer_blocks."):
-                new_key = f"transformer.{new_key}"
-            new_sd[new_key] = value
-        return new_sd
-
-    def encode_images(self, image_list: List[torch.Tensor], device=None, dtype=None):
-        if device is None:
-            device = self.vae_device_torch
-        if dtype is None:
-            dtype = self.vae_torch_dtype
-
-        # Move to vae to device if on cpu
-        if self.vae.device == torch.device("cpu"):
-            self.vae.to(device)
-        self.vae.eval()
-        self.vae.requires_grad_(False)
-        # move to device and dtype
-        image_list = [image.to(device, dtype=dtype) for image in image_list]
-        images = torch.stack(image_list).to(device, dtype=dtype)
-        # it uses wan vae, so add dim for frame count
-
-        images = images.unsqueeze(2)
-        latents = self.vae.encode(images).latent_dist.sample()
-
-        latents_mean = (
-            torch.tensor(self.vae.config.latents_mean)
-            .view(1, self.vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
-        )
-        latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(
-            1, self.vae.config.z_dim, 1, 1, 1
-        ).to(latents.device, latents.dtype)
-
-        latents = (latents - latents_mean) * latents_std
-        latents = latents.to(device, dtype=dtype)
-
-        latents = latents.squeeze(2)  # remove the frame count dimension
-
-        return latents
-
-    def decode_latents(self, latents: torch.Tensor, device=None, dtype=None):
-        if device is None:
-            device = self.vae_device_torch
-        if dtype is None:
-            dtype = self.vae_torch_dtype
-
-        if self.vae.device == torch.device("cpu"):
-            self.vae.to(device)
-
-        latents = latents.to(device, dtype=dtype)
-
-        # add frame count dim for wan vae
-        latents = latents.unsqueeze(2)
-
-        latents_mean = (
-            torch.tensor(self.vae.config.latents_mean)
-            .view(1, self.vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
-        )
-        latents_std = (
-            torch.tensor(self.vae.config.latents_std)
-            .view(1, self.vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
-        )
-        latents = latents * latents_std + latents_mean
-
-        images = self.vae.decode(latents).sample
-
-        images = images.squeeze(2)  # remove the frame count dimension
-
-        return images.to(device, dtype=dtype)
+    lora_keys_use_comfy_prefix = True

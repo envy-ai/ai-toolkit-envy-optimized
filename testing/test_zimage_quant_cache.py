@@ -71,6 +71,7 @@ def make_zimage_model():
         low_vram=False,
     )
     model.print_and_status_update = mock.Mock()
+    model.component_load_kwargs = mock.Mock(return_value={})
     model.get_quantized_module_cache_path = mock.Mock(
         return_value="/tmp/zimage-cache.pt"
     )
@@ -82,18 +83,18 @@ class ZImageQuantizedCacheTests(unittest.TestCase):
     def _load_model(self, model, transformer):
         with (
             mock.patch.object(
-                ZIMAGE_MODULE.AutoTokenizer,
-                "from_pretrained",
+                ZIMAGE_MODULE.Qwen3TextEncoder,
+                "load_tokenizer",
                 return_value="tokenizer",
             ),
             mock.patch.object(
-                ZIMAGE_MODULE.Qwen3ForCausalLM,
-                "from_pretrained",
+                ZIMAGE_MODULE.Qwen3TextEncoder,
+                "load",
                 return_value=FakeTextEncoder(),
             ),
             mock.patch.object(
-                ZIMAGE_MODULE.AutoencoderKL,
-                "from_pretrained",
+                ZIMAGE_MODULE.KLVAE,
+                "load_model",
                 return_value=FakeModule(),
             ),
             mock.patch.object(ZIMAGE_MODULE, "ZImagePipeline", FakePipeline),

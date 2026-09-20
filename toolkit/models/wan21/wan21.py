@@ -6,11 +6,11 @@ from toolkit.accelerator import unwrap_model
 from toolkit.basic import flush
 from toolkit.config_modules import GenerateImageConfig, ModelConfig
 from toolkit.dequantize import patch_dequantization_on_save
-from toolkit.memory_management.manager import MemoryManager
 from toolkit.models.base_model import BaseModel
 from toolkit.prompt_utils import PromptEmbeds
 from transformers import AutoTokenizer, UMT5EncoderModel
-from diffusers import  WanPipeline, WanTransformer3DModel, AutoencoderKL
+from diffusers import  WanPipeline, AutoencoderKL
+from toolkit.models.v2.diffusion_models.wan import WanTransformer3DModel
 from .autoencoder_kl_wan import AutoencoderKLWan
 import os
 import sys
@@ -29,8 +29,6 @@ import os
 import copy
 from toolkit.config_modules import ModelConfig, GenerateImageConfig, ModelArch
 import torch
-from optimum.quanto import freeze, qfloat8, QTensor, qint4
-from toolkit.util.quantize import quantize, get_qtype
 from diffusers import FlowMatchEulerDiscreteScheduler, UniPCMultistepScheduler
 from typing import TYPE_CHECKING, List
 from toolkit.accelerator import unwrap_model
@@ -43,8 +41,9 @@ from diffusers.pipelines.wan.pipeline_wan import XLA_AVAILABLE
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from typing import Any, Callable, Dict, List, Optional, Union
 from toolkit.models.wan21.wan_lora_convert import convert_to_diffusers, convert_to_original
-from toolkit.util.quantize import quantize_model
-from toolkit.models.loaders.umt5 import get_umt5_encoder
+from toolkit.models.v2.text_encoders.umt5 import UMT5TextEncoder
+from toolkit.models.v2.vae.wan import WanVAE
+from toolkit.metadata import get_meta_for_safetensors
 
 # for generation only?
 scheduler_configUniPC = {
@@ -343,46 +342,10 @@ class Wan21(BaseModel):
     
     def load_wan_transformer(self, transformer_path, subfolder=None):
         self.print_and_status_update("Loading transformer")
-        dtype = self.torch_dtype
-        transformer_cache_path = None
-        transformer = None
-        if self.model_config.quantize:
-            transformer_cache_path = self.get_quantized_module_cache_path(
-                component_name="transformer",
-                qtype=self.model_config.qtype,
-                source_ref={
-                    "transformer_path": transformer_path,
-                    "transformer_subfolder": subfolder,
-                },
-                extra_cache_key={
-                    "quantize_kwargs": self.model_config.quantize_kwargs,
-                    "accuracy_recovery_adapter": self.model_config.accuracy_recovery_adapter,
-                    "target_lora_modules": getattr(self, "target_lora_modules", None),
-                },
-            )
-            transformer = self.load_quantized_module_cache(
-                transformer_cache_path, "transformer"
-            )
-        transformer_loaded_from_cache = transformer is not None
-
-        if transformer is None:
-            transformer = WanTransformer3DModel.from_pretrained(
-                transformer_path,
-                subfolder=subfolder,
-                torch_dtype=dtype,
-            ).to(dtype=dtype)
 
         if self.model_config.split_model_over_gpus:
             raise ValueError(
                 "Splitting model over gpus is not supported for Wan2.1 models")
-
-        if self.model_config.low_vram:
-            # quantize on the device
-            transformer.to('cpu', dtype=dtype)
-            flush()
-        else:
-            transformer.to(self.device_torch, dtype=dtype)
-            flush()
 
         if self.model_config.assistant_lora_path is not None or self.model_config.inference_lora_path is not None:
             raise ValueError(
@@ -392,27 +355,13 @@ class Wan21(BaseModel):
             raise ValueError(
                 "Loading LoRA is not supported for Wan2.1 models currently")
 
+        # load + quantize + offload + placement, all driven by model_config
+        transformer = WanTransformer3DModel.load(
+            transformer_path,
+            subfolder=subfolder,
+            **self.component_load_kwargs("transformer"),
+        )
         flush()
-        
-        if self.model_config.quantize:
-            if not transformer_loaded_from_cache:
-                self.print_and_status_update("Quantizing Transformer")
-                quantize_model(self, transformer)
-                self.save_quantized_module_cache(
-                    transformer, transformer_cache_path, "transformer"
-                )
-                flush()
-        
-        if self.model_config.layer_offloading and self.model_config.layer_offloading_transformer_percent > 0:
-            MemoryManager.attach(
-                transformer,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_transformer_percent
-            )
-        
-        if self.model_config.low_vram:
-            self.print_and_status_update("Moving transformer to CPU")
-            transformer.to('cpu')
 
         return transformer
 
@@ -443,51 +392,11 @@ class Wan21(BaseModel):
         flush()
 
         self.print_and_status_update("Loading UMT5EncoderModel")
-        text_encoder_cache_path = None
-        text_encoder = None
-        if self.model_config.quantize_te:
-            text_encoder_cache_path = self.get_quantized_module_cache_path(
-                component_name="text_encoder",
-                qtype=self.model_config.qtype,
-                source_ref=te_path,
-                extra_cache_key={"comfy_files": self._comfy_te_file},
-            )
-            text_encoder = self.load_quantized_module_cache(
-                text_encoder_cache_path, "text encoder"
-            )
-        text_encoder_loaded_from_cache = text_encoder is not None
-
-        if text_encoder is None:
-            tokenizer, text_encoder = get_umt5_encoder(
-                model_path=te_path,
-                tokenizer_subfolder="tokenizer",
-                encoder_subfolder="text_encoder",
-                torch_dtype=dtype,
-                comfy_files=self._comfy_te_file
-            )
-        else:
-            tokenizer = AutoTokenizer.from_pretrained(te_path, subfolder="tokenizer")
-
-        if not text_encoder_loaded_from_cache:
-            text_encoder.to(self.device_torch, dtype=dtype)
-            flush()
-
-        if self.model_config.quantize_te:
-            if not text_encoder_loaded_from_cache:
-                self.print_and_status_update("Quantizing UMT5EncoderModel")
-                quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
-                freeze(text_encoder)
-                self.save_quantized_module_cache(
-                    text_encoder, text_encoder_cache_path, "text encoder"
-                )
-                flush()
         
-        if self.model_config.layer_offloading and self.model_config.layer_offloading_text_encoder_percent > 0:
-            MemoryManager.attach(
-                text_encoder,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_text_encoder_percent
-            )
+        tokenizer = UMT5TextEncoder.load_tokenizer(te_path)
+        text_encoder = UMT5TextEncoder.load(
+            te_path, **self.component_load_kwargs("te")
+        )
 
         if self.model_config.low_vram:
             print("Moving transformer back to GPU")
@@ -500,11 +409,9 @@ class Wan21(BaseModel):
         
         if self._wan_vae_path is not None:
             # load the vae from individual repo
-            vae = AutoencoderKLWan.from_pretrained(
-                self._wan_vae_path, torch_dtype=dtype).to(dtype=dtype)
+            vae = WanVAE.load_model(self._wan_vae_path, dtype=dtype, subfolder="")
         else:
-            vae = AutoencoderKLWan.from_pretrained(
-                vae_path, subfolder="vae", torch_dtype=dtype).to(dtype=dtype)
+            vae = WanVAE.load_model(vae_path, dtype=dtype)
         flush()
 
         self.print_and_status_update("Making pipe")
@@ -526,7 +433,10 @@ class Wan21(BaseModel):
         pipe.transformer = pipe.transformer.to(self.device_torch)
 
         flush()
-        text_encoder.to(self.device_torch)
+        # low_vram: the text encoder stays on cpu; get_prompt_embeds moves it
+        # to the gpu on demand
+        if not self.model_config.low_vram:
+            text_encoder.to(self.device_torch)
         text_encoder.requires_grad_(False)
         text_encoder.eval()
         pipe.transformer = pipe.transformer.to(self.device_torch)
@@ -750,16 +660,15 @@ class Wan21(BaseModel):
         return False
 
     def save_model(self, output_path, meta, save_dtype):
-        # only save the unet
-        transformer: Wan21 = unwrap_model(self.model)
-        transformer.save_pretrained(
-            save_directory=os.path.join(output_path, 'transformer'),
-            safe_serialization=True,
+        # comfy-format single-file save (original wan key layout)
+        transformer = unwrap_model(self.model)
+        if not output_path.endswith(".safetensors"):
+            output_path += ".safetensors"
+        transformer.save_model(
+            output_path,
+            dtype=save_dtype,
+            metadata=get_meta_for_safetensors(meta, name=self.arch),
         )
-
-        meta_path = os.path.join(output_path, 'aitk_meta.yaml')
-        with open(meta_path, 'w') as f:
-            yaml.dump(meta, f)
 
     def get_loss_target(self, *args, **kwargs):
         noise = kwargs.get('noise')

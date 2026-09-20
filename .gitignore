@@ -192,3 +192,7 @@ original_repo
 /output_backups
 /tmp
 *.bak
+.next
+testing/.model_test_outputs
+testing/.engine_test_outputs
+testing/.*
