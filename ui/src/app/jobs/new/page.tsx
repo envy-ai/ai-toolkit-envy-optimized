@@ -151,6 +151,11 @@ export default function TrainingForm() {
 
   const saveJob = async () => {
     if (status === 'saving') return;
+    const nameOrPath = jobConfig.config.process[0].model.name_or_path;
+    if (typeof nameOrPath !== 'string' || nameOrPath.trim() === '') {
+      alert('Select a model architecture or enter a base model name/path before saving.');
+      return;
+    }
     setStatus('saving');
 
     apiClient

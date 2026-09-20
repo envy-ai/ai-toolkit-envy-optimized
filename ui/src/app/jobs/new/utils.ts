@@ -29,12 +29,16 @@ export const handleModelArchChange = (
   setJobConfig: (value: any, key: string) => void,
 ) => {
   const currentArch = modelArchs.find(a => a.name === currentArchName);
-  if (!currentArch || currentArch.name === newArchName) {
+  if (currentArchName === newArchName) {
     return;
   }
 
   // update the defaults when a model is selected
   const newArch = modelArchs.find(model => model.name === newArchName);
+  if (!newArch) {
+    console.error(`Unknown model architecture: ${newArchName}`);
+    return;
+  }
 
   // update vram setting
   if (!newArch?.additionalSections?.includes('model.low_vram')) {
@@ -61,8 +65,8 @@ export const handleModelArchChange = (
 
   const numDatasets = jobConfig.config.process[0].datasets.length;
 
-  let currentDefaults = expandDatasetDefaults(currentArch.defaults || {}, numDatasets);
-  let newDefaults = expandDatasetDefaults(newArch?.defaults || {}, numDatasets);
+  let currentDefaults = expandDatasetDefaults(currentArch?.defaults || {}, numDatasets);
+  let newDefaults = expandDatasetDefaults(newArch.defaults || {}, numDatasets);
 
   // set new model
   setJobConfig(newArchName, 'config.process[0].model.arch');

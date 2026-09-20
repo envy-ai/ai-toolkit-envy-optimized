@@ -496,7 +496,13 @@ export default function SimpleJob({
               label="Model Architecture"
               value={jobConfig.config.process[0].model.arch}
               onChange={value => {
-                handleModelArchChange(jobConfig.config.process[0].model.arch, value, jobConfig, setJobConfig);
+                handleModelArchChange(
+                  modelArchs,
+                  jobConfig.config.process[0].model.arch,
+                  value,
+                  jobConfig,
+                  setJobConfig,
+                );
               }}
               options={groupedModelOptions}
             />
