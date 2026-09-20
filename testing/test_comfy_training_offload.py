@@ -3,6 +3,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from jobs.process.BaseSDTrainProcess import BaseSDTrainProcess
+from toolkit.comfy_sample import (
+    DEFAULT_COMFY_WORKFLOW_PATH,
+    DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
+    DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
+)
 
 
 class FakeTensor:
@@ -32,6 +37,20 @@ class FakeNetwork:
 
 
 class ComfyTrainingOffloadTests(unittest.TestCase):
+    def test_qwen_image_2_migrates_legacy_krea_workflow(self):
+        process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
+        process.model_config = SimpleNamespace(arch="qwen_image_2")
+        comfy_config = SimpleNamespace(workflow_path=DEFAULT_COMFY_WORKFLOW_PATH)
+
+        self.assertEqual(
+            process._get_comfy_workflow_path(comfy_config),
+            DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
+        )
+        self.assertEqual(
+            process._get_comfy_workflow_path(comfy_config, batch=True),
+            DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
+        )
+
     def test_startup_releases_comfy_vram_before_training_model_load(self):
         process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
         process.accelerator = SimpleNamespace(is_main_process=True)

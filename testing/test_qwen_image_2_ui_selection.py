@@ -26,6 +26,14 @@ class QwenImage2UiSelectionTests(unittest.TestCase):
         self.assertIn('label: "Qwen-Image-2.1"', arch)
         self.assertIn('"Comfy-Org/Qwen-Image-2.1"', arch)
         self.assertIn('"config.process[0].model.name_or_path"', arch)
+        self.assertIn('"config.process[0].sample.comfy.workflow_path"', arch)
+        self.assertIn('"config/comfy_templates/qwen_image_2_lora_sample.json.njk"', arch)
+
+    def test_qwen_image_2_workflow_is_selectable(self):
+        source = (REPO_ROOT / "ui/src/app/jobs/new/SimpleJob.tsx").read_text()
+
+        self.assertIn("config/comfy_templates/qwen_image_2_lora_sample.json.njk", source)
+        self.assertIn("Qwen Image 2.1 LoRA image", source)
 
     def test_invalid_empty_model_path_is_not_saved(self):
         source = (REPO_ROOT / "ui/src/app/jobs/new/page.tsx").read_text()

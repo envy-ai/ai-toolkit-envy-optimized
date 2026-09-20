@@ -86,6 +86,8 @@ from toolkit.comfy_sample import (
     ComfySampleRequest,
     DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
     DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH,
+    DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
+    DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,
@@ -834,9 +836,23 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def _get_comfy_workflow_path(self, comfy_config, batch=False):
         workflow_path = comfy_config.workflow_path
+        # Qwen Image 2.1 jobs created before its dedicated Comfy workflow was
+        # added inherited Krea 2's default. Transparently migrate that default
+        # at render time so already-saved jobs do not feed Qwen's VAE through
+        # the incompatible Krea custom VAE loader.
+        model_arch = getattr(getattr(self, 'model_config', None), 'arch', None)
+        if model_arch == "qwen_image_2" and workflow_path in (
+                DEFAULT_COMFY_WORKFLOW_PATH,
+                DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
+        ):
+            workflow_path = DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH
         if batch:
             workflow_pairs = (
                 (DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH),
+                (
+                    DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
+                    DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
+                ),
                 (
                     DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
                     DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH,
@@ -849,6 +865,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         else:
             workflow_pairs = (
                 (DEFAULT_COMFY_BATCH_WORKFLOW_PATH, DEFAULT_COMFY_WORKFLOW_PATH),
+                (
+                    DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
+                    DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
+                ),
                 (
                     DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH,
                     DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,

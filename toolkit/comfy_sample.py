@@ -22,6 +22,12 @@ COMFY_CACHE_MONITOR_RELEASE_PATH = "/comfyui-cache-monitor/release_vram"
 COMFY_LEGACY_FREE_PATH = "/api/free"
 DEFAULT_COMFY_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample.json.njk"
 DEFAULT_COMFY_BATCH_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample_batch_easy_use.json.njk"
+DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH = (
+    "config/comfy_templates/qwen_image_2_lora_sample.json.njk"
+)
+DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH = (
+    "config/comfy_templates/qwen_image_2_lora_sample_batch_easy_use.json.njk"
+)
 DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH = (
     "config/comfy_templates/qwen_image_edit_lora_sample.json.njk"
 )

@@ -210,6 +210,71 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(rendered["17"]["inputs"]["model"], ["36", 0])
         self.assertNotIn("37", rendered)
 
+    def test_renders_qwen_image_2_single_template_with_native_vae_nodes(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        request = replace(
+            self.request,
+            model="qwen_image_2.1_int8_convrot.safetensors",
+            vae="qwen_image_2.1_vae_bf16.safetensors",
+            text_encoder="qwen3vl_8b_int8_convrot.safetensors",
+            inference_lora="",
+        )
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
+            request,
+        )
+
+        self.assertEqual(rendered["1"]["class_type"], "TextEncodeQwenImage21")
+        self.assertEqual(rendered["1"]["inputs"]["prompt"], "new prompt")
+        self.assertEqual(rendered["1"]["inputs"]["negative_prompt"], "")
+        self.assertEqual(rendered["5"]["inputs"]["type"], "qwen_image")
+        self.assertEqual(rendered["6"]["class_type"], "VAELoader")
+        self.assertEqual(rendered["3"]["class_type"], "VAEDecodeTiled")
+        self.assertEqual(rendered["3"]["inputs"]["tile_size"], 512)
+        self.assertEqual(rendered["17"]["inputs"]["positive"], ["1", 0])
+        self.assertEqual(rendered["17"]["inputs"]["negative"], ["1", 1])
+        self.assertFalse(any(
+            node["class_type"].startswith("VAEUtils_")
+            for node in rendered.values()
+        ))
+
+    def test_renders_qwen_image_2_batch_template(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        batch_request = comfy_sample.ComfyBatchSampleRequest(
+            prompts=["first prompt", "second prompt"],
+            width=1440,
+            height=1440,
+            steps=20,
+            cfg=3,
+            seeds=[42, 43],
+            model="qwen_image_2.1_int8_convrot.safetensors",
+            vae="qwen_image_2.1_vae_bf16.safetensors",
+            text_encoder="qwen3vl_8b_int8_convrot.safetensors",
+            sampler="seeds_2",
+            scheduler="simple",
+            inference_lora="",
+            inference_lora_strength=1,
+            output_format="webp_with_json",
+            output_quality="high",
+            training_lora_path="/tmp/current_lora.safetensors",
+            training_lora_filename="current_lora.safetensors",
+            filename_prefix="ai-toolkit/qwen21_batch",
+        )
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
+            batch_request,
+        )
+
+        self.assertEqual(rendered["41"]["inputs"]["total"], 2)
+        self.assertEqual(rendered["71"]["class_type"], "TextEncodeQwenImage21")
+        self.assertEqual(rendered["71"]["inputs"]["prompt"], ["70", 0])
+        self.assertEqual(rendered["17"]["inputs"]["negative"], ["71", 1])
+        self.assertEqual(rendered["6"]["class_type"], "VAELoader")
+        self.assertEqual(rendered["3"]["class_type"], "VAEDecodeTiled")
+        self.assertEqual(rendered["23"]["inputs"]["images"], ["50", 0])
+
     def test_renders_minimax_h3_fl2v_video_template(self):
         from toolkit.comfy_sample import render_nunjucks_workflow
 
@@ -1018,6 +1083,12 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         workflow_source = source[workflow_start:workflow_end]
 
         self.assertIn("(DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH)", workflow_source)
+        self.assertIn("model_arch == \"qwen_image_2\"", workflow_source)
+        self.assertIn(
+            "DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,\n"
+            "                    DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH",
+            workflow_source,
+        )
         self.assertIn(
             "DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,\n"
             "                    DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH",

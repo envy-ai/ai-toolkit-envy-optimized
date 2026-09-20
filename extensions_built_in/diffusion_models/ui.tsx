@@ -5,6 +5,7 @@ import Link from "next/link";
 import type { ModelArch } from "@/app/jobs/new/options";
 import type { JobConfig } from "@/types";
 import {
+  defaultComfySampleConfig,
   defaultSampleConfig,
   defaultIdeogramSamplesConfig,
 } from "@/helpers/defaultSamples";
@@ -556,6 +557,10 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
       "config.process[0].model.qtype": ["convrot8", "qfloat8"],
       "config.process[0].model.qtype_te": ["convrot8", "qfloat8"],
       "config.process[0].sample.guidance_scale": [3.0, 4.0],
+      "config.process[0].sample.comfy.workflow_path": [
+        "config/comfy_templates/qwen_image_2_lora_sample.json.njk",
+        defaultComfySampleConfig.workflow_path,
+      ],
     },
     disableSections: ["network.conv", "train.unload_text_encoder"],
     // one model: it edits when the dataset has control paths, and is plain

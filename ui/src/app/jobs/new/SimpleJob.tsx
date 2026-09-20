@@ -87,6 +87,10 @@ const comfyWorkflowOptions: SelectOption[] = [
     label: 'Krea 2 LoRA image',
   },
   {
+    value: 'config/comfy_templates/qwen_image_2_lora_sample.json.njk',
+    label: 'Qwen Image 2.1 LoRA image',
+  },
+  {
     value: 'config/comfy_templates/qwen_image_edit_lora_sample.json.njk',
     label: 'Qwen Image Edit LoRA',
   },
