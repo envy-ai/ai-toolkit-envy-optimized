@@ -539,11 +539,15 @@ class Krea2Model(BaseModel):
         self.print_and_status_update("Model Loaded")
 
     def _load_inference_lora(self):
-        self.assistant_lora = load_assistant_lora_from_path(
+        # Keep this separate from the Turbo training adapter.  Both attach
+        # forward hooks to the transformer, and those hooks hold weak network
+        # references.  Replacing ``assistant_lora`` here would allow the
+        # training adapter to be collected during the first training step.
+        self.inference_lora_network = load_assistant_lora_from_path(
             self.model_config.inference_lora_path, self
         )
-        self.assistant_lora.is_active = False
-        self.assistant_lora.force_to("cpu", getattr(self, "torch_dtype", torch.float32))
+        self.inference_lora_network.is_active = False
+        self.inference_lora_network.force_to("cpu", getattr(self, "torch_dtype", torch.float32))
         flush()
 
     # ------------------------------------------------------------------

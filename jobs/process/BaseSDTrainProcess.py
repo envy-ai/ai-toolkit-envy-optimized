@@ -481,6 +481,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 for attr_name in (
                     'network',
                     'assistant_lora',
+                    'inference_lora_network',
                     'accuracy_recovery_adapter',
                 )
             )

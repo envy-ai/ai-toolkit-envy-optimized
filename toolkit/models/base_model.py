@@ -143,6 +143,10 @@ class BaseModel:
 
         self.refiner_unet: Union[None, 'UNet2DConditionModel'] = None
         self.assistant_lora: Union[None, 'LoRASpecialNetwork'] = None
+        # Some model families use a training assistant and a separate inference
+        # LoRA at the same time.  Keep them as distinct strong references: the
+        # LoRA layer hooks hold weak references to their owning network.
+        self.inference_lora_network: Union[None, 'LoRASpecialNetwork'] = None
 
         # sdxl stuff
         self.logit_scale = None
@@ -389,6 +393,15 @@ class BaseModel:
     def add_status_update_hook(self, func):
         self._status_update_hooks.append(func)
 
+    def _get_inference_lora_network(self):
+        """Return the dedicated inference LoRA, with legacy fallback.
+
+        Older model loaders store an inference LoRA in ``assistant_lora``.
+        The fallback preserves that behaviour while allowing models that need
+        both adapters (such as Krea 2 Turbo) to retain each network.
+        """
+        return self.inference_lora_network or self.assistant_lora
+
     @torch.no_grad()
     def generate_images(
             self,
@@ -400,12 +413,13 @@ class BaseModel:
         network = self.network
         merge_multiplier = 1.0
         flush()
+        inference_lora = self._get_inference_lora_network()
         if (
-            self.assistant_lora is None
-            and (
-                self.model_config.assistant_lora_path is not None
-                or self.model_config.inference_lora_path is not None
-            )
+            self.model_config.assistant_lora_path is not None
+            and self.assistant_lora is None
+        ) or (
+            self.model_config.inference_lora_path is not None
+            and inference_lora is None
         ):
             raise RuntimeError(
                 f"assistant/inference LoRA was configured but not loaded for arch '{self.arch}'"
@@ -423,9 +437,9 @@ class BaseModel:
 
         if self.model_config.inference_lora_path is not None:
             print_acc("Loading inference lora")
-            self.assistant_lora.is_active = True
+            inference_lora.is_active = True
             # move weights on to the device
-            self.assistant_lora.force_to(self.device_torch, self.torch_dtype)
+            inference_lora.force_to(self.device_torch, self.torch_dtype)
 
         if network is not None:
             network = unwrap_model(self.network)
@@ -737,9 +751,9 @@ class BaseModel:
 
         if self.model_config.inference_lora_path is not None:
             print_acc("Unloading inference lora")
-            self.assistant_lora.is_active = False
+            inference_lora.is_active = False
             # move weights off the device
-            self.assistant_lora.force_to('cpu', self.torch_dtype)
+            inference_lora.force_to('cpu', self.torch_dtype)
         flush()
 
     def get_latent_noise(
