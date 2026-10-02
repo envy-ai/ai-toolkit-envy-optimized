@@ -379,6 +379,9 @@ const docs: { [key: string]: ConfigDoc } = {
         large your target image is. Match Target Res will match the resolution of your target to feed in the control
         images allowing you to use less VRAM when training with smaller resolutions. You can still use different aspect
         ratios, the image will just be resizes to match the amount of pixels in the target image.
+        For Qwen Image 2.1 in this fork, leaving this off keeps references bucket-processed and capped, which is the
+        lower-memory, batch-compatible default. Enabling it preserves each reference&apos;s aspect ratio and may use
+        more memory at larger target resolutions.
       </>
     ),
   },
