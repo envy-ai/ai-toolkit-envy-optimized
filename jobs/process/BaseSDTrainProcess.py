@@ -68,6 +68,10 @@ from toolkit.config_modules import SaveConfig, LoggingConfig, SampleConfig, Netw
     GenerateImageConfig, EmbeddingConfig, DatasetConfig, preprocess_dataset_raw_config, AdapterConfig, GuidanceConfig, validate_configs, \
     DecoratorConfig
 from toolkit.logging_aitk import create_logger
+from toolkit.lowest_loss import (
+    checkpoint_step, is_record_low_save_due, load_record_low_checkpoints,
+    record_low_retention, write_record_low_checkpoints,
+)
 from diffusers import FluxTransformer2DModel
 from toolkit.accelerator import get_accelerator, unwrap_model
 from toolkit.print import print_acc
@@ -98,6 +102,7 @@ from toolkit.comfy_sample import (
     load_workflow,
     workflow_path_is_template,
 )
+from toolkit.comfy_lora import prepare_qwen_image_2_inference_dora
 
 
 def _normalize_network_config(network_config, process_config):
@@ -114,6 +119,27 @@ def _normalize_network_config(network_config, process_config):
 
     normalized_config['network_kwargs'] = network_kwargs
     return normalized_config
+
+
+def _log_cuda_training_oom(error: BaseException, step: int, device: torch.device):
+    """Keep the original failure and allocator state before OOM cleanup runs."""
+    print_acc(f"CUDA out of memory during training step {step}: {error}")
+    print_acc(traceback.format_exc())
+    try:
+        if torch.cuda.is_available():
+            gib = 1024 ** 3
+            free, total = torch.cuda.mem_get_info(device)
+            stats = torch.cuda.memory_stats(device)
+            print_acc(
+                "CUDA memory at OOM (GiB): "
+                f"allocated={torch.cuda.memory_allocated(device) / gib:.2f}, "
+                f"reserved={torch.cuda.memory_reserved(device) / gib:.2f}, "
+                f"peak_allocated={torch.cuda.max_memory_allocated(device) / gib:.2f}, "
+                f"inactive_split={stats.get('inactive_split_bytes.all.current', 0) / gib:.2f}, "
+                f"device_free={free / gib:.2f}, device_total={total / gib:.2f}"
+            )
+    except Exception as diagnostic_error:
+        print_acc(f"Could not collect CUDA memory statistics: {diagnostic_error}")
 
 
 class BaseSDTrainProcess(BaseTrainProcess):
@@ -170,6 +196,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self._live_sample_config_mtime = None
         self.logging_config = LoggingConfig(**self.get_conf('logging', {}))
         self.logger = create_logger(self.logging_config, config, self.save_root)
+        self._record_low_index_path = os.path.join(self.save_root, '.record_low_checkpoints.json')
+        self._record_low_pending_step = None
         self.optimizer: torch.optim.Optimizer = None
         self.lr_scheduler = None
         self.data_loader: Union[DataLoader, None] = None
@@ -195,6 +223,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if self.train_config.cache_text_embeddings:
             for raw_dataset in raw_datasets:
                 raw_dataset['cache_text_embeddings'] = True
+
+        # The decoded-pixel auxiliary loss needs its clean pixel target. When
+        # latents are cached, load the source tensor alongside them instead of
+        # spending VRAM and time decoding the target latent every step.
+        if self.train_config.frequency_loss_enabled:
+            for raw_dataset in raw_datasets:
+                raw_dataset['load_image_when_caching_latents'] = True
 
         # pass diff output preservation to the datasets so the data loader can build
         # and cache the DOP caption (dataset trigger word replaced with the class)
@@ -265,7 +300,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
             device=self.device_torch,
             train_unet=self.train_config.train_unet,
             train_text_encoder=self.train_config.train_text_encoder,
-            cached_latents=self.is_latents_cached,
+            # Decoded-pixel frequency loss needs the frozen VAE even when the
+            # training latents themselves are already cached.
+            cached_latents=(
+                self.is_latents_cached
+                and not self.train_config.frequency_loss_enabled
+            ),
             train_lora=self.network_config is not None,
             train_adapter=is_training_adapter,
             train_embedding=self.embed_config is not None,
@@ -279,7 +319,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
             device=self.device_torch,
             train_unet=self.train_config.train_unet,
             train_text_encoder=self.train_config.train_text_encoder,
-            cached_latents=self.is_latents_cached,
+            cached_latents=(
+                self.is_latents_cached
+                and not self.train_config.frequency_loss_enabled
+            ),
             train_lora=self.network_config is not None,
             train_adapter=is_training_adapter,
             train_embedding=self.embed_config is not None,
@@ -363,9 +406,28 @@ class BaseSDTrainProcess(BaseTrainProcess):
             if 'disable_sampling' in train_config:
                 self.train_config.disable_sampling = train_config['disable_sampling']
 
+            save_config = process_config.get('save', {})
+            if 'sample_on_record_low' in save_config:
+                self.save_config.sample_on_record_low = save_config['sample_on_record_low']
+
             self._live_sample_config_mtime = current_mtime
         except Exception as e:
             print_acc(f"Failed to refresh live sample config from {config_path}: {e}")
+
+    def _get_step_sample_reason(self, is_new_lowest_loss=False):
+        if self.train_config.disable_sampling:
+            return None
+
+        reasons = []
+        if (
+            self.sample_config.sample_every
+            and self.step_num >= self.sample_config.sample_start_step
+            and self.step_num % self.sample_config.sample_every == 0
+        ):
+            reasons.append('scheduled')
+        if is_new_lowest_loss and self.save_config.sample_on_record_low:
+            reasons.append('record low')
+        return ' and '.join(reasons) if reasons else None
 
     def _is_comfy_sampling_enabled(self):
         sample_comfy = getattr(getattr(self, 'sample_config', None), 'comfy', None)
@@ -407,6 +469,20 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if replace_to.endswith(('/', '\\')) and suffix.startswith(('/', '\\')):
             suffix = suffix[1:]
         return replace_to + suffix
+
+    def _prepare_comfy_inference_lora_path(self, comfy_config) -> str:
+        """Normalize legacy Qwen 2.1 DoRA files without modifying the source."""
+        inference_lora = getattr(comfy_config, 'inference_lora', '') or ''
+        model_arch = getattr(getattr(self, 'model_config', None), 'arch', None)
+        if not inference_lora or model_arch != 'qwen_image_2':
+            return ''
+        prepared_path = prepare_qwen_image_2_inference_dora(
+            inference_lora,
+            cache_dir=os.path.join(self.save_root, '.comfy_inference_lora_cache'),
+        )
+        if not prepared_path:
+            return ''
+        return self._get_comfy_training_lora_path(prepared_path, comfy_config)
 
     def _cleanup_legacy_comfy_sample_loras(self, sample_folder):
         for stale_path in glob.glob(os.path.join(sample_folder, f'.{self.job.name}*_comfy_current*.safetensors')):
@@ -729,6 +805,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             name=f"{self.job.name}-comfy-samples-{step or 'latest'}",
             daemon=True,
         )
+        thread.record_low_step = step if step == self._record_low_pending_step else None
         thread.start()
         self._comfy_background_threads.append(thread)
         return thread
@@ -752,6 +829,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         for thread in list(self._comfy_background_threads):
             thread.join()
         self._comfy_background_threads.clear()
+        if self.accelerator.is_main_process:
+            self.clean_up_saves()
 
         if len(self._comfy_background_errors) > 0:
             print_acc("One or more ComfyUI background sample tasks failed after training completed")
@@ -883,12 +962,54 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 return target_path
         return workflow_path
 
+    @staticmethod
+    def _create_comfy_image_progress_bar(image_indices, image_count, expected_steps):
+        display_indices = [int(index) + 1 for index in image_indices]
+        if len(display_indices) == 1:
+            description = f"ComfyUI image {display_indices[0]}/{image_count}"
+        elif display_indices == list(range(display_indices[0], display_indices[-1] + 1)):
+            description = (
+                f"ComfyUI images {display_indices[0]}-{display_indices[-1]}/{image_count}"
+            )
+        else:
+            description = f"ComfyUI images {','.join(map(str, display_indices))}/{image_count}"
+        return ToolkitProgressBar(
+            total=max(1, int(expected_steps)),
+            desc=description,
+            unit="step",
+            dynamic_ncols=True,
+            leave=True,
+            ascii="-#",
+            bar_format="{desc} |{bar:24}| {n_fmt}/{total_fmt} steps",
+        )
+
+    @staticmethod
+    def _update_comfy_image_progress_bar(progress_bar, value, maximum):
+        maximum = max(1, int(maximum))
+        value = max(0, min(int(value), maximum))
+        if progress_bar.total != maximum:
+            progress_bar.total = maximum
+        if value >= progress_bar.n:
+            progress_bar.update(value - progress_bar.n)
+        else:
+            # A workflow can contain multiple sampler nodes. ComfyUI restarts
+            # its counter for each one, so reflect the reset instead of freezing.
+            progress_bar.n = value
+            progress_bar.refresh()
+
+    @staticmethod
+    def _close_comfy_image_progress_bar(progress_bar, completed=False):
+        if completed and progress_bar.n < progress_bar.total:
+            progress_bar.update(progress_bar.total - progress_bar.n)
+        progress_bar.close()
+
     def _render_comfy_samples(self, gen_img_config_list: List[GenerateImageConfig], sample_config: SampleConfig, step=None):
         if len(gen_img_config_list) == 0:
             return
 
         comfy_config = sample_config.comfy
         workflow_path = self._get_comfy_workflow_path(comfy_config)
+        is_qwen_image_2_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH
         is_qwen_image_edit_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH
         is_qwen_image_edit_plus_workflow = (
             workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH
@@ -902,6 +1023,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         training_lora_path = self._save_current_network_for_comfy(step=step)
         training_lora_filename = self._get_comfy_lora_display_filename(step)
         comfy_training_lora_path = self._get_comfy_training_lora_path(training_lora_path, comfy_config)
+        comfy_inference_lora_path = self._prepare_comfy_inference_lora_path(comfy_config)
         workflow = None
         if not workflow_path_is_template(workflow_path):
             workflow = load_workflow(workflow_path)
@@ -924,7 +1046,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     control_image_path = gen_config.ctrl_img_1 or gen_config.ctrl_img
                     control_image_path_2 = gen_config.ctrl_img_2
                     control_image_path_3 = gen_config.ctrl_img_3
-                    if is_qwen_image_edit_workflow:
+                    if is_qwen_image_2_workflow:
+                        if control_image_path_2 is not None and control_image_path is None:
+                            raise ValueError(
+                                f"Qwen Image 2.1 ComfyUI sample {i + 1} has "
+                                "ctrl_img_2 without ctrl_img or ctrl_img_1."
+                            )
+                        if control_image_path_3 is not None and control_image_path_2 is None:
+                            raise ValueError(
+                                f"Qwen Image 2.1 ComfyUI sample {i + 1} has "
+                                "ctrl_img_3 without ctrl_img_2."
+                            )
+                    elif is_qwen_image_edit_workflow:
                         if control_image_path_2 is not None or control_image_path_3 is not None:
                             raise ValueError(
                                 f"Qwen Image Edit ComfyUI sample {i + 1} supports one control image. "
@@ -955,7 +1088,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     uploaded_control_image = (
                         client.upload_image(control_image_path)
                         if control_image_path and (
-                            is_qwen_image_edit_workflow
+                            is_qwen_image_2_workflow
+                            or is_qwen_image_edit_workflow
                             or is_qwen_image_edit_plus_workflow
                             or is_minimax_h3_fl2v_workflow
                         )
@@ -964,18 +1098,23 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     uploaded_control_image_2 = (
                         client.upload_image(control_image_path_2)
                         if control_image_path_2 and (
-                            is_qwen_image_edit_plus_workflow
+                            is_qwen_image_2_workflow
+                            or is_qwen_image_edit_plus_workflow
                             or is_minimax_h3_fl2v_workflow
                         )
                         else None
                     )
                     uploaded_control_image_3 = (
                         client.upload_image(control_image_path_3)
-                        if control_image_path_3 and is_qwen_image_edit_plus_workflow
+                        if control_image_path_3 and (
+                            is_qwen_image_2_workflow
+                            or is_qwen_image_edit_plus_workflow
+                        )
                         else None
                     )
                     request = ComfySampleRequest(
                         prompt=gen_config.prompt,
+                        negative_prompt=comfy_config.negative_prompt,
                         width=gen_config.width,
                         height=gen_config.height,
                         steps=gen_config.num_inference_steps,
@@ -989,6 +1128,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         scheduler=comfy_config.scheduler,
                         inference_lora=comfy_config.inference_lora,
                         inference_lora_strength=comfy_config.inference_lora_strength,
+                        inference_lora_absolute_path=comfy_inference_lora_path,
                         output_format=comfy_config.output_format,
                         output_quality=comfy_config.output_quality,
                         training_lora_path=comfy_training_lora_path,
@@ -1002,16 +1142,28 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         training_lora_strength=gen_config.network_multiplier,
                     )
                     patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)
+                    client.begin_live_progress()
                     prompt_id = client.post_prompt(patched_workflow)
                     self._log_comfy_prompt_submitted(
                         prompt_id,
                         len(gen_img_config_list),
                         sample_index=i + 1,
                     )
-                    images = client.wait_for_images(
-                        prompt_id,
-                        cancel_check=self._should_cancel_comfy_prompt_wait,
+                    image_progress = self._create_comfy_image_progress_bar(
+                        [i], len(gen_img_config_list), gen_config.num_inference_steps
                     )
+                    image_completed = False
+                    try:
+                        images = client.wait_for_images(
+                            prompt_id,
+                            cancel_check=self._should_cancel_comfy_prompt_wait,
+                            progress_callback=lambda value, maximum: self._update_comfy_image_progress_bar(
+                                image_progress, value, maximum
+                            ),
+                        )
+                        image_completed = True
+                    finally:
+                        self._close_comfy_image_progress_bar(image_progress, image_completed)
                     if len(images) == 0:
                         raise RuntimeError(f"ComfyUI prompt {prompt_id} completed without image outputs")
                     client.download_image(images[0], output_path)
@@ -1068,6 +1220,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             print_acc("ComfyUI prompt batching requires a .njk workflow template. Falling back to individual prompts.")
             return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
         is_qwen_image_edit_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH
+        is_qwen_image_2_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH
         is_qwen_image_edit_plus_workflow = (
             workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH
         )
@@ -1084,26 +1237,41 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     raise ValueError(
                         f"Qwen Image Edit ComfyUI sample {i + 1} is missing ctrl_img or ctrl_img_1."
                     )
-        elif is_qwen_image_edit_plus_workflow:
-            # The workflow builds one aligned list per control-image slot, so samples
-            # with different slot counts must be submitted as separate prompts.
+        elif is_qwen_image_edit_plus_workflow or is_qwen_image_2_workflow:
+            # A batch workflow shares its canvas and sampling settings across
+            # samples and builds one aligned list per control-image slot.
             groups_by_reference_count = OrderedDict()
             for i, gen_config in enumerate(gen_img_config_list):
                 control_image_path = gen_config.ctrl_img_1 or gen_config.ctrl_img
-                if not control_image_path:
+                if is_qwen_image_edit_plus_workflow and not control_image_path:
                     raise ValueError(
                         f"Qwen Image Edit Plus ComfyUI sample {i + 1} is missing ctrl_img or ctrl_img_1."
                     )
+                if gen_config.ctrl_img_2 is not None and control_image_path is None:
+                    raise ValueError(
+                        f"Qwen Image 2.1 ComfyUI sample {i + 1} has "
+                        "ctrl_img_2 without ctrl_img or ctrl_img_1."
+                    )
                 if gen_config.ctrl_img_3 is not None and gen_config.ctrl_img_2 is None:
                     raise ValueError(
-                        f"Qwen Image Edit Plus ComfyUI sample {i + 1} has ctrl_img_3 without ctrl_img_2."
+                        f"Qwen Image ComfyUI sample {i + 1} has ctrl_img_3 without ctrl_img_2."
                     )
-                reference_count = 1
+                reference_count = 1 if control_image_path else 0
                 if gen_config.ctrl_img_2 is not None:
                     reference_count = 2
                 if gen_config.ctrl_img_3 is not None:
                     reference_count = 3
-                groups_by_reference_count.setdefault(reference_count, []).append((i, gen_config))
+                group_key = (
+                    reference_count,
+                    gen_config.width,
+                    gen_config.height,
+                    gen_config.num_inference_steps,
+                    gen_config.guidance_scale,
+                    gen_config.network_multiplier,
+                    gen_config.num_frames,
+                    gen_config.fps,
+                )
+                groups_by_reference_count.setdefault(group_key, []).append((i, gen_config))
             indexed_batch_groups = list(groups_by_reference_count.values())
 
         sample_folder = os.path.join(self.save_root, 'samples')
@@ -1111,6 +1279,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         training_lora_path = self._save_current_network_for_comfy(step=step)
         training_lora_filename = self._get_comfy_lora_display_filename(step)
         comfy_training_lora_path = self._get_comfy_training_lora_path(training_lora_path, comfy_config)
+        comfy_inference_lora_path = self._prepare_comfy_inference_lora_path(comfy_config)
         output_paths = [gen_config.get_image_path(i) for i, gen_config in enumerate(gen_img_config_list)]
         client = ComfyApiClient(
             api_url=comfy_config.api_url,
@@ -1141,12 +1310,19 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     control_image_paths = []
                     control_image_paths_2 = []
                     control_image_paths_3 = []
-                    if is_qwen_image_edit_workflow or is_qwen_image_edit_plus_workflow:
+                    if (
+                        is_qwen_image_2_workflow
+                        or is_qwen_image_edit_workflow
+                        or is_qwen_image_edit_plus_workflow
+                    ):
                         control_image_paths = [
                             gen_config.ctrl_img_1 or gen_config.ctrl_img
                             for gen_config in group_configs
                         ]
-                    if is_qwen_image_edit_plus_workflow:
+                        control_image_paths = [
+                            path for path in control_image_paths if path is not None
+                        ]
+                    if is_qwen_image_2_workflow or is_qwen_image_edit_plus_workflow:
                         control_image_paths_2 = [
                             gen_config.ctrl_img_2
                             for gen_config in group_configs
@@ -1175,6 +1351,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     if is_batch_group:
                         request = ComfyBatchSampleRequest(
                             prompts=[gen_config.prompt for gen_config in group_configs],
+                            negative_prompt=comfy_config.negative_prompt,
                             width=first_config.width,
                             height=first_config.height,
                             steps=first_config.num_inference_steps,
@@ -1188,6 +1365,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             scheduler=comfy_config.scheduler,
                             inference_lora=comfy_config.inference_lora,
                             inference_lora_strength=comfy_config.inference_lora_strength,
+                            inference_lora_absolute_path=comfy_inference_lora_path,
                             output_format=comfy_config.output_format,
                             output_quality=comfy_config.output_quality,
                             training_lora_path=comfy_training_lora_path,
@@ -1204,6 +1382,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     else:
                         request = ComfySampleRequest(
                             prompt=first_config.prompt,
+                            negative_prompt=comfy_config.negative_prompt,
                             width=first_config.width,
                             height=first_config.height,
                             steps=first_config.num_inference_steps,
@@ -1217,6 +1396,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             scheduler=comfy_config.scheduler,
                             inference_lora=comfy_config.inference_lora,
                             inference_lora_strength=comfy_config.inference_lora_strength,
+                            inference_lora_absolute_path=comfy_inference_lora_path,
                             output_format=comfy_config.output_format,
                             output_quality=comfy_config.output_quality,
                             training_lora_path=comfy_training_lora_path,
@@ -1239,6 +1419,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             single_workflow,
                         )
 
+                    client.begin_live_progress()
                     prompt_id = client.post_prompt(patched_workflow)
                     self._log_comfy_prompt_submitted(
                         prompt_id,
@@ -1246,10 +1427,24 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         sample_index=first_original_index + 1 if not is_batch_group else None,
                         batch=is_batch_group,
                     )
-                    images = client.wait_for_images(
-                        prompt_id,
-                        cancel_check=self._should_cancel_comfy_prompt_wait,
+                    group_image_indices = [index for index, _ in indexed_batch_group]
+                    image_progress = self._create_comfy_image_progress_bar(
+                        group_image_indices,
+                        len(gen_img_config_list),
+                        first_config.num_inference_steps,
                     )
+                    image_completed = False
+                    try:
+                        images = client.wait_for_images(
+                            prompt_id,
+                            cancel_check=self._should_cancel_comfy_prompt_wait,
+                            progress_callback=lambda value, maximum: self._update_comfy_image_progress_bar(
+                                image_progress, value, maximum
+                            ),
+                        )
+                        image_completed = True
+                    finally:
+                        self._close_comfy_image_progress_bar(image_progress, image_completed)
                     if len(images) < len(group_configs):
                         raise RuntimeError(
                             f"ComfyUI prompt {prompt_id} completed with {len(images)} image output(s), "
@@ -1467,36 +1662,57 @@ class BaseSDTrainProcess(BaseTrainProcess):
             critic_pattern = f"CRITIC_{self.job.name}_*"
             critic_items = glob.glob(os.path.join(self.save_root, critic_pattern))
 
-            # Sort the lists by creation time if they are not empty
+            # Step numbers remain chronological even when a resumed run rewrites a file.
+            def save_order(path):
+                step = checkpoint_step(path)
+                return (step if step is not None else -1, os.path.getctime(path))
+
             if safetensors_files:
-                safetensors_files.sort(key=os.path.getctime)
+                safetensors_files.sort(key=save_order)
             if pt_files:
-                pt_files.sort(key=os.path.getctime)
+                pt_files.sort(key=save_order)
             if directories:
-                directories.sort(key=os.path.getctime)
+                directories.sort(key=save_order)
             if embed_files:
-                embed_files.sort(key=os.path.getctime)
+                embed_files.sort(key=save_order)
             if critic_items:
-                critic_items.sort(key=os.path.getctime)
+                critic_items.sort(key=save_order)
 
             # Combine and sort the lists
             combined_items = safetensors_files + directories + pt_files
-            combined_items.sort(key=os.path.getctime)
+            combined_items.sort(key=save_order)
             
             num_saves_to_keep = self.save_config.max_step_saves_to_keep
             
             if hasattr(self.sd, 'max_step_saves_to_keep_multiplier'):
                 num_saves_to_keep *= self.sd.max_step_saves_to_keep_multiplier
 
-            # Use slicing with a check to avoid 'NoneType' error
-            safetensors_to_remove = safetensors_files[
-                                    :-num_saves_to_keep] if safetensors_files else []
-            pt_files_to_remove = pt_files[:-num_saves_to_keep] if pt_files else []
-            directories_to_remove = directories[:-num_saves_to_keep] if directories else []
-            embeddings_to_remove = embed_files[:-num_saves_to_keep] if embed_files else []
-            critic_to_remove = critic_items[:-num_saves_to_keep] if critic_items else []
+            records = load_record_low_checkpoints(self._record_low_index_path, self.save_root)
+            best_steps, record_only_steps = record_low_retention(
+                records, self.save_config.max_record_low_saves_to_keep,
+            )
+            protected_steps = best_steps | {
+                thread.record_low_step for thread in self._comfy_background_threads
+                if thread.is_alive() and getattr(thread, 'record_low_step', None) is not None
+            }
+            if self._record_low_pending_step is not None:
+                protected_steps.add(self._record_low_pending_step)
 
-            items_to_remove = safetensors_to_remove + pt_files_to_remove + directories_to_remove + embeddings_to_remove + critic_to_remove
+            def old_saves(items):
+                scheduled_items = [item for item in items if checkpoint_step(item) not in record_only_steps]
+                recent = (
+                    set(scheduled_items[-num_saves_to_keep:])
+                    if num_saves_to_keep > 0 else set(scheduled_items)
+                )
+                return [
+                    item for item in items
+                    if checkpoint_step(item) not in protected_steps and item not in recent
+                ]
+
+            items_to_remove = (
+                old_saves(safetensors_files) + old_saves(pt_files)
+                + old_saves(directories) + old_saves(embed_files) + old_saves(critic_items)
+            )
 
             # remove all but the latest max_step_saves_to_keep
             # items_to_remove = combined_items[:-num_saves_to_keep]
@@ -1518,6 +1734,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 yaml_file = os.path.splitext(item)[0] + ".yaml"
                 if os.path.exists(yaml_file):
                     os.remove(yaml_file)
+            surviving_records = load_record_low_checkpoints(self._record_low_index_path, self.save_root)
+            if surviving_records != records:
+                write_record_low_checkpoints(self._record_low_index_path, surviving_records)
             if combined_items:
                 latest_item = combined_items[-1]
         return latest_item
@@ -1532,7 +1751,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def end_step_hook(self):
         pass
 
-    def save(self, step=None):
+    def save(self, step=None, record_low_loss=None, scheduled_save=False):
         if not self.accelerator.is_main_process:
             return
         flush()
@@ -1715,6 +1934,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     get_torch_dtype(self.save_config.dtype)
                 )
 
+        checkpoint_path = file_path
         # save learnable params as json if we have thim
         if self.snr_gos:
             json_data = {
@@ -1729,6 +1949,19 @@ class BaseSDTrainProcess(BaseTrainProcess):
         
         self.last_save_path = os.path.abspath(file_path)
         print_acc(f"Saved checkpoint to {file_path}")
+
+        if record_low_loss is not None:
+            if not os.path.exists(checkpoint_path):
+                raise RuntimeError(f"Record-low checkpoint was not created: {checkpoint_path}")
+            records = load_record_low_checkpoints(self._record_low_index_path, self.save_root)
+            records = [record for record in records if record['step'] != step]
+            records.append({
+                'step': step,
+                'loss': float(record_low_loss),
+                'scheduled': bool(scheduled_save),
+                'checkpoint': os.path.basename(checkpoint_path),
+            })
+            write_record_low_checkpoints(self._record_low_index_path, records)
 
         # save optimizer
         if self.optimizer is not None:
@@ -3579,15 +3812,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 # if is even step and we have a reg dataset, use that
                 # todo improve this logic to send one of each through if we can buckets and batch size might be an issue
                 is_reg_step = False
-                is_save_step = self.save_config.save_every and self.step_num % self.save_config.save_every == 0
-                self._refresh_live_sample_config()
-                is_sample_step = (
-                    self.sample_config.sample_every
-                    and self.step_num >= self.sample_config.sample_start_step
-                    and self.step_num % self.sample_config.sample_every == 0
+                is_scheduled_save_step = bool(
+                    self.save_config.save_every and self.step_num % self.save_config.save_every == 0
                 )
-                if self.train_config.disable_sampling:
-                    is_sample_step = False
+                is_save_step = is_scheduled_save_step
+                self._refresh_live_sample_config()
+                sample_reason = self._get_step_sample_reason()
+                is_sample_step = sample_reason is not None
 
                 batch_list = []
 
@@ -3652,11 +3883,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
             try:
                 with self.accelerator.accumulate(self.modules_being_trained):
                     loss_dict = self.hook_train_loop(batch_list)
-            except torch.cuda.OutOfMemoryError:
+            except torch.cuda.OutOfMemoryError as e:
                 did_oom = True
+                _log_cuda_training_oom(e, self.step_num, self.device_torch)
             except RuntimeError as e:
                 if "CUDA out of memory" in str(e):
                     did_oom = True
+                    _log_cuda_training_oom(e, self.step_num, self.device_torch)
                 else:
                     raise  # not an OOM; surface real errors
             if did_oom:
@@ -3674,6 +3907,27 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 print_acc("")
             else:
                 self.num_consecutive_oom = 0
+            is_new_lowest_loss = False
+            if self.accelerator.is_main_process and not did_oom and loss_dict is not None:
+                is_new_lowest_loss = is_record_low_save_due(
+                    load_record_low_checkpoints(self._record_low_index_path, self.save_root),
+                    self.step_num, loss_dict.get('loss'),
+                    self.save_config.record_low_window_size,
+                    self.save_config.record_low_start_step,
+                )
+            if self.accelerator.num_processes > 1:
+                flag = torch.tensor(int(is_new_lowest_loss), device=self.device_torch)
+                is_new_lowest_loss = bool(self.accelerator.reduce(flag, reduction='sum').item())
+            if is_new_lowest_loss:
+                is_save_step = True
+                sample_reason = self._get_step_sample_reason(is_new_lowest_loss=True)
+                is_sample_step = sample_reason is not None
+                if self.accelerator.is_main_process:
+                    action = f'saving and sampling ({sample_reason})' if is_sample_step else 'saving'
+                    print_acc(
+                        f"New record-low checkpoint at step {self.step_num}: "
+                        f"{loss_dict['loss']:.6g}; {action}"
+                    )
             if self.torch_profiler is not None:
                 torch.cuda.synchronize()  # Make sure all CUDA ops are done
                 self.torch_profiler.stop()
@@ -3732,7 +3986,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         batch.cleanup()
 
                 # don't do on first step
-                if self.step_num != self.start_step:
+                if self.step_num != self.start_step or is_new_lowest_loss:
                     if is_sample_step or is_save_step:
                         self.accelerator.wait_for_everyone()
                         
@@ -3742,7 +3996,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         if self.progress_bar is not None:
                             self.progress_bar.pause()
                         print_acc(f"\nSaving at step {self.step_num}")
-                        self.save(self.step_num)
+                        if is_new_lowest_loss:
+                            self._record_low_pending_step = self.step_num
+                        self.save(
+                            self.step_num,
+                            record_low_loss=loss_dict['loss'] if is_new_lowest_loss else None,
+                            scheduled_save=is_scheduled_save_step,
+                        )
                         self.ensure_params_requires_grad()
                         # clear any grads
                         optimizer.zero_grad()
@@ -3750,7 +4010,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         flush_next = True
                         if self.progress_bar is not None:
                             self.progress_bar.unpause()
-                            
+
                     if is_sample_step:
                         if self.progress_bar is not None:
                             self.progress_bar.pause()
@@ -3758,6 +4018,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         # print above the progress bar
                         if self.train_config.free_u:
                             self.sd.pipeline.disable_freeu()
+                        print_acc(f"Sampling at step {self.step_num} ({sample_reason})")
                         self.sample_with_optimizer_state_offload(self.step_num)
                         if self.train_config.unload_text_encoder:
                             # make sure the text encoder is unloaded
@@ -3767,6 +4028,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         self.ensure_params_requires_grad()
                         if self.progress_bar is not None:
                             self.progress_bar.unpause()
+
+                    if is_new_lowest_loss:
+                        self._record_low_pending_step = None
+                        if self.accelerator.is_main_process:
+                            self.clean_up_saves()
 
                     if self.logging_config.log_every and self.step_num % self.logging_config.log_every == 0:
                         with self.timer('log_to_tensorboard'):
@@ -3847,6 +4113,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if self.accelerator.is_main_process:
             self.save()
         if not self.train_config.disable_sampling:
+            print_acc('Generating final samples after training')
             self.sample_with_optimizer_state_offload(self.step_num)
             self.logger.commit(step=self.step_num)
         print_acc("")

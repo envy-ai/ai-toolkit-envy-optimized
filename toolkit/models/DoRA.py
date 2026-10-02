@@ -72,7 +72,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             alpha = float(alpha.detach().float().item())
         alpha = self.lora_dim if alpha is None or alpha == 0 else alpha
         scale = float(alpha) / self.lora_dim
-        # self.register_buffer("alpha", torch.tensor(alpha))  # 定数として扱える eng: treat as constant
+        self.register_buffer("alpha", torch.tensor(alpha))
 
         self.multiplier: Union[float, List[float]] = multiplier
         # wrap the original module so it doesn't get weights updated
@@ -106,6 +106,15 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         lora_weight  = self.lora_up.weight @ self.lora_down.weight
         weight_norm = self._get_weight_norm(weight, lora_weight)
         self.magnitude = nn.Parameter(weight_norm.detach().clone(), requires_grad=True)
+        # ComfyUI's DoRA loader scales the fully adapted weight by a fixed
+        # base-weight row norm, then interpolates that complete weight delta
+        # for positive or negative strengths. Keep the base norm available for
+        # signed slider training without changing ordinary DoRA forwards.
+        self.register_buffer(
+            "_comfy_base_norm",
+            weight_norm.detach().clone() + torch.finfo(weight_norm.dtype).eps,
+            persistent=False,
+        )
 
     def apply_to(self):
         self.org_forward = self.org_module[0].forward

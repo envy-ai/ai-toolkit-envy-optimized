@@ -21,6 +21,7 @@ Flow-matching convention matches ai-toolkit (t=1 noise -> t=0 clean, target =
 noise - clean), so `get_noise_prediction` does no time flip or negation.
 """
 
+import hashlib
 import os
 from typing import TYPE_CHECKING, List, Optional
 
@@ -29,6 +30,7 @@ import torch
 from PIL import Image
 
 from toolkit.accelerator import unwrap_model
+from toolkit.assistant_lora import load_assistant_lora_from_path
 from toolkit.advanced_prompt_embeds import AdvancedPromptEmbeds
 from toolkit.basic import flush
 from toolkit.config_modules import GenerateImageConfig, ModelConfig
@@ -132,11 +134,32 @@ class QwenImage2Model(BaseModel):
         # embeddings as vision tokens and their latents into the sequence.
         self.encode_control_in_text_embeddings = True
         self.has_multiple_control_images = True
+        # Reference-image slots are part of Qwen 2.1's prompt sequence.  A
+        # caption-dropout embedding must therefore be encoded with the same
+        # references as the normal caption, and disk caches must use the exact
+        # bucket presentation used by the training batch.
+        self.caption_dropout_keeps_control_images = True
+        self.cache_processed_control_text_embeddings = True
         # References are bucket-resized to the target size by the dataloader.
         # The DiT reads the image-slot layout from row 0 of the batch, so every
         # sample must contribute the same slot count -- raw (per-image aspect)
         # references would break that.
         self.use_raw_control_images = False
+
+    @property
+    def text_embedding_space_version(self):
+        # v2 invalidates Qwen 2.1 caches made from the original, unbucketed
+        # control file.  Those embeddings can reserve a different number of
+        # reference slots than the control tensor passed to the transformer.
+        version = "qwen_image_2_bucketed_refs_v2"
+        encoder_path = self.model_config.text_encoder_path
+        if encoder_path:
+            identity = os.path.realpath(encoder_path) if os.path.exists(encoder_path) else encoder_path
+            if os.path.isfile(encoder_path):
+                stat = os.stat(encoder_path)
+                identity += f":{stat.st_size}:{stat.st_mtime_ns}"
+            version += "_te_" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+        return version
 
     @staticmethod
     def get_train_scheduler():
@@ -166,6 +189,16 @@ class QwenImage2Model(BaseModel):
             # a local full checkpoint supplies its own text encoder / vae
             base_model_path = model_path
 
+        text_encoder_path = self.model_config.text_encoder_path or base_model_path
+        if (
+            self.model_config.text_encoder_path and os.path.isabs(text_encoder_path)
+            and not os.path.exists(text_encoder_path)
+        ):
+            raise FileNotFoundError(f"Qwen-Image 2.1 text encoder not found: {text_encoder_path}")
+        assistant_path = self.model_config.assistant_lora_path
+        if assistant_path and not os.path.isfile(assistant_path):
+            raise FileNotFoundError(f"Qwen-Image 2.1 training adapter not found: {assistant_path}")
+
         self.print_and_status_update("Loading transformer")
         transformer = QwenImage21Transformer2DModel.load(
             model_path,
@@ -176,8 +209,11 @@ class QwenImage2Model(BaseModel):
 
         self.print_and_status_update("Loading text encoder")
         processor = QwenImage21TextEncoder.load_processor(base_model_path)
+        text_encoder_load_kwargs = {}
+        if text_encoder_path.endswith(".safetensors"):
+            text_encoder_load_kwargs["config_path"] = base_model_path
         text_encoder = QwenImage21TextEncoder.load_model(
-            base_model_path, dtype=dtype, subfolder="text_encoder"
+            text_encoder_path, dtype=dtype, subfolder="text_encoder", **text_encoder_load_kwargs
         )
         # the vision tower stays: any prompt may carry reference images. bf16
         # Conv3d has no fast kernel, the equivalent GEMM does
@@ -203,7 +239,47 @@ class QwenImage2Model(BaseModel):
         self.model = transformer
         self.prompt_encoder = QwenImage21PromptEncoder(text_encoder, processor)
         self.pipeline = QwenImage21Pipeline(self)
+        if assistant_path:
+            self.print_and_status_update("Loading Qwen-Image 2.1 training adapter")
+            self.assistant_lora = load_assistant_lora_from_path(
+                assistant_path, self, strict=True
+            )
         self.print_and_status_update("Model Loaded")
+
+    def convert_assistant_lora_weights_before_load(self, state_dict):
+        """Fuse diffusers' split MLP LoRAs into the Comfy gate_up projection."""
+        state_dict = {
+            key.replace("diffusion_model.", "transformer.")
+            .replace(".lora_down.", ".lora_A.").replace(".lora_up.", ".lora_B."): value
+            for key, value in state_dict.items()
+        }
+        result = dict(state_dict)
+        for key in state_dict:
+            if not key.endswith(".img_mlp.gate_layer.lora_A.weight"):
+                continue
+            prefix = key.removesuffix(".gate_layer.lora_A.weight")
+            if prefix + ".gate_up.lora_A.weight" in state_dict:
+                raise ValueError(f"Training adapter contains both split and fused MLP weights: {prefix}")
+            gate, proj = prefix + ".gate_layer", prefix + ".proj"
+            required = [layer + suffix for layer in (gate, proj) for suffix in (".lora_A.weight", ".lora_B.weight")]
+            if any(key not in state_dict for key in required):
+                raise ValueError(f"Training adapter has an incomplete split MLP: {prefix}")
+            gate_a, gate_b = state_dict[gate + ".lora_A.weight"], state_dict[gate + ".lora_B.weight"]
+            proj_a, proj_b = state_dict[proj + ".lora_A.weight"], state_dict[proj + ".lora_B.weight"]
+            gate_rank, proj_rank = gate_a.shape[0], proj_a.shape[0]
+            rank = gate_rank + proj_rank
+            fused_b = gate_b.new_zeros((gate_b.shape[0] + proj_b.shape[0], rank))
+            gate_alpha = state_dict.get(gate + ".alpha", gate_rank)
+            proj_alpha = state_dict.get(proj + ".alpha", proj_rank)
+            fused_b[:gate_b.shape[0], :gate_rank] = gate_b * (float(gate_alpha) / gate_rank)
+            fused_b[gate_b.shape[0]:, gate_rank:] = proj_b * (float(proj_alpha) / proj_rank)
+            result[prefix + ".gate_up.lora_A.weight"] = torch.cat([gate_a, proj_a], dim=0)
+            result[prefix + ".gate_up.lora_B.weight"] = fused_b
+            result[prefix + ".gate_up.alpha"] = torch.tensor(float(rank))
+            for layer in (gate, proj):
+                for suffix in (".lora_A.weight", ".lora_B.weight", ".alpha"):
+                    result.pop(layer + suffix, None)
+        return result
 
     # ------------------------------------------------------------------
     # VAE. The latents are RGBA; toolkit images are RGB, so encode pads an
@@ -261,7 +337,14 @@ class QwenImage2Model(BaseModel):
         # -- the resolution Qwen recommends -- needs more than a 32 GB card has.
         # Tile above 1 MP, and whenever low_vram is set.
         pixels = latents.shape[-2] * latents.shape[-1] * self.vae_scale_factor**2
-        tiled = self.model_config.low_vram or pixels > TILE_DECODE_ABOVE_PIXELS
+        # The tiled decoder blends tile views in place and is intended for
+        # inference. Pixel-frequency training needs gradients back to the
+        # predicted latent, so use the differentiable one-shot decoder while
+        # autograd is enabled. Target/reference decodes under no_grad may still
+        # use the memory-saving tiled path.
+        tiled = (not torch.is_grad_enabled()) and (
+            self.model_config.low_vram or pixels > TILE_DECODE_ABOVE_PIXELS
+        )
         if tiled:
             self.vae.enable_tiling(
                 tile_sample_min_height=1024,

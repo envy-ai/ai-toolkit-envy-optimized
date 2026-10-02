@@ -787,6 +787,10 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
         else:
             self._original_forward = getattr(self.module, "forward")
 
+        # Stream/event management, record_stream, and the temporary buffer swap
+        # must run eagerly. Dynamo otherwise traces them into a compiled block,
+        # and AOTAutograd cannot functionalize aten::record_stream.
+        @torch.compiler.disable
         def _mm_forward(x, *args, **kwargs):
             # ensure we only use expected signature (Linear: x)
             if args or kwargs:

@@ -139,12 +139,12 @@ class BaseModel:
         self.device_state = None
 
         self.pipeline: Union[None, 'StableDiffusionPipeline',
-                             'CustomStableDiffusionXLPipeline', 'PixArtAlphaPipeline']
-        self.vae: Union[None, 'AutoencoderKL']
-        self.model: Union[None, 'Transformer2DModel', 'UNet2DConditionModel']
+                             'CustomStableDiffusionXLPipeline', 'PixArtAlphaPipeline'] = None
+        self.vae: Union[None, 'AutoencoderKL'] = None
+        self.model: Union[None, 'Transformer2DModel', 'UNet2DConditionModel'] = None
         self.text_encoder: Union[None, 'CLIPTextModel',
-                                 List[Union['CLIPTextModel', 'CLIPTextModelWithProjection']]]
-        self.tokenizer: Union[None, 'CLIPTokenizer', List['CLIPTokenizer']]
+                                 List[Union['CLIPTextModel', 'CLIPTextModelWithProjection']]] = None
+        self.tokenizer: Union[None, 'CLIPTokenizer', List['CLIPTokenizer']] = None
         self.noise_scheduler: Union[None, 'DDPMScheduler'] = noise_scheduler
 
         self.refiner_unet: Union[None, 'UNet2DConditionModel'] = None
@@ -197,6 +197,14 @@ class BaseModel:
         
         # set true for models that encode control image into text embeddings
         self.encode_control_in_text_embeddings = False
+        # Some joint text/image encoders require cached caption-dropout embeds
+        # to keep the item's control images.  Their image slots are part of the
+        # sequence layout and cannot be replaced by a shared text-only embed.
+        self.caption_dropout_keeps_control_images = False
+        # Cache the same bucket-resized/cropped control tensors that the
+        # training batch will carry, rather than reopening the source files at
+        # their original dimensions.
+        self.cache_processed_control_text_embeddings = False
         # control files may be VIDEOS (cached like dataset items, exposed on
         # the batch as control_video_latents_list); see minimax_h3 ref2va
         self.supports_video_control_images = False

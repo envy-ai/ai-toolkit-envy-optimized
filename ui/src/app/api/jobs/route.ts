@@ -32,6 +32,13 @@ const mergeSampleOnlyJobConfig = (existingConfig: any, incomingConfig: any) => {
   // Whitelist: existingConfig.config.process[0].sample is replaced by incomingConfig.config.process[0].sample.
   existingProcess.sample = cloneJson(incomingProcess.sample);
 
+  if (typeof incomingProcess.save?.sample_on_record_low === 'boolean') {
+    existingProcess.save = {
+      ...existingProcess.save,
+      sample_on_record_low: incomingProcess.save.sample_on_record_low,
+    };
+  }
+
   if (incomingProcess.model && existingProcess.model) {
     if (incomingProcess.model.inference_lora_path === undefined) {
       delete existingProcess.model.inference_lora_path;

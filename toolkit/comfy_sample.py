@@ -77,6 +77,8 @@ class ComfySampleRequest:
     num_frames: int = 1
     fps: int = 1
     training_lora_strength: float = 1.0
+    inference_lora_absolute_path: str = ""
+    negative_prompt: str = ""
 
 
 @dataclass
@@ -106,6 +108,8 @@ class ComfyBatchSampleRequest:
     num_frames: int = 1
     fps: int = 1
     training_lora_strength: float = 1.0
+    inference_lora_absolute_path: str = ""
+    negative_prompt: str = ""
 
 
 def _minimax_h3_sample_dimensions(width: int, height: int) -> tuple[int, int]:
@@ -191,12 +195,15 @@ def build_template_context(request: Any) -> Dict[str, Any]:
                 raise ValueError(
                     f"ComfyUI batch control-image {image_index} count must match the prompt count"
                 )
+        if control_images_2 and not control_images:
+            raise ValueError("ComfyUI batch control image 2 requires control image 1")
         if control_images_3 and not control_images_2:
             raise ValueError("ComfyUI batch control image 3 requires control image 2")
         h3_width, h3_height = _minimax_h3_sample_dimensions(request.width, request.height)
         lora_context = _training_lora_context(request.training_lora_filename, request.training_lora_path)
         return {
             "prompts": request.prompts,
+            "negative_prompt": request.negative_prompt,
             "sample_count": len(request.prompts),
             "width": request.width,
             "height": request.height,
@@ -214,6 +221,7 @@ def build_template_context(request: Any) -> Dict[str, Any]:
             "scheduler": request.scheduler,
             "inference_lora": request.inference_lora,
             "inference_lora_enabled": bool(request.inference_lora),
+            "inference_lora_absolute_path": request.inference_lora_absolute_path,
             "inference_lora_strength": request.inference_lora_strength,
             "output_format": request.output_format,
             "output_quality": request.output_quality,
@@ -235,11 +243,14 @@ def build_template_context(request: Any) -> Dict[str, Any]:
 
     training_lora_filename = request.training_lora_filename or os.path.basename(request.training_lora_path)
     training_lora_stem = _strip_safetensors(training_lora_filename)
+    if request.control_image_2 and not request.control_image:
+        raise ValueError("ComfyUI control image 2 requires control image 1")
     if request.control_image_3 and not request.control_image_2:
         raise ValueError("ComfyUI control image 3 requires control image 2")
     h3_width, h3_height = _minimax_h3_sample_dimensions(request.width, request.height)
     return {
         "prompt": request.prompt,
+        "negative_prompt": request.negative_prompt,
         "width": request.width,
         "height": request.height,
         "steps": request.steps,
@@ -253,6 +264,7 @@ def build_template_context(request: Any) -> Dict[str, Any]:
         "scheduler": request.scheduler,
         "inference_lora": request.inference_lora,
         "inference_lora_enabled": bool(request.inference_lora),
+        "inference_lora_absolute_path": request.inference_lora_absolute_path,
         "inference_lora_strength": request.inference_lora_strength,
         "output_format": request.output_format,
         "output_quality": request.output_quality,
@@ -308,6 +320,32 @@ def patch_workflow_for_sample(workflow: Dict[str, Any], request: ComfySampleRequ
 
     _set_if_present(_node_inputs(workflow, "Seed"), "seed", request.seed)
     _set_if_present(_node_inputs(workflow, "Text Multiline"), "text", request.prompt)
+
+    if request.negative_prompt:
+        for node in workflow.values():
+            if node.get("class_type") == "TextEncodeQwenImage21":
+                node["inputs"]["negative_prompt"] = request.negative_prompt
+        negative_link = (sampler_inputs or {}).get("negative")
+        if isinstance(negative_link, list) and len(negative_link) == 2:
+            negative_node = workflow.get(str(negative_link[0]))
+            if negative_node and negative_node.get("class_type") == "ConditioningZeroOut":
+                positive_link = (sampler_inputs or {}).get("positive")
+                positive_node = (
+                    workflow.get(str(positive_link[0]))
+                    if isinstance(positive_link, list) and len(positive_link) == 2
+                    else None
+                )
+                if positive_node and positive_node.get("class_type") == "CLIPTextEncode":
+                    negative_node["class_type"] = "CLIPTextEncode"
+                    negative_node["inputs"] = {
+                        "text": request.negative_prompt,
+                        "clip": positive_node["inputs"]["clip"],
+                    }
+            elif negative_node and negative_node.get("class_type") in (
+                "CLIPTextEncode", "TextEncodeQwenImageEdit"
+            ):
+                key = "text" if negative_node["class_type"] == "CLIPTextEncode" else "prompt"
+                negative_node["inputs"][key] = request.negative_prompt
 
     absolute_lora_node_id = _find_node_id(workflow, "load_lora_from_absolute_path")
     regular_lora_node_id = _find_node_id(workflow, "LoraLoader")
@@ -436,9 +474,53 @@ class ComfyApiClient:
         self.api_url = (api_url or DEFAULT_COMFY_API_URL).rstrip("/")
         self.timeout = timeout
         self.poll_interval = poll_interval
+        self.client_id = uuid.uuid4().hex
+        self._progress_websocket = None
+        self._progress_websocket_warning_printed = False
 
     def _url(self, path: str) -> str:
         return self.api_url + path
+
+    def _progress_websocket_url(self) -> str:
+        parsed = urllib.parse.urlsplit(self.api_url)
+        websocket_scheme = "wss" if parsed.scheme == "https" else "ws"
+        websocket_path = parsed.path.rstrip("/") + "/ws"
+        return urllib.parse.urlunsplit((
+            websocket_scheme,
+            parsed.netloc,
+            websocket_path,
+            urllib.parse.urlencode({"clientId": self.client_id}),
+            "",
+        ))
+
+    def _close_progress_websocket(self):
+        websocket = self._progress_websocket
+        self._progress_websocket = None
+        if websocket is not None:
+            try:
+                websocket.close()
+            except Exception:
+                pass
+
+    def begin_live_progress(self) -> bool:
+        """Open ComfyUI's event stream before submitting the next prompt."""
+        self._close_progress_websocket()
+        try:
+            from websockets.sync.client import connect
+
+            self._progress_websocket = connect(
+                self._progress_websocket_url(),
+                open_timeout=min(float(self.timeout), 10.0),
+            )
+            return True
+        except Exception as error:
+            if not self._progress_websocket_warning_printed:
+                print(
+                    "WARNING: Could not connect to ComfyUI's live progress stream; "
+                    f"falling back to completion polling: {error}"
+                )
+                self._progress_websocket_warning_printed = True
+            return False
 
     def _request_json(self, method: str, path: str, payload: Optional[dict] = None):
         data = None
@@ -454,18 +536,25 @@ class ComfyApiClient:
         return json.loads(body.decode("utf-8"))
 
     def post_prompt(self, workflow: Dict[str, Any]) -> str:
-        response = self._request_json(
-            "POST",
-            "/api/prompt",
-            {
-                "prompt": workflow,
-                "extra_data": {
-                    "extra_pnginfo": {
-                        "workflow": workflow,
+        try:
+            response = self._request_json(
+                "POST",
+                "/api/prompt",
+                {
+                    "prompt": workflow,
+                    "client_id": self.client_id,
+                    "extra_data": {
+                        "extra_pnginfo": {
+                            "workflow": workflow,
+                        },
                     },
                 },
-            },
-        )
+            )
+        except urllib.error.HTTPError as error:
+            details = error.read().decode("utf-8", errors="replace")[:8192]
+            raise RuntimeError(
+                f"ComfyUI rejected the sample workflow (HTTP {error.code}): {details}"
+            ) from error
         if not response or "prompt_id" not in response:
             raise RuntimeError(f"ComfyUI did not return a prompt_id: {response}")
         return response["prompt_id"]
@@ -524,23 +613,75 @@ class ComfyApiClient:
             self,
             prompt_id: str,
             cancel_check: Optional[Callable[[], bool]] = None,
+            progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[Dict[str, str]]:
         deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
-            if cancel_check is not None and cancel_check():
-                raise ComfyPromptWaitCancelled(
-                    f"Stopped waiting for ComfyUI prompt {prompt_id} because training was stopped"
-                )
-            history = self.get_history(prompt_id)
-            images = get_history_output_images(history, prompt_id)
-            if images:
-                return images
-            prompt_history = history.get(prompt_id, {})
-            status = prompt_history.get("status", {}) if isinstance(prompt_history, dict) else {}
-            if isinstance(status, dict) and status.get("status_str") == "error":
-                raise RuntimeError(f"ComfyUI prompt failed: {status}")
-            time.sleep(self.poll_interval)
-        raise TimeoutError(f"Timed out waiting for ComfyUI prompt {prompt_id}")
+        websocket = self._progress_websocket
+        self._progress_websocket = None
+        try:
+            while time.monotonic() < deadline:
+                if cancel_check is not None and cancel_check():
+                    raise ComfyPromptWaitCancelled(
+                        f"Stopped waiting for ComfyUI prompt {prompt_id} because training was stopped"
+                    )
+                history = self.get_history(prompt_id)
+                images = get_history_output_images(history, prompt_id)
+                if images:
+                    return images
+                prompt_history = history.get(prompt_id, {})
+                status = prompt_history.get("status", {}) if isinstance(prompt_history, dict) else {}
+                if isinstance(status, dict) and status.get("status_str") == "error":
+                    raise RuntimeError(f"ComfyUI prompt failed: {status}")
+
+                if websocket is None:
+                    time.sleep(self.poll_interval)
+                    continue
+
+                try:
+                    message = websocket.recv(
+                        timeout=min(self.poll_interval, max(0.0, deadline - time.monotonic()))
+                    )
+                except TimeoutError:
+                    continue
+                except Exception:
+                    try:
+                        websocket.close()
+                    except Exception:
+                        pass
+                    websocket = None
+                    continue
+
+                # Binary messages are preview images rather than execution events.
+                if not isinstance(message, str):
+                    continue
+                try:
+                    event = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event_type = event.get("type")
+                event_data = event.get("data", {})
+                if not isinstance(event_data, dict):
+                    continue
+                event_prompt_id = event_data.get("prompt_id")
+                if event_prompt_id not in (None, prompt_id):
+                    continue
+                if event_type == "progress" and progress_callback is not None:
+                    try:
+                        progress_callback(int(event_data["value"]), int(event_data["max"]))
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                elif event_type == "execution_error":
+                    details = event_data.get("exception_message") or event_data
+                    raise RuntimeError(f"ComfyUI prompt failed: {details}")
+            raise TimeoutError(f"Timed out waiting for ComfyUI prompt {prompt_id}")
+        finally:
+            if websocket is not None:
+                try:
+                    websocket.close()
+                except Exception:
+                    pass
 
     def download_image(self, image: Dict[str, str], output_path: str) -> str:
         params = {

@@ -1,6 +1,7 @@
 import os
 import random
 from collections import OrderedDict
+from contextlib import nullcontext
 from typing import Union, Literal, List, Optional
 
 import numpy as np
@@ -36,7 +37,7 @@ from diffusers import EMAModel
 import math
 from toolkit.train_tools import precondition_model_outputs_flow_match
 from toolkit.models.diffusion_feature_extraction import DiffusionFeatureExtractor, load_dfe
-from toolkit.util.losses import wavelet_loss, stepped_loss
+from toolkit.util.losses import frequency_filtered_pixel_loss, wavelet_loss, stepped_loss
 import torch.nn.functional as F
 from toolkit.unloader import unload_text_encoder
 from PIL import Image
@@ -330,10 +331,17 @@ class SDTrainer(BaseSDTrainProcess):
         if getattr(self.sd, 'dopsd_self_ref', False):
             # D-OPSD: the teacher (prior) prediction is the training target
             self.do_prior_prediction = True
-        # move vae to device if we did not cache latents
+        # Pixel-frequency loss decodes the predicted clean latent on every
+        # step, so it also needs the frozen VAE when latents are cached.
+        if self.train_config.frequency_loss_enabled and self.sd.vae is None:
+            raise ValueError("Pixel frequency loss requires a loaded VAE")
+
+        # move vae to device if we did not cache latents, or if an auxiliary
+        # decoded-pixel loss needs it
         if self.sd.vae is not None:
-            if not self.is_latents_cached:
+            if not self.is_latents_cached or self.train_config.frequency_loss_enabled or getattr(self, 'needs_vae_at_train_time', False):
                 self.sd.vae.eval()
+                self.sd.vae.requires_grad_(False)
                 self.sd.vae.to(self.device_torch)
             else:
                 # offload it. Already cached
@@ -341,6 +349,9 @@ class SDTrainer(BaseSDTrainProcess):
                 flush()
                 if (
                     getattr(self.train_config, 'disable_sampling', False)
+                    and not self.train_config.frequency_loss_enabled
+                    and not getattr(self, 'needs_vae_at_train_time', False)
+                    and not getattr(self, 'retain_vae_after_caching', False)
                     and hasattr(self.sd, 'unload_vae_after_caching')
                 ):
                     print_acc(
@@ -576,6 +587,145 @@ class SDTrainer(BaseSDTrainProcess):
         return output, batch.tensor.to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
 
     # you can expand these in a child class to make customization easier
+    def _calculate_frequency_pixel_loss(self, clean_latents, batch, loss_multiplier):
+        if clean_latents.ndim not in (4, 5):
+            raise ValueError(
+                "Pixel frequency loss requires image or video latents, got "
+                f"shape {tuple(clean_latents.shape)}"
+            )
+
+        latent_height, latent_width = clean_latents.shape[-2:]
+        target_pixels = batch.tensor
+
+        # Decode a random spatial patch for the auxiliary loss. A 384-pixel
+        # crop still contains many cycles of an 18-pixel artifact, while its
+        # VAE activation footprint is far below a full 1024/2048 decode. Keep
+        # two latent cells of context around the scored region to avoid making
+        # internal crop boundaries part of the target.
+        patch_size = getattr(self.train_config, 'frequency_loss_patch_size', 384)
+        if target_pixels is not None and target_pixels.shape[-2] % latent_height == 0:
+            scale_y = target_pixels.shape[-2] // latent_height
+        else:
+            scale_y = int(getattr(self.sd, 'vae_scale_factor', 1) or 1)
+        if target_pixels is not None and target_pixels.shape[-1] % latent_width == 0:
+            scale_x = target_pixels.shape[-1] // latent_width
+        else:
+            scale_x = int(getattr(self.sd, 'vae_scale_factor', 1) or 1)
+
+        if patch_size > 0:
+            core_height = min(latent_height, max(1, patch_size // scale_y))
+            core_width = min(latent_width, max(1, patch_size // scale_x))
+        else:
+            core_height, core_width = latent_height, latent_width
+        core_top = random.randint(0, latent_height - core_height)
+        core_left = random.randint(0, latent_width - core_width)
+        context_latents = 2 if (core_height < latent_height or core_width < latent_width) else 0
+        decode_top = max(0, core_top - context_latents)
+        decode_left = max(0, core_left - context_latents)
+        decode_bottom = min(latent_height, core_top + core_height + context_latents)
+        decode_right = min(latent_width, core_left + core_width + context_latents)
+
+        clean_latent_patch = clean_latents[
+            ..., decode_top:decode_bottom, decode_left:decode_right
+        ]
+        target_latent_patch = batch.latents.detach()[
+            ..., decode_top:decode_bottom, decode_left:decode_right
+        ]
+
+        def crop_decoded_patch(pixels):
+            decoded_height, decoded_width = pixels.shape[-2:]
+            decoded_latent_height = decode_bottom - decode_top
+            decoded_latent_width = decode_right - decode_left
+            actual_scale_y = decoded_height / decoded_latent_height
+            actual_scale_x = decoded_width / decoded_latent_width
+            top = round((core_top - decode_top) * actual_scale_y)
+            left = round((core_left - decode_left) * actual_scale_x)
+            bottom = round((core_top - decode_top + core_height) * actual_scale_y)
+            right = round((core_left - decode_left + core_width) * actual_scale_x)
+            return pixels[..., top:bottom, left:right]
+
+        if target_pixels is not None:
+            target_pixels = target_pixels.detach()
+            # Video tensors are commonly loaded as B,T,C,H,W while decoders
+            # return B,C,T,H,W. Put both in decoder order when recognizable.
+            if (
+                clean_latents.ndim == 5
+                and target_pixels.ndim == 5
+                and target_pixels.shape[1] != clean_latents.shape[1]
+                and target_pixels.shape[2] in (3, 4)
+            ):
+                target_pixels = target_pixels.permute(0, 2, 1, 3, 4)
+            target_height, target_width = target_pixels.shape[-2:]
+            target_top = round(core_top * target_height / latent_height)
+            target_left = round(core_left * target_width / latent_width)
+            target_bottom = round((core_top + core_height) * target_height / latent_height)
+            target_right = round((core_left + core_width) * target_width / latent_width)
+            target_pixels = target_pixels[
+                ..., target_top:target_bottom, target_left:target_right
+            ]
+        else:
+            # Cached-latent datasets normally do not retain their source pixel
+            # tensors. Decode the clean target first and release its temporary
+            # activations before building the differentiable prediction graph.
+            with torch.no_grad():
+                target_pixels = crop_decoded_patch(
+                    self.sd.decode_latents(target_latent_patch)
+                )
+
+        offload_activations = bool(
+            getattr(self.train_config, 'frequency_loss_activation_offload', True)
+        ) and clean_latent_patch.device.type == 'cuda'
+        saved_tensor_context = (
+            torch.autograd.graph.save_on_cpu(pin_memory=True)
+            if offload_activations
+            else nullcontext()
+        )
+        with saved_tensor_context:
+            predicted_pixels = crop_decoded_patch(
+                self.sd.decode_latents(clean_latent_patch)
+            )
+
+        target_pixels = target_pixels.to(
+            predicted_pixels.device,
+            dtype=predicted_pixels.dtype,
+        )
+        if predicted_pixels.ndim != target_pixels.ndim:
+            raise ValueError(
+                "Pixel frequency loss prediction/target ranks differ: "
+                f"{tuple(predicted_pixels.shape)} vs {tuple(target_pixels.shape)}"
+            )
+
+        # Compare common image channels. This keeps RGB datasets compatible
+        # with models whose decoder can optionally emit alpha.
+        common_channels = min(predicted_pixels.shape[1], target_pixels.shape[1])
+        predicted_pixels = predicted_pixels[:, :common_channels]
+        target_pixels = target_pixels[:, :common_channels]
+        if predicted_pixels.shape != target_pixels.shape:
+            raise ValueError(
+                "Pixel frequency loss prediction/target shapes differ after "
+                f"channel alignment: {tuple(predicted_pixels.shape)} vs "
+                f"{tuple(target_pixels.shape)}"
+            )
+
+        per_sample_loss = frequency_filtered_pixel_loss(
+            predicted_pixels,
+            target_pixels,
+            filter_type=self.train_config.frequency_loss_type,
+            cutoff_period=self.train_config.frequency_loss_cutoff,
+            min_period=self.train_config.frequency_loss_min_period,
+            max_period=self.train_config.frequency_loss_max_period,
+            transition=self.train_config.frequency_loss_transition,
+            reduction="none",
+        )
+        if loss_multiplier.numel() == per_sample_loss.numel():
+            per_sample_loss = per_sample_loss * loss_multiplier.reshape(-1).to(
+                per_sample_loss.device,
+                dtype=per_sample_loss.dtype,
+            )
+        else:
+            per_sample_loss = per_sample_loss * loss_multiplier.float().mean()
+        return per_sample_loss.mean()
+
     def calculate_loss(
             self,
             noise_pred: torch.Tensor,
@@ -944,7 +1094,11 @@ class SDTrainer(BaseSDTrainProcess):
             loss = loss_per_element
         else:
             local_loss_scale = 1.0
-            if self.train_config.t0_loss_target or self.train_config.do_fft_loss:
+            if (
+                self.train_config.t0_loss_target
+                or self.train_config.do_fft_loss
+                or self.train_config.frequency_loss_enabled
+            ):
                 # do the loss on a stepped timestep 0 prediction
                 # doto handle doing priors, preservations, masking, etc
                 with torch.no_grad():
@@ -981,6 +1135,16 @@ class SDTrainer(BaseSDTrainProcess):
                     fft_loss = fft_loss.mean()
                     self.additional_logs['loss/fft'] = fft_loss.item()
                     additional_loss += fft_loss
+                if self.train_config.frequency_loss_enabled:
+                    frequency_loss = self._calculate_frequency_pixel_loss(
+                        clean_latents=t0,
+                        batch=batch,
+                        loss_multiplier=loss_multiplier,
+                    )
+                    self.additional_logs['loss/frequency_pixel'] = frequency_loss.item()
+                    additional_loss += (
+                        frequency_loss * self.train_config.frequency_loss_weight
+                    )
             if self.train_config.loss_type == "pseudo_huber":
                 diff = pred.float() - target.float()
                 c=0.01

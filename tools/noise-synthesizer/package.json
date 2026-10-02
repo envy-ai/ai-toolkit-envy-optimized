@@ -1,0 +1,13 @@
+{
+  "name": "ai-toolkit-noise-synthesizer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cert": "node generate-certificate.js --force",
+    "cert:rotate-ca": "node generate-certificate.js --rotate-ca",
+    "prestart": "node generate-certificate.js",
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}

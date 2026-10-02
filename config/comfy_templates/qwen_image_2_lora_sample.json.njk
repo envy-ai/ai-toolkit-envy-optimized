@@ -3,8 +3,12 @@
     "inputs": {
       "clip": [{% if inference_lora_enabled %}"37"{% else %}"36"{% endif %}, 1],
       "prompt": {{ prompt | json }},
-      "negative_prompt": "",
-      "resolution": 1024
+      "negative_prompt": {{ negative_prompt | json }},
+      "resolution": 1024{% if control_image %},
+      "vae": ["6", 0],
+      "images.image_1": ["80", 0]{% if control_image_2 %},
+      "images.image_2": ["86", 0]{% endif %}{% if control_image_3 %},
+      "images.image_3": ["88", 0]{% endif %}{% endif %}
     },
     "class_type": "TextEncodeQwenImage21",
     "_meta": {"title": "Text Encode Qwen Image 2.1"}
@@ -87,6 +91,27 @@
     "class_type": "Seed",
     "_meta": {"title": "Seed"}
   },
+  {% if control_image %}
+  "80": {
+    "inputs": {"image": {{ control_image | json }}},
+    "class_type": "LoadImage",
+    "_meta": {"title": "Load Primary Reference Image"}
+  },
+  {% endif %}
+  {% if control_image_2 %}
+  "86": {
+    "inputs": {"image": {{ control_image_2 | json }}},
+    "class_type": "LoadImage",
+    "_meta": {"title": "Load Second Reference Image"}
+  },
+  {% endif %}
+  {% if control_image_3 %}
+  "88": {
+    "inputs": {"image": {{ control_image_3 | json }}},
+    "class_type": "LoadImage",
+    "_meta": {"title": "Load Third Reference Image"}
+  },
+  {% endif %}
   "36": {
     "inputs": {
       "absolute_path": {{ training_lora_path | json }},
@@ -99,13 +124,18 @@
   }{% if inference_lora_enabled %},
   "37": {
     "inputs": {
+      {% if inference_lora_absolute_path %}
+      "absolute_path": {{ inference_lora_absolute_path | json }},
+      "lora_strength": {{ inference_lora_strength }},
+      {% else %}
       "lora_name": {{ inference_lora | json }},
       "strength_model": {{ inference_lora_strength }},
       "strength_clip": {{ inference_lora_strength }},
+      {% endif %}
       "model": ["36", 0],
       "clip": ["36", 1]
     },
-    "class_type": "LoraLoader",
+    "class_type": {% if inference_lora_absolute_path %}"load_lora_from_absolute_path"{% else %}"LoraLoader"{% endif %},
     "_meta": {"title": "Load Inference LoRA"}
   }
   {% endif %}

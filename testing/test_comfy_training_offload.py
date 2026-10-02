@@ -37,6 +37,39 @@ class FakeNetwork:
 
 
 class ComfyTrainingOffloadTests(unittest.TestCase):
+    def test_cleanup_handles_failed_qwen_model_loading(self):
+        from extensions_built_in.diffusion_models.qwen_image_2.qwen_image_2 import QwenImage2Model
+        from toolkit.config_modules import ModelConfig
+
+        for partially_loaded in (False, True):
+            with self.subTest(partially_loaded=partially_loaded):
+                model = QwenImage2Model(
+                    'cpu', ModelConfig(
+                        arch='qwen_image_2', name_or_path='Comfy-Org/Qwen-Image-2.1',
+                        assistant_lora_path='/missing/assistant.safetensors',
+                    ), dtype='float32',
+                )
+                model.print_and_status_update = mock.Mock()
+                with self.assertRaisesRegex(FileNotFoundError, 'training adapter not found'):
+                    model.load_model()
+                if partially_loaded:
+                    model.model = mock.Mock()
+
+                process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
+                process.sd = model
+                process.optimizer = None
+                process._has_pending_comfy_background_tasks = mock.Mock(return_value=False)
+                with (
+                    mock.patch('jobs.process.BaseSDTrainProcess.print_acc') as log,
+                    mock.patch('jobs.process.BaseSDTrainProcess.flush'),
+                ):
+                    process._release_training_memory_before_comfy_wait()
+
+                log.assert_not_called()
+                self.assertIsNone(process.sd)
+                if partially_loaded:
+                    model.model.to.assert_called_once_with('cpu')
+
     def test_qwen_image_2_migrates_legacy_krea_workflow(self):
         process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
         process.model_config = SimpleNamespace(arch="qwen_image_2")

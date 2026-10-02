@@ -1,4 +1,5 @@
 import copy
+import json
 import pathlib
 import sys
 import tempfile
@@ -154,6 +155,27 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(patched["17"]["inputs"]["model"], ["36", 0])
         self.assertNotIn("37", patched)
 
+    def test_patch_workflow_replaces_zeroed_negative_conditioning(self):
+        from toolkit.comfy_sample import patch_workflow_for_sample
+
+        workflow = copy.deepcopy(self.workflow)
+        workflow["1"] = {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "old prompt", "clip": ["37", 1]},
+        }
+        workflow["7"] = {
+            "class_type": "ConditioningZeroOut",
+            "inputs": {"conditioning": ["1", 0]},
+        }
+        patched = patch_workflow_for_sample(
+            workflow, replace(self.request, negative_prompt="blurry, text")
+        )
+
+        self.assertEqual(patched["7"]["class_type"], "CLIPTextEncode")
+        self.assertEqual(patched["7"]["inputs"]["text"], "blurry, text")
+        self.assertEqual(patched["7"]["inputs"]["clip"], ["37", 1])
+        self.assertEqual(patched["17"]["inputs"]["negative"], ["7", 0])
+
     def test_renders_nunjucks_template_workflow(self):
         from toolkit.comfy_sample import render_nunjucks_workflow
 
@@ -210,6 +232,66 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(rendered["17"]["inputs"]["model"], ["36", 0])
         self.assertNotIn("37", rendered)
 
+    def test_image_templates_encode_nonempty_negative_prompt(self):
+        from toolkit.comfy_sample import (
+            ComfyBatchSampleRequest,
+            render_nunjucks_workflow,
+        )
+
+        negative_prompt = 'blurry, "watermark"'
+        batch_request = ComfyBatchSampleRequest(
+            prompts=["first", "second"],
+            width=1024,
+            height=1024,
+            steps=8,
+            cfg=2.5,
+            seeds=[123, 124],
+            model="model.safetensors",
+            vae="vae.safetensors",
+            text_encoder="clip.safetensors",
+            sampler="euler",
+            scheduler="simple",
+            inference_lora="",
+            inference_lora_strength=1,
+            output_format="webp_with_json",
+            output_quality="high",
+            training_lora_path="/tmp/current_lora.safetensors",
+            training_lora_filename="current_lora.safetensors",
+            filename_prefix="ai-toolkit/negative_batch",
+            control_images=["first.png", "second.png"],
+            negative_prompt=negative_prompt,
+        )
+        single_request = replace(
+            self.request,
+            negative_prompt=negative_prompt,
+            control_image="first.png",
+        )
+        for path, request, negative_node, field in (
+            ("krea2_lora_sample.json.njk", single_request, "7", "text"),
+            ("krea2_lora_sample_batch_easy_use.json.njk", batch_request, "7", "text"),
+            ("qwen_image_2_lora_sample.json.njk", single_request, "1", "negative_prompt"),
+            ("qwen_image_2_lora_sample_batch_easy_use.json.njk", batch_request, "71", "negative_prompt"),
+            ("qwen_image_edit_lora_sample.json.njk", single_request, "72", "prompt"),
+            ("qwen_image_edit_lora_sample_batch_easy_use.json.njk", batch_request, "72", "prompt"),
+            ("qwen_image_edit_plus_lora_sample.json.njk", single_request, "72", "prompt"),
+            ("qwen_image_edit_plus_lora_sample_batch_easy_use.json.njk", batch_request, "72", "prompt"),
+        ):
+            with self.subTest(path=path):
+                rendered = render_nunjucks_workflow(f"config/comfy_templates/{path}", request)
+                self.assertEqual(rendered[negative_node]["inputs"][field], negative_prompt)
+                if path.startswith("krea2"):
+                    self.assertEqual(rendered[negative_node]["class_type"], "CLIPTextEncode")
+                    self.assertEqual(rendered["17"]["inputs"]["negative"], [negative_node, 0])
+                elif path.startswith("qwen_image_edit"):
+                    self.assertEqual(rendered["17"]["inputs"]["negative"], [negative_node, 0])
+                else:
+                    self.assertEqual(rendered["17"]["inputs"]["negative"], [negative_node, 1])
+
+        empty_krea = render_nunjucks_workflow(
+            "config/comfy_templates/krea2_lora_sample.json.njk", self.request
+        )
+        self.assertEqual(empty_krea["7"]["class_type"], "ConditioningZeroOut")
+
     def test_renders_qwen_image_2_single_template_with_native_vae_nodes(self):
         import toolkit.comfy_sample as comfy_sample
 
@@ -234,10 +316,77 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(rendered["3"]["inputs"]["tile_size"], 512)
         self.assertEqual(rendered["17"]["inputs"]["positive"], ["1", 0])
         self.assertEqual(rendered["17"]["inputs"]["negative"], ["1", 1])
+        self.assertNotIn("vae", rendered["1"]["inputs"])
+        self.assertNotIn("images.image_1", rendered["1"]["inputs"])
+        self.assertNotIn("80", rendered)
         self.assertFalse(any(
             node["class_type"].startswith("VAEUtils_")
             for node in rendered.values()
         ))
+
+    def test_qwen_image_2_single_template_accepts_three_reference_images(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        request = replace(
+            self.request,
+            model="qwen_image_2.1_int8_convrot.safetensors",
+            vae="qwen_image_2.1_vae_bf16.safetensors",
+            text_encoder="qwen3vl_8b_int8_convrot.safetensors",
+            inference_lora="",
+            control_image="ai-toolkit/reference_1.png",
+            control_image_2="ai-toolkit/reference_2.png",
+            control_image_3="ai-toolkit/reference_3.png",
+        )
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
+            request,
+        )
+
+        self.assertEqual(rendered["1"]["inputs"]["vae"], ["6", 0])
+        self.assertEqual(rendered["1"]["inputs"]["images.image_1"], ["80", 0])
+        self.assertEqual(rendered["1"]["inputs"]["images.image_2"], ["86", 0])
+        self.assertEqual(rendered["1"]["inputs"]["images.image_3"], ["88", 0])
+        self.assertEqual(rendered["80"]["inputs"]["image"], request.control_image)
+        self.assertEqual(rendered["86"]["inputs"]["image"], request.control_image_2)
+        self.assertEqual(rendered["88"]["inputs"]["image"], request.control_image_3)
+        self.assertEqual(rendered["17"]["inputs"]["latent_image"], ["2", 0])
+
+    def test_qwen_image_2_template_uses_absolute_loader_for_prepared_dora(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        request = replace(
+            self.request,
+            inference_lora="qwen2.1/legacy-dora.safetensors",
+            inference_lora_absolute_path=(
+                "/tmp/.comfy_inference_lora_cache/legacy-comfy-dora.safetensors"
+            ),
+        )
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
+            request,
+        )
+
+        self.assertEqual(rendered["37"]["class_type"], "load_lora_from_absolute_path")
+        self.assertEqual(
+            rendered["37"]["inputs"]["absolute_path"],
+            request.inference_lora_absolute_path,
+        )
+        self.assertEqual(rendered["37"]["inputs"]["lora_strength"], 0.35)
+        self.assertNotIn("lora_name", rendered["37"]["inputs"])
+
+    def test_qwen_image_2_reference_slots_must_be_contiguous(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        request = replace(
+            self.request,
+            control_image="",
+            control_image_2="ai-toolkit/reference_2.png",
+        )
+        with self.assertRaisesRegex(ValueError, "control image 2 requires control image 1"):
+            comfy_sample.render_nunjucks_workflow(
+                comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
+                request,
+            )
 
     def test_renders_qwen_image_2_batch_template(self):
         import toolkit.comfy_sample as comfy_sample
@@ -274,6 +423,88 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(rendered["6"]["class_type"], "VAELoader")
         self.assertEqual(rendered["3"]["class_type"], "VAEDecodeTiled")
         self.assertEqual(rendered["23"]["inputs"]["images"], ["50", 0])
+        self.assertNotIn("80", rendered)
+        self.assertNotIn("86", rendered)
+        self.assertNotIn("88", rendered)
+
+    def test_qwen_image_2_batch_omits_unused_reference_slots(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        batch_request = comfy_sample.ComfyBatchSampleRequest(
+            prompts=["first", "second", "third"],
+            width=1376,
+            height=1376,
+            steps=20,
+            cfg=3,
+            seeds=[42, 42, 42],
+            model="qwen_image_2.1_int8_convrot.safetensors",
+            vae="qwen_image_2.1_vae_bf16.safetensors",
+            text_encoder="qwen3vl_8b_int8_convrot.safetensors",
+            sampler="euler",
+            scheduler="sgm_uniform",
+            inference_lora="",
+            inference_lora_strength=1,
+            output_format="webp_with_json",
+            output_quality="high",
+            training_lora_path="/tmp/current_lora.safetensors",
+            training_lora_filename="current_lora.safetensors",
+            filename_prefix="ai-toolkit/qwen21_batch",
+            control_images=["ref_1.png", "ref_2.png", "ref_3.png"],
+        )
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
+            batch_request,
+        )
+
+        self.assertEqual(rendered["71"]["inputs"]["images.image_1"], ["80", 0])
+        self.assertNotIn("images.image_2", rendered["71"]["inputs"])
+        self.assertNotIn("images.image_3", rendered["71"]["inputs"])
+        self.assertNotIn("86", rendered)
+        self.assertNotIn("88", rendered)
+        for node in rendered.values():
+            for value in node["inputs"].values():
+                if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
+                    self.assertIn(value[0], rendered)
+
+    def test_qwen_image_2_batch_template_accepts_reference_images(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        batch_request = comfy_sample.ComfyBatchSampleRequest(
+            prompts=["first prompt", "second prompt"],
+            width=1440,
+            height=1440,
+            steps=20,
+            cfg=3,
+            seeds=[42, 43],
+            model="qwen_image_2.1_int8_convrot.safetensors",
+            vae="qwen_image_2.1_vae_bf16.safetensors",
+            text_encoder="qwen3vl_8b_int8_convrot.safetensors",
+            sampler="seeds_2",
+            scheduler="simple",
+            inference_lora="",
+            inference_lora_strength=1,
+            output_format="webp_with_json",
+            output_quality="high",
+            training_lora_path="/tmp/current_lora.safetensors",
+            training_lora_filename="current_lora.safetensors",
+            filename_prefix="ai-toolkit/qwen21_batch",
+            control_images=["ai-toolkit/ref_1.png", "ai-toolkit/ref_2.png"],
+            control_images_2=["ai-toolkit/ref_1b.png", "ai-toolkit/ref_2b.png"],
+        )
+        rendered = comfy_sample.render_nunjucks_workflow(
+            comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
+            batch_request,
+        )
+
+        self.assertEqual(rendered["1400"]["inputs"]["image"], "ai-toolkit/ref_1.png")
+        self.assertEqual(rendered["1401"]["inputs"]["image"], "ai-toolkit/ref_2.png")
+        self.assertEqual(rendered["1600"]["inputs"]["image"], "ai-toolkit/ref_1b.png")
+        self.assertEqual(rendered["1601"]["inputs"]["image"], "ai-toolkit/ref_2b.png")
+        self.assertEqual(rendered["71"]["inputs"]["vae"], ["6", 0])
+        self.assertEqual(rendered["71"]["inputs"]["images.image_1"], ["80", 0])
+        self.assertEqual(rendered["71"]["inputs"]["images.image_2"], ["86", 0])
+        self.assertEqual(rendered["80"]["class_type"], "easy indexAnything")
+        self.assertEqual(rendered["86"]["class_type"], "easy indexAnything")
 
     def test_renders_minimax_h3_fl2v_video_template(self):
         from toolkit.comfy_sample import render_nunjucks_workflow
@@ -689,6 +920,7 @@ class ComfySampleConfigTests(unittest.TestCase):
             comfy={
                 "enabled": True,
                 "api_url": "http://127.0.0.1:8188",
+                "negative_prompt": "blurry, watermark",
                 "model": "krea2_raw.safetensors",
                 "vae": "wan_vae.safetensors",
                 "text_encoder": "qwen_clip.safetensors",
@@ -706,6 +938,7 @@ class ComfySampleConfigTests(unittest.TestCase):
         )
 
         self.assertTrue(sample.comfy.enabled)
+        self.assertEqual(sample.comfy.negative_prompt, "blurry, watermark")
         self.assertEqual(sample.comfy.workflow_path, "config/comfy_templates/krea2_lora_sample.json.njk")
         self.assertEqual(sample.comfy.model, "krea2_raw.safetensors")
         self.assertEqual(sample.comfy.inference_lora, "turbo.safetensors")
@@ -723,6 +956,7 @@ class ComfySampleConfigTests(unittest.TestCase):
         comfy = ComfySampleConfig()
 
         self.assertFalse(comfy.run_in_background)
+        self.assertEqual(comfy.negative_prompt, "")
         self.assertEqual(comfy.timeout, 30 * 60)
         self.assertEqual(comfy.training_lora_path_replace_from, "")
         self.assertEqual(comfy.training_lora_path_replace_to, "")
@@ -764,7 +998,65 @@ class ComfyApiClientTests(unittest.TestCase):
         self.assertEqual(payloads[0][0], "POST")
         self.assertEqual(payloads[0][1], "/api/prompt")
         self.assertIs(payloads[0][2]["prompt"], workflow)
+        self.assertEqual(payloads[0][2]["client_id"], client.client_id)
         self.assertIs(payloads[0][2]["extra_data"]["extra_pnginfo"]["workflow"], workflow)
+
+    def test_live_progress_websocket_uses_comfy_client_id(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient(api_url="https://comfy.example.test:8188/api")
+
+        self.assertEqual(
+            client._progress_websocket_url(),
+            f"wss://comfy.example.test:8188/api/ws?clientId={client.client_id}",
+        )
+
+    def test_wait_for_images_reports_live_websocket_progress(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient(poll_interval=0.01)
+        websocket = mock.Mock()
+        websocket.recv.return_value = json.dumps({
+            "type": "progress",
+            "data": {"prompt_id": "abc", "value": 3, "max": 10},
+        })
+        client._progress_websocket = websocket
+        client.get_history = mock.Mock(side_effect=[
+            {},
+            {
+                "abc": {
+                    "outputs": {
+                        "9": {
+                            "images": [{"filename": "sample.png", "type": "output"}],
+                        },
+                    },
+                },
+            },
+        ])
+        progress = []
+
+        images = client.wait_for_images(
+            "abc",
+            progress_callback=lambda value, maximum: progress.append((value, maximum)),
+        )
+
+        self.assertEqual(progress, [(3, 10)])
+        self.assertEqual(images[0]["filename"], "sample.png")
+        websocket.close.assert_called_once_with()
+
+    def test_post_prompt_reports_comfy_validation_response(self):
+        import io
+        import urllib.error
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient()
+        client._request_json = mock.Mock(side_effect=urllib.error.HTTPError(
+            "http://localhost:8188/api/prompt", 400, "Bad Request", {},
+            io.BytesIO(b'{"error":"missing node 1701"}'),
+        ))
+
+        with self.assertRaisesRegex(RuntimeError, "missing node 1701"):
+            client.post_prompt({})
 
     def test_unload_models_can_clear_comfy_model_cache_when_ram_is_low(self):
         from toolkit.comfy_sample import ComfyApiClient
@@ -1044,9 +1336,11 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         self.assertIn("DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH", source)
         self.assertIn("groups_by_reference_count = OrderedDict()", batch_source)
         self.assertIn(
-            "groups_by_reference_count.setdefault(reference_count, []).append((i, gen_config))",
+            "groups_by_reference_count.setdefault(group_key, []).append((i, gen_config))",
             batch_source,
         )
+        self.assertIn("gen_config.width", batch_source)
+        self.assertIn("gen_config.height", batch_source)
         self.assertIn("indexed_batch_groups = list(groups_by_reference_count.values())", batch_source)
         self.assertIn("control_image_paths_2", batch_source)
         self.assertIn("control_image_paths_3", batch_source)
@@ -1106,7 +1400,9 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         batch_start = source.index("def _render_comfy_sample_batch", single_start)
         single_source = source[single_start:batch_start]
 
+        self.assertIn("DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH", single_source)
         self.assertIn("DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH", single_source)
+        self.assertIn("is_qwen_image_2_workflow", single_source)
         self.assertIn("client.upload_image(control_image_path)", single_source)
         self.assertIn("client.upload_image(control_image_path_2)", single_source)
         self.assertIn("client.upload_image(control_image_path_3)", single_source)
@@ -1218,6 +1514,8 @@ class ComfySampleUITests(unittest.TestCase):
         sample_section = source[sample_start:sample_prompts_start]
 
         self.assertIn('label="Use ComfyUI Renderer"', sample_section)
+        self.assertIn('label="Negative Prompt"', sample_section)
+        self.assertIn("config.process[0].sample.comfy.negative_prompt", sample_section)
         self.assertIn("config.process[0].sample.comfy.enabled", sample_section)
         self.assertIn('label="Comfy Model"', sample_section)
         self.assertIn('label="Comfy VAE"', sample_section)

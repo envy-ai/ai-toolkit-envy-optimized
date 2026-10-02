@@ -13,7 +13,8 @@ type DisableableSections =
   | 'train.diff_output_preservation'
   | 'train.blank_prompt_preservation'
   | 'train.unload_text_encoder'
-  | 'slider';
+  | 'slider'
+  | 'datasets';
 
 type AdditionalSections =
   | 'datasets.control_path'
@@ -34,6 +35,7 @@ type AdditionalSections =
   | 'model.low_vram_layer_streaming'
   | 'model.qie.match_target_res'
   | 'model.assistant_lora_path'
+  | 'model.text_encoder_path'
   | 'model.unconditional_lora_path'
   | 'model.model_kwargs.kv_cache'
   | 'model.model_kwargs.instruction'
@@ -184,7 +186,118 @@ export const jobTypeOptions: JobTypeOption[] = [
       return config;
     },
   },
+  {
+    value: 'fizgig_image_slider',
+    label: 'Fizgig Image Slider (Qwen 2.1)',
+    disableSections: ['slider', 'trigger_word', 'train.diff_output_preservation', 'train.blank_prompt_preservation'],
+    onActivate: config => activateFizgigSlider(config, 'image'),
+    onDeactivate: deactivateFizgigSlider,
+  },
+  {
+    value: 'fizgig_prompt_slider',
+    label: 'Fizgig Prompt Slider (Qwen 2.1)',
+    disableSections: ['slider', 'datasets', 'trigger_word', 'train.diff_output_preservation', 'train.blank_prompt_preservation'],
+    onActivate: config => activateFizgigSlider(config, 'prompt'),
+    onDeactivate: deactivateFizgigSlider,
+  },
+  {
+    value: 'qwen_flow_dpo',
+    label: 'Flow-DPO LoRA (Qwen 2.1)',
+    disableSections: ['slider', 'trigger_word', 'train.timestep_type', 'train.diff_output_preservation', 'train.blank_prompt_preservation'],
+    onActivate: config => {
+      const process = config.config.process[0];
+      process.flow_dpo = { beta: 1.0, sft_weight: 0.0 };
+      if (process.network) process.network.type = 'lora';
+      process.train.train_unet = true;
+      process.train.train_text_encoder = false;
+      process.train.noise_scheduler = 'flowmatch';
+      process.train.timestep_type = 'shift';
+      process.train.cache_text_embeddings = true;
+      process.train.unload_text_encoder = false;
+      process.train.diff_output_preservation = false;
+      process.train.blank_prompt_preservation = false;
+      process.train.frequency_loss_type = 'none';
+      process.train.do_cfg = false;
+      process.train.do_random_cfg = false;
+      process.train.do_guidance_loss = false;
+      process.train.do_differential_guidance = false;
+      if (process.train.ema_config) process.train.ema_config.use_ema = false;
+      process.trigger_word = null;
+      process.datasets.forEach(dataset => {
+        dataset.cache_latents_to_disk = true;
+        dataset.caption_dropout_rate = 0;
+        dataset.network_weight = 1;
+        dataset.controls = [];
+        dataset.is_reg = false;
+      });
+      return config;
+    },
+    onDeactivate: config => {
+      delete config.config.process[0].flow_dpo;
+      return config;
+    },
+  },
 ];
+
+function activateFizgigSlider(config: JobConfig, mode: 'image' | 'prompt'): JobConfig {
+  const process = config.config.process[0];
+  process.fizgig_slider = {
+    diff_weight: 1.0,
+    positive_prefix: '',
+    negative_prefix: '',
+    cfg_scale: 1.0,
+    cfg_negative_prefix: '',
+    cfg_negative_prefix_positive: '',
+    cfg_negative_prefix_negative: '',
+    prompt_entries: [{ kind: 'simple', prompt: 'a detailed illustration' }],
+    guidance: 3.0,
+    bank_size: 16,
+    bank_resolution: 768,
+    bank_steps: 25,
+  };
+  if (process.network && !['lora', 'dora'].includes(process.network.type)) process.network.type = 'lora';
+  process.train.train_text_encoder = false;
+  process.train.noise_scheduler = 'flowmatch';
+  process.train.diff_output_preservation = false;
+  process.train.blank_prompt_preservation = false;
+  process.train.frequency_loss_type = 'none';
+  process.train.do_cfg = false;
+  process.train.do_random_cfg = false;
+  process.train.do_guidance_loss = false;
+  process.train.do_differential_guidance = false;
+  if (process.train.ema_config) process.train.ema_config.use_ema = false;
+  process.trigger_word = null;
+  if (mode === 'image') {
+    process.train.cache_text_embeddings = true;
+    process.train.unload_text_encoder = false;
+    process.datasets.forEach(dataset => {
+      dataset.cache_latents_to_disk = true;
+      dataset.caption_dropout_rate = 0;
+      dataset.control_path = null;
+      dataset.control_path_2 = null;
+      dataset.control_path_3 = null;
+      dataset.controls = [];
+      dataset.is_reg = false;
+    });
+  }
+  if (mode === 'prompt') {
+    process.train.cache_text_embeddings = false;
+    process.train.unload_text_encoder = true;
+  }
+  const firstEntry = process.fizgig_slider.prompt_entries?.[0];
+  const prompt = mode === 'prompt'
+    ? (firstEntry?.kind === 'simple' ? firstEntry.prompt : firstEntry?.neutral_prompt ?? '')
+    : (process.datasets[0]?.default_caption || 'a detailed illustration');
+  process.sample.walk_seed = false;
+  process.sample.guidance_scale = 1.0;
+  process.sample.samples = [-1, 0, 1].map(network_multiplier => ({ prompt, network_multiplier }));
+  return config;
+}
+
+function deactivateFizgigSlider(config: JobConfig): JobConfig {
+  delete config.config.process[0].fizgig_slider;
+  return config;
+}
 
 const MODEL_PREFIX = 'config.process[0].model.';
 const SAMPLE_PREFIX = 'config.process[0].sample';

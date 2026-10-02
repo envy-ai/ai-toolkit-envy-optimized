@@ -175,7 +175,7 @@
   },
   "72": {
     "inputs": {
-      "prompt": "",
+      "prompt": {{ negative_prompt | json }},
       "clip": [
         {% if inference_lora_enabled %}"37"{% else %}"36"{% endif %},
         1

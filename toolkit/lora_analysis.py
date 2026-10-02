@@ -108,6 +108,7 @@ def discover_lora_layers(path: Path) -> tuple[list[LoraLayer], list[str]]:
 
             alpha_key = name + ".alpha"
             magnitude_candidates = (
+                name + ".dora_scale",
                 name + ".magnitude",
                 name + ".lora_magnitude_vector.weight",
                 name + ".lora_magnitude_vector",

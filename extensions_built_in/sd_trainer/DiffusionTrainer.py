@@ -420,9 +420,13 @@ class DiffusionTrainer(SDTrainer):
         self.maybe_stop()
         self.update_status("running", "Training")
 
-    def save(self, step=None):
+    def save(self, step=None, record_low_loss=None, scheduled_save=False):
         self.maybe_stop()
         self.update_status("running", "Saving model")
-        super().save(step)
+        super().save(
+            step,
+            record_low_loss=record_low_loss,
+            scheduled_save=scheduled_save,
+        )
         self.maybe_stop()
         self.update_status("running", "Training")

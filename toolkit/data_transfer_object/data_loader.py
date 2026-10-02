@@ -81,6 +81,12 @@ class FileItemDTO(
         self.encode_control_in_text_embeddings = kwargs.get(
             "encode_control_in_text_embeddings", False
         )
+        self.caption_dropout_keeps_control_images = kwargs.get(
+            "caption_dropout_keeps_control_images", False
+        )
+        self.cache_processed_control_text_embeddings = kwargs.get(
+            "cache_processed_control_text_embeddings", False
+        )
         self.encode_first_frame_in_text_embeddings = kwargs.get(
             "encode_first_frame_in_text_embeddings", False
         )

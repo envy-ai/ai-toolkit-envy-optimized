@@ -39,6 +39,15 @@ class TestLoraKeyFormat(unittest.TestCase):
             "transformer$$transformer_blocks$$0$$attn$$to_q.alpha",
         )
 
+    def test_lora_alpha_keeps_parameter_separator_when_loading_peft_key(self):
+        self.assertEqual(
+            peft_key_to_internal_key(
+                "transformer.transformer_blocks.0.attn.to_q.alpha",
+                network_type="lora",
+            ),
+            "transformer$$transformer_blocks$$0$$attn$$to_q.alpha",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

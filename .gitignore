@@ -191,6 +191,7 @@ aitk_db.db*
 original_repo
 /output_backups
 /tmp
+/prompt_sets/
 *.bak
 .next
 testing/.model_test_outputs

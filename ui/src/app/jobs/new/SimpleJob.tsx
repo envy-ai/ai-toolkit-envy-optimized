@@ -9,7 +9,7 @@ import {
 } from './options';
 import { useModelArchs } from '@/extensions/modelArchs';
 import { defaultCompileOptions, defaultDatasetConfig, defaultSliderConfig } from './jobConfig';
-import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
+import { FizgigPromptEntry, FizgigSliderConfig, GroupedSelectOption, JobConfig, SelectOption } from '@/types';
 import { objectCopy, tagsToObj, objToTags } from '@/utils/basic';
 import {
   TextInput,
@@ -33,10 +33,11 @@ import { handleModelArchChange } from './utils';
 import { IoFlaskSharp } from 'react-icons/io5';
 import { isMac } from '@/helpers/basic';
 import { apiClient } from '@/utils/api';
+import { Modal } from '@/components/Modal';
 
 type Props = {
   jobConfig: JobConfig;
-  setJobConfig: (value: any, key: string) => void;
+  setJobConfig: (value: any, key?: string) => void;
   status: 'idle' | 'saving' | 'success' | 'error';
   handleSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   runId: string | null;
@@ -104,6 +105,20 @@ const comfyWorkflowOptions: SelectOption[] = [
   },
 ];
 
+const neutralPromptForEntry = (entry: FizgigPromptEntry | undefined): string | undefined =>
+  entry?.kind === 'simple' ? entry.prompt : entry?.neutral_prompt;
+
+type SavedPromptSet = Pick<FizgigSliderConfig,
+  'positive_prefix' | 'negative_prefix' | 'cfg_negative_prefix' |
+  'cfg_negative_prefix_positive' | 'cfg_negative_prefix_negative'> & {
+  version: 1;
+  prompt_entries: FizgigPromptEntry[];
+};
+
+const promptSetErrorMessage = (error: unknown): string =>
+  (error as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+  'Could not reach the prompt sets service.';
+
 export default function SimpleJob({
   jobConfig,
   setJobConfig,
@@ -140,18 +155,161 @@ export default function SimpleJob({
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
   const isPromptSlider = jobConfig.config.process[0].type === 'slider';
+  const isFizgigImageSlider = jobConfig.config.process[0].type === 'fizgig_image_slider';
+  const isFizgigPromptSlider = jobConfig.config.process[0].type === 'fizgig_prompt_slider';
+  const isFizgigSlider = isFizgigImageSlider || isFizgigPromptSlider;
+  const isQwenFlowDPO = jobConfig.config.process[0].type === 'qwen_flow_dpo';
+  const isPairedImageTraining = isFizgigImageSlider || isQwenFlowDPO;
+  const fizgigSlider = jobConfig.config.process[0].fizgig_slider;
+  const promptEntries: FizgigPromptEntry[] = fizgigSlider?.prompt_entries
+    ?? fizgigSlider?.prompt_triplets?.map(triplet => ({ kind: 'specific' as const, ...triplet }))
+    ?? [{
+      kind: 'specific',
+      neutral_prompt: fizgigSlider?.neutral_prompt ?? '',
+      positive_prompt: fizgigSlider?.positive_prompt ?? '',
+      negative_prompt: fizgigSlider?.negative_prompt ?? '',
+      cfg_negative_prompt: fizgigSlider?.cfg_negative_prompt ?? '',
+      cfg_negative_prompt_positive: fizgigSlider?.cfg_negative_prompt_positive ?? fizgigSlider?.cfg_negative_prompt ?? '',
+      cfg_negative_prompt_negative: fizgigSlider?.cfg_negative_prompt_negative ?? fizgigSlider?.cfg_negative_prompt ?? '',
+    }];
+  const hasSimplifiedPrompts = promptEntries.some(entry => entry.kind === 'simple');
+  const sliderCfgEnabled = (fizgigSlider?.cfg_scale ?? 1) > 1;
+  const updatePromptEntries = (nextEntries: FizgigPromptEntry[]) => {
+    const updated = objectCopy(jobConfig);
+    const process = updated.config.process[0];
+    if (!process.fizgig_slider) return;
+    process.fizgig_slider.prompt_entries = nextEntries;
+    // Migrate both earlier triplet formats when first edited.
+    delete process.fizgig_slider.prompt_triplets;
+    delete process.fizgig_slider.neutral_prompt;
+    delete process.fizgig_slider.positive_prompt;
+    delete process.fizgig_slider.negative_prompt;
+    delete process.fizgig_slider.cfg_negative_prompt;
+    delete process.fizgig_slider.cfg_negative_prompt_positive;
+    delete process.fizgig_slider.cfg_negative_prompt_negative;
+    const oldNeutral = neutralPromptForEntry(promptEntries[0]);
+    const newNeutral = neutralPromptForEntry(nextEntries[0]);
+    if (oldNeutral !== newNeutral && newNeutral !== undefined) {
+      process.sample.samples = process.sample.samples.map(sample =>
+        sample.prompt === oldNeutral ? { ...sample, prompt: newNeutral } : sample,
+      );
+    }
+    process.fizgig_slider.bank_size = Math.max(process.fizgig_slider.bank_size ?? 16, nextEntries.length);
+    setJobConfig(updated);
+  };
   const selectedOptimizer = jobConfig.config.process[0].train.optimizer ?? '';
   const showProdigyOptimizerParams = selectedOptimizer.toLowerCase().startsWith('prodigy');
   const networkType = jobConfig.config.process[0].network?.type ?? 'lora';
-  const showNetworkConv = networkType == 'dora' || !disableSections.includes('network.conv');
+  const frequencyLossType = jobConfig.config.process[0].train.frequency_loss_type ?? 'none';
+  const showNetworkConv = !isFizgigSlider && (networkType == 'dora' || !disableSections.includes('network.conv'));
   const comfyConfig = jobConfig.config.process[0].sample.comfy;
   const comfyEnabled = comfyConfig?.enabled || false;
   const [comfyOptions, setComfyOptions] = useState<ComfyOptions>(emptyComfyOptions);
+  const [promptSetNames, setPromptSetNames] = useState<string[]>([]);
+  const [selectedPromptSet, setSelectedPromptSet] = useState('');
+  const [promptSetBusy, setPromptSetBusy] = useState(false);
+  const [promptSetError, setPromptSetError] = useState('');
+  const [promptSetNotice, setPromptSetNotice] = useState('');
+  const [savePromptSetOpen, setSavePromptSetOpen] = useState(false);
+  const [newPromptSetName, setNewPromptSetName] = useState('');
   const [modelPathSource, setModelPathSource] = useState<ModelPathSource>(() => {
     const modelPath = jobConfig.config.process[0].model.name_or_path ?? '';
     return modelPath.startsWith('/') && modelPath.endsWith('.safetensors') ? 'comfy_checkpoint' : 'standard';
   });
   const comfyCheckpointPathSelected = modelPathSource === 'comfy_checkpoint';
+
+  useEffect(() => {
+    if (!isFizgigPromptSlider) return;
+    let cancelled = false;
+    apiClient.get<{ names: string[] }>('/api/prompt-sets')
+      .then(response => {
+        if (!cancelled) setPromptSetNames(response.data.names.sort((a, b) =>
+          a.localeCompare(b, undefined, { sensitivity: 'base' }) || a.localeCompare(b)));
+      })
+      .catch(error => {
+        if (!cancelled) setPromptSetError(promptSetErrorMessage(error));
+      });
+    return () => { cancelled = true; };
+  }, [isFizgigPromptSlider]);
+
+  const applyPromptSet = (promptSet: SavedPromptSet) => {
+    const updated = objectCopy(jobConfig);
+    const process = updated.config.process[0];
+    if (!process.fizgig_slider) return;
+    const oldNeutral = neutralPromptForEntry(promptEntries[0]);
+    const newNeutral = neutralPromptForEntry(promptSet.prompt_entries[0]);
+    Object.assign(process.fizgig_slider, {
+      positive_prefix: promptSet.positive_prefix,
+      negative_prefix: promptSet.negative_prefix,
+      cfg_negative_prefix: promptSet.cfg_negative_prefix,
+      cfg_negative_prefix_positive: promptSet.cfg_negative_prefix_positive,
+      cfg_negative_prefix_negative: promptSet.cfg_negative_prefix_negative,
+      prompt_entries: promptSet.prompt_entries,
+    });
+    // Remove legacy prompt fields so they cannot override the loaded entries.
+    delete process.fizgig_slider.prompt_triplets;
+    delete process.fizgig_slider.neutral_prompt;
+    delete process.fizgig_slider.positive_prompt;
+    delete process.fizgig_slider.negative_prompt;
+    delete process.fizgig_slider.cfg_negative_prompt;
+    delete process.fizgig_slider.cfg_negative_prompt_positive;
+    delete process.fizgig_slider.cfg_negative_prompt_negative;
+    if (oldNeutral !== newNeutral && newNeutral !== undefined) {
+      process.sample.samples = process.sample.samples.map(sample =>
+        sample.prompt === oldNeutral ? { ...sample, prompt: newNeutral } : sample,
+      );
+    }
+    process.fizgig_slider.bank_size = Math.max(process.fizgig_slider.bank_size ?? 16, promptSet.prompt_entries.length);
+    setJobConfig(updated);
+  };
+
+  const loadPromptSet = async () => {
+    if (!selectedPromptSet || promptSetBusy) return;
+    setPromptSetBusy(true);
+    setPromptSetError('');
+    setPromptSetNotice('');
+    try {
+      const response = await apiClient.get<{ prompt_set: SavedPromptSet }>('/api/prompt-sets', {
+        params: { name: selectedPromptSet },
+      });
+      applyPromptSet(response.data.prompt_set);
+      setPromptSetNotice(`Loaded “${selectedPromptSet}”.`);
+    } catch (error) {
+      setPromptSetError(promptSetErrorMessage(error));
+    } finally {
+      setPromptSetBusy(false);
+    }
+  };
+
+  const savePromptSet = async () => {
+    const name = newPromptSetName.trim();
+    if (!name || promptSetBusy) return;
+    const promptSet: SavedPromptSet = {
+      version: 1,
+      prompt_entries: promptEntries,
+      positive_prefix: fizgigSlider?.positive_prefix ?? '',
+      negative_prefix: fizgigSlider?.negative_prefix ?? '',
+      cfg_negative_prefix: fizgigSlider?.cfg_negative_prefix ?? '',
+      cfg_negative_prefix_positive: fizgigSlider?.cfg_negative_prefix_positive ?? fizgigSlider?.cfg_negative_prefix ?? '',
+      cfg_negative_prefix_negative: fizgigSlider?.cfg_negative_prefix_negative ?? fizgigSlider?.cfg_negative_prefix ?? '',
+    };
+    setPromptSetBusy(true);
+    setPromptSetError('');
+    setPromptSetNotice('');
+    try {
+      await apiClient.post('/api/prompt-sets', { name, prompt_set: promptSet });
+      setPromptSetNames(previous => [...new Set([...previous, name])].sort((a, b) =>
+        a.localeCompare(b, undefined, { sensitivity: 'base' }) || a.localeCompare(b)));
+      setSelectedPromptSet(name);
+      setSavePromptSetOpen(false);
+      setNewPromptSetName('');
+      setPromptSetNotice(`Saved “${name}”.`);
+    } catch (error) {
+      setPromptSetError(promptSetErrorMessage(error));
+    } finally {
+      setPromptSetBusy(false);
+    }
+  };
 
   useEffect(() => {
     const modelPath = jobConfig.config.process[0].model.name_or_path ?? '';
@@ -508,7 +666,7 @@ export default function SimpleJob({
                   setJobConfig,
                 );
               }}
-              options={groupedModelOptions}
+              options={isFizgigSlider || isQwenFlowDPO ? [{ value: 'qwen_image_2', label: 'Qwen-Image-2.1' }] : groupedModelOptions}
             />
             <SelectInput
               label="Base Model Source"
@@ -542,7 +700,18 @@ export default function SimpleJob({
                   }
                   setJobConfig(value, 'config.process[0].model.assistant_lora_path');
                 }}
-                placeholder=""
+                placeholder="/absolute/path/to/training_adapter.safetensors"
+              />
+            )}
+            {modelArch?.additionalSections?.includes('model.text_encoder_path') && (
+              <TextInput
+                label="Text Encoder Safetensors Path"
+                value={jobConfig.config.process[0].model.text_encoder_path ?? ''}
+                docKey="config.process[0].model.text_encoder_path"
+                onChange={(value: string | undefined) => {
+                  setJobConfig(value?.trim() || undefined, 'config.process[0].model.text_encoder_path');
+                }}
+                placeholder="/absolute/path/to/qwen3vl_8b.safetensors"
               />
             )}
             {modelArch?.additionalSections?.includes('model.unconditional_lora_path') && (
@@ -792,7 +961,12 @@ export default function SimpleJob({
               label="Target Type"
               value={networkType}
               onChange={value => setJobConfig(value, 'config.process[0].network.type')}
-              options={[
+              options={isQwenFlowDPO ? [
+                { value: 'lora', label: 'LoRA' },
+              ] : isFizgigSlider ? [
+                { value: 'lora', label: 'LoRA' },
+                { value: 'dora', label: 'DoRA (signed slider)' },
+              ] : [
                 { value: 'lora', label: 'LoRA' },
                 { value: 'dora', label: 'DoRA' },
                 { value: 'lokr', label: 'LoKr' },
@@ -830,8 +1004,14 @@ export default function SimpleJob({
                   label="Linear Rank"
                   value={jobConfig.config.process[0].network?.linear ?? 32}
                   onChange={value => {
+                    const currentRank = jobConfig.config.process[0].network?.linear;
+                    const currentAlpha = jobConfig.config.process[0].network?.linear_alpha;
                     setJobConfig(value, 'config.process[0].network.linear');
-                    if (networkType == 'lora') {
+                    if (
+                      currentAlpha === undefined ||
+                      currentAlpha === null ||
+                      currentAlpha === currentRank
+                    ) {
                       setJobConfig(value, 'config.process[0].network.linear_alpha');
                     }
                   }}
@@ -840,21 +1020,20 @@ export default function SimpleJob({
                   max={1024}
                   required
                 />
-                {networkType == 'dora' && (
-                  <NumberInput
-                    label="Linear Alpha"
-                    value={
-                      jobConfig.config.process[0].network?.linear_alpha ??
-                      jobConfig.config.process[0].network?.linear ??
-                      32
-                    }
-                    onChange={value => setJobConfig(value, 'config.process[0].network.linear_alpha')}
-                    placeholder="eg. 16"
-                    min={0}
-                    max={1024}
-                    required
-                  />
-                )}
+                <NumberInput
+                  label="Linear Alpha"
+                  value={
+                    jobConfig.config.process[0].network?.linear_alpha ??
+                    jobConfig.config.process[0].network?.linear ??
+                    32
+                  }
+                  docKey="config.process[0].network.linear_alpha"
+                  onChange={value => setJobConfig(value, 'config.process[0].network.linear_alpha')}
+                  placeholder="eg. 16"
+                  min={0}
+                  max={1024}
+                  required
+                />
                 {networkType == 'dora' && (
                   <Checkbox
                     label="Save magnitude-less LoRAs"
@@ -1000,8 +1179,346 @@ export default function SimpleJob({
               min={1}
               required
             />
+            <NumberInput
+              label="Record Low Window (Steps)"
+              value={jobConfig.config.process[0].save.record_low_window_size ?? 3000}
+              onChange={value => setJobConfig(value, 'config.process[0].save.record_low_window_size')}
+              placeholder="eg. 3000"
+              min={1}
+              required
+            />
+            <NumberInput
+              label="Record Low Start Step"
+              value={jobConfig.config.process[0].save.record_low_start_step ?? 50}
+              onChange={value => setJobConfig(value, 'config.process[0].save.record_low_start_step')}
+              placeholder="eg. 50"
+              min={0}
+              required
+            />
+            <NumberInput
+              label="Max Record Low Saves to Keep"
+              value={jobConfig.config.process[0].save.max_record_low_saves_to_keep ?? 5}
+              onChange={value => setJobConfig(value, 'config.process[0].save.max_record_low_saves_to_keep')}
+              placeholder="eg. 5"
+              min={1}
+              required
+            />
           </Card>
         </div>
+        {isQwenFlowDPO && (
+          <div className={sampleOnlyLockedClass}>
+            <Card title="Qwen Image 2.1 Flow-DPO">
+              <p className="text-sm text-gray-400 mb-4">
+                Target Dataset contains preferred outputs. Control Dataset 1 contains matching rejected outputs,
+                using the same filename stems and image sizes. It is not sent to Qwen as an edit reference.
+                For edit training, put source images in Control Datasets 2 and 3. Both outputs share the target
+                caption and edit inputs. Beta scales a mean latent-element error difference.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <NumberInput
+                  label="DPO Beta"
+                  value={jobConfig.config.process[0].flow_dpo?.beta ?? 1}
+                  onChange={value => setJobConfig(value, 'config.process[0].flow_dpo.beta')}
+                  min={0.0001}
+                  placeholder="eg. 1.0"
+                />
+                <NumberInput
+                  label="Preferred Image Loss Weight"
+                  value={jobConfig.config.process[0].flow_dpo?.sft_weight ?? 0}
+                  onChange={value => setJobConfig(value, 'config.process[0].flow_dpo.sft_weight')}
+                  min={0}
+                  placeholder="0 = DPO only"
+                />
+              </div>
+            </Card>
+          </div>
+        )}
+        {isFizgigSlider && (
+          <div className={sampleOnlyLockedClass}>
+            <Card title={isFizgigImageSlider ? 'Fizgig Image Slider' : 'Fizgig Prompt Slider'}>
+              <p className="text-sm text-gray-400 mb-4">
+                +1 and −1 are trained as opposite strengths of one Qwen Image 2.1 LoRA or DoRA. The three sample
+                prompts use the same seed at strengths −1, 0 and +1.
+              </p>
+              {isFizgigImageSlider ? (
+                <>
+                  <p className="text-sm text-gray-400 mb-4">
+                    Select positive images under Target Dataset and their matched negative images under Control Dataset 1.
+                    Give each pair the same filename stem, framing and size. Control Dataset 1 is not passed to Qwen as
+                    an edit reference.
+                  </p>
+                  <NumberInput
+                    label="Pair Difference Weight"
+                    value={jobConfig.config.process[0].fizgig_slider?.diff_weight ?? 1}
+                    onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.diff_weight')}
+                    min={0}
+                    max={1}
+                    placeholder="0 = uniform loss; 1 = focus on changed areas"
+                  />
+                </>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+                  <NumberInput
+                    label="Guidance / Push Strength"
+                    value={jobConfig.config.process[0].fizgig_slider?.guidance ?? 3}
+                    onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.guidance')}
+                    min={0.01}
+                    placeholder="eg. 3"
+                  />
+                  <NumberInput
+                    label="CFG (Practice + Training)"
+                    value={fizgigSlider?.cfg_scale ?? 1}
+                    onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.cfg_scale')}
+                    min={0}
+                    placeholder="1 = off"
+                  />
+                  <NumberInput
+                    label="Total Practice Images"
+                    value={jobConfig.config.process[0].fizgig_slider?.bank_size ?? 16}
+                    onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.bank_size')}
+                    min={promptEntries.length}
+                    placeholder="Distributed across prompt entries"
+                  />
+                  <NumberInput
+                    label="Practice Image Resolution"
+                    value={jobConfig.config.process[0].fizgig_slider?.bank_resolution ?? 768}
+                    onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.bank_resolution')}
+                    min={64}
+                    placeholder="Multiple of 32"
+                  />
+                  <NumberInput
+                    label="Practice Render Steps"
+                    value={jobConfig.config.process[0].fizgig_slider?.bank_steps ?? 25}
+                    onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.bank_steps')}
+                    min={1}
+                    placeholder="eg. 25"
+                  />
+                  <p className="text-xs text-gray-400 md:col-span-2 lg:col-span-5">
+                    This CFG controls the practice bank and teacher/student training predictions. Sample-image CFG
+                    is a separate setting in the Samples section.
+                  </p>
+                </div>
+              )}
+            </Card>
+          </div>
+        )}
+        {isFizgigPromptSlider && (
+          <div className={`${sampleOnlyLockedClass} space-y-4`}>
+            <Card title="Prompt Sets">
+              <p className="mb-3 text-sm text-gray-400">
+                Save or load the ordered simplified prompts and specific triplets, plus all shared prefixes.
+                Training strength and practice-image settings stay with this job.
+              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                <SelectInput
+                  label="Saved Prompt Set"
+                  className="min-w-64 flex-1"
+                  value={selectedPromptSet}
+                  onChange={setSelectedPromptSet}
+                  options={promptSetNames.map(name => ({ value: name, label: name }))}
+                  disabled={promptSetBusy}
+                />
+                <button
+                  type="button"
+                  onClick={loadPromptSet}
+                  disabled={!selectedPromptSet || promptSetBusy}
+                  className="rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Load
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setPromptSetError(''); setSavePromptSetOpen(true); }}
+                  disabled={promptSetBusy}
+                  className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Save Prompt Set
+                </button>
+              </div>
+              {promptSetError && <p className="mt-2 text-sm text-red-400" role="alert">{promptSetError}</p>}
+              {promptSetNotice && <p className="mt-2 text-sm text-green-400" role="status">{promptSetNotice}</p>}
+            </Card>
+            <Card title="Shared Prefixes for Simplified Prompts">
+              <p className="mb-4 text-sm text-gray-400">
+                Simplified entries use their base prompt for neutral (0). For each pole, its prefix is placed
+                before the base prompt with one blank line between them. CFG negatives are assembled the same
+                way when CFG is above 1: neutral (0) conditions practice images and the student, while the
+                +1 and −1 negatives separately condition their teacher predictions. These are separate from
+                the −1 slider-direction positive prompt. Specific triplets ignore these prefixes.
+              </p>
+              <div className="space-y-4">
+                <TextAreaInput
+                  label="Negative Prefix (−1)"
+                  value={fizgigSlider?.negative_prefix ?? ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.negative_prefix')}
+                  placeholder="Instructions for the −1 direction"
+                  rows={3}
+                  required={hasSimplifiedPrompts}
+                />
+                <TextAreaInput
+                  label="Positive Prefix (+1)"
+                  value={fizgigSlider?.positive_prefix ?? ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.positive_prefix')}
+                  placeholder="Instructions for the +1 direction"
+                  rows={3}
+                  required={hasSimplifiedPrompts}
+                />
+                <TextAreaInput
+                  label="CFG Negative Prefix for Neutral (0)"
+                  value={fizgigSlider?.cfg_negative_prefix ?? ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.cfg_negative_prefix')}
+                  placeholder="Optional neutral/practice-image negative prefix"
+                  rows={3}
+                  disabled={!sliderCfgEnabled || !hasSimplifiedPrompts}
+                />
+                <TextAreaInput
+                  label="CFG Negative Prefix for Positive (+1)"
+                  value={fizgigSlider?.cfg_negative_prefix_positive ?? fizgigSlider?.cfg_negative_prefix ?? ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.cfg_negative_prefix_positive')}
+                  placeholder="What the +1 teacher should avoid, e.g. close-up portrait"
+                  rows={3}
+                  disabled={!sliderCfgEnabled || !hasSimplifiedPrompts}
+                />
+                <TextAreaInput
+                  label="CFG Negative Prefix for Negative (−1)"
+                  value={fizgigSlider?.cfg_negative_prefix_negative ?? fizgigSlider?.cfg_negative_prefix ?? ''}
+                  onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.cfg_negative_prefix_negative')}
+                  placeholder="What the −1 teacher should avoid, e.g. full-body shot"
+                  rows={3}
+                  disabled={!sliderCfgEnabled || !hasSimplifiedPrompts}
+                />
+              </div>
+            </Card>
+            <p className="text-sm text-gray-400">
+              Practice images render only the neutral (0) prompt and are distributed across entries in order.
+              The +1 and −1 prompts drive teacher predictions during training, not separate practice renders.
+              Keep the subject matched between the two directions of each entry.
+            </p>
+            {promptEntries.map((entry, index) => (
+              <div key={index} className="space-y-4 rounded-lg border border-gray-700 p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <h3 className="text-lg font-semibold">
+                    Prompt {index + 1} — {entry.kind === 'simple' ? 'Simplified' : 'Specific Triplet'}
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => updatePromptEntries(promptEntries.filter((_, otherIndex) => otherIndex !== index))}
+                    disabled={promptEntries.length === 1}
+                    className="flex items-center gap-1 rounded bg-red-700 px-3 py-1.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    aria-label={`Remove prompt ${index + 1}`}
+                  >
+                    <X className="h-4 w-4" /> Remove
+                  </button>
+                </div>
+                {entry.kind === 'simple' ? (
+                  <Card title="Base Prompt (0)">
+                    <TextAreaInput
+                      label="The complete neutral prompt; shared by both prefixed directions"
+                      value={entry.prompt}
+                      onChange={value => updatePromptEntries(promptEntries.map((item, itemIndex) =>
+                        itemIndex === index && item.kind === 'simple' ? { ...item, prompt: value } : item,
+                      ))}
+                      rows={5}
+                      required
+                    />
+                  </Card>
+                ) : (
+                  <>
+                    <Card title="Neutral Prompt (0)">
+                      <TextAreaInput
+                        label="What this triplet's practice images depict without either slider direction"
+                        value={entry.neutral_prompt}
+                        onChange={value => updatePromptEntries(promptEntries.map((item, itemIndex) =>
+                          itemIndex === index && item.kind === 'specific' ? { ...item, neutral_prompt: value } : item,
+                        ))}
+                        rows={5}
+                        required
+                      />
+                    </Card>
+                    <Card title="Positive Prompt (+1)">
+                      <TextAreaInput
+                        label="Full prompt describing the +1 end"
+                        value={entry.positive_prompt}
+                        onChange={value => updatePromptEntries(promptEntries.map((item, itemIndex) =>
+                          itemIndex === index && item.kind === 'specific' ? { ...item, positive_prompt: value } : item,
+                        ))}
+                        rows={5}
+                        required
+                      />
+                    </Card>
+                    <Card title="Negative Prompt (−1)">
+                      <TextAreaInput
+                        label="Full prompt describing the −1 end"
+                        value={entry.negative_prompt}
+                        onChange={value => updatePromptEntries(promptEntries.map((item, itemIndex) =>
+                          itemIndex === index && item.kind === 'specific' ? { ...item, negative_prompt: value } : item,
+                        ))}
+                        rows={5}
+                        required
+                      />
+                    </Card>
+                    <Card title="CFG Negative Prompt for Neutral (0)">
+                      <TextAreaInput
+                        label="Optional full CFG negative prompt for practice images and the student"
+                        value={entry.cfg_negative_prompt ?? ''}
+                        onChange={value => updatePromptEntries(promptEntries.map((item, itemIndex) =>
+                          itemIndex === index && item.kind === 'specific'
+                            ? { ...item, cfg_negative_prompt: value } : item,
+                        ))}
+                        rows={5}
+                        disabled={!sliderCfgEnabled}
+                      />
+                    </Card>
+                    <Card title="CFG Negative Prompt for Positive (+1)">
+                      <TextAreaInput
+                        label="Optional full CFG negative prompt for the +1 teacher prediction"
+                        value={entry.cfg_negative_prompt_positive ?? entry.cfg_negative_prompt ?? ''}
+                        onChange={value => updatePromptEntries(promptEntries.map((item, itemIndex) =>
+                          itemIndex === index && item.kind === 'specific'
+                            ? { ...item, cfg_negative_prompt_positive: value } : item,
+                        ))}
+                        rows={5}
+                        disabled={!sliderCfgEnabled}
+                      />
+                    </Card>
+                    <Card title="CFG Negative Prompt for Negative (−1)">
+                      <TextAreaInput
+                        label="Optional full CFG negative prompt for the −1 teacher prediction"
+                        value={entry.cfg_negative_prompt_negative ?? entry.cfg_negative_prompt ?? ''}
+                        onChange={value => updatePromptEntries(promptEntries.map((item, itemIndex) =>
+                          itemIndex === index && item.kind === 'specific'
+                            ? { ...item, cfg_negative_prompt_negative: value } : item,
+                        ))}
+                        rows={5}
+                        disabled={!sliderCfgEnabled}
+                      />
+                    </Card>
+                  </>
+                )}
+              </div>
+            ))}
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => updatePromptEntries([...promptEntries, { kind: 'simple', prompt: '' }])}
+                className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-500"
+              >
+                Add Simplified Prompt
+              </button>
+              <button
+                type="button"
+                onClick={() => updatePromptEntries([...promptEntries, {
+                  kind: 'specific', neutral_prompt: '', positive_prompt: '', negative_prompt: '',
+                  cfg_negative_prompt: '',
+                  cfg_negative_prompt_positive: '', cfg_negative_prompt_negative: '',
+                }])}
+                className="rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600"
+              >
+                Add Specific Triplet
+              </button>
+            </div>
+          </div>
+        )}
         <div className={sampleOnlyLockedClass}>
           <Card title="Training">
             <div className={trainingBarClass}>
@@ -1091,7 +1608,7 @@ export default function SimpleJob({
                 )}
               </div>
               <div>
-                {disableSections.includes('train.timestep_type') ? null : (
+                {disableSections.includes('train.timestep_type') || isFizgigSlider ? null : (
                   <SelectInput
                     label="Timestep Type"
                     value={jobConfig.config.process[0].train.timestep_type}
@@ -1105,6 +1622,7 @@ export default function SimpleJob({
                     ]}
                   />
                 )}
+                {!isFizgigSlider && <>
                 <SelectInput
                   label="Content Or Style"
                   className="pt-2"
@@ -1129,6 +1647,97 @@ export default function SimpleJob({
                     { value: 'stepped', label: 'Stepped Recovery' },
                   ]}
                 />
+                <SelectInput
+                  label="Pixel Frequency Loss"
+                  className="pt-2"
+                  value={frequencyLossType}
+                  onChange={value => setJobConfig(value, 'config.process[0].train.frequency_loss_type')}
+                  docKey="train.frequency_loss_type"
+                  options={[
+                    { value: 'none', label: 'Disabled' },
+                    { value: 'low_pass', label: 'Low Pass (long periods)' },
+                    { value: 'high_pass', label: 'High Pass (short periods)' },
+                    { value: 'band_pass', label: 'Band Pass' },
+                    { value: 'notch', label: 'Notch (exclude band)' },
+                  ]}
+                />
+                {frequencyLossType !== 'none' && (
+                  <>
+                    <NumberInput
+                      label="Frequency Loss Weight"
+                      className="pt-2"
+                      value={jobConfig.config.process[0].train.frequency_loss_weight ?? 0.1}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.frequency_loss_weight')}
+                      docKey="train.frequency_loss_weight"
+                      placeholder="eg. 0.1"
+                      min={0}
+                    />
+                    {(frequencyLossType === 'low_pass' || frequencyLossType === 'high_pass') && (
+                      <NumberInput
+                        label="Cutoff Period (pixels)"
+                        className="pt-2"
+                        value={jobConfig.config.process[0].train.frequency_loss_cutoff ?? 18}
+                        onChange={value => setJobConfig(value, 'config.process[0].train.frequency_loss_cutoff')}
+                        docKey="train.frequency_loss_cutoff"
+                        placeholder="eg. 18"
+                        min={0.01}
+                      />
+                    )}
+                    {(frequencyLossType === 'band_pass' || frequencyLossType === 'notch') && (
+                      <>
+                        <NumberInput
+                          label="Shortest Period (pixels)"
+                          className="pt-2"
+                          value={jobConfig.config.process[0].train.frequency_loss_min_period ?? 14}
+                          onChange={value =>
+                            setJobConfig(value, 'config.process[0].train.frequency_loss_min_period')
+                          }
+                          docKey="train.frequency_loss_min_period"
+                          placeholder="eg. 14"
+                          min={0.01}
+                        />
+                        <NumberInput
+                          label="Longest Period (pixels)"
+                          className="pt-2"
+                          value={jobConfig.config.process[0].train.frequency_loss_max_period ?? 28}
+                          onChange={value =>
+                            setJobConfig(value, 'config.process[0].train.frequency_loss_max_period')
+                          }
+                          docKey="train.frequency_loss_max_period"
+                          placeholder="eg. 28"
+                          min={0.01}
+                        />
+                      </>
+                    )}
+                    <NumberInput
+                      label="Transition Width (pixels)"
+                      className="pt-2"
+                      value={jobConfig.config.process[0].train.frequency_loss_transition ?? 4}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.frequency_loss_transition')}
+                      docKey="train.frequency_loss_transition"
+                      placeholder="eg. 4"
+                      min={0}
+                    />
+                    <NumberInput
+                      label="Frequency Patch Size (pixels)"
+                      className="pt-2"
+                      value={jobConfig.config.process[0].train.frequency_loss_patch_size ?? 384}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.frequency_loss_patch_size')}
+                      docKey="train.frequency_loss_patch_size"
+                      placeholder="eg. 384; 0 uses full image"
+                      min={0}
+                    />
+                    <Checkbox
+                      label="Offload Frequency Activations"
+                      className="pt-2"
+                      checked={jobConfig.config.process[0].train.frequency_loss_activation_offload ?? true}
+                      onChange={value =>
+                        setJobConfig(value, 'config.process[0].train.frequency_loss_activation_offload')
+                      }
+                      docKey="train.frequency_loss_activation_offload"
+                    />
+                  </>
+                )}
                 <NumberInput
                   label="Min SNR Gamma"
                   className="pt-2"
@@ -1138,6 +1747,7 @@ export default function SimpleJob({
                   docKey={'train.min_snr_gamma'}
                   min={0}
                 />
+                </>}
                 {modelArch?.additionalSections?.includes('train.audio_loss_multiplier') && (
                   <NumberInput
                     label="Audio Loss Multiplier"
@@ -1157,6 +1767,7 @@ export default function SimpleJob({
                     className="pt-1"
                     checked={jobConfig.config.process[0].train.ema_config?.use_ema || false}
                     onChange={value => setJobConfig(value, 'config.process[0].train.ema_config.use_ema')}
+                    disabled={isFizgigSlider || isQwenFlowDPO}
                   />
                 </FormGroup>
                 {jobConfig.config.process[0].train.ema_config?.use_ema && (
@@ -1188,6 +1799,7 @@ export default function SimpleJob({
                     label="Cache Text Embeddings"
                     checked={jobConfig.config.process[0].train.cache_text_embeddings || false}
                     docKey={'train.cache_text_embeddings'}
+                    disabled={isFizgigPromptSlider || isQwenFlowDPO}
                     onChange={value => {
                       setJobConfig(value, 'config.process[0].train.cache_text_embeddings');
                       if (value) {
@@ -1541,7 +2153,7 @@ export default function SimpleJob({
                         {modelArch?.additionalSections?.includes('datasets.multi_control_paths') && (
                           <>
                             <SelectInput
-                              label="Control Dataset 1"
+                              label={isFizgigImageSlider ? 'Control Dataset 1 (−1 Images)' : isQwenFlowDPO ? 'Control Dataset 1 (Rejected Images)' : 'Control Dataset 1'}
                               docKey="datasets.multi_control_paths"
                               value={dataset.control_path_1 ?? ''}
                               className="pt-2"
@@ -1553,8 +2165,8 @@ export default function SimpleJob({
                               }
                               options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
                             />
-                            <SelectInput
-                              label="Control Dataset 2"
+                            {!isFizgigImageSlider && <SelectInput
+                              label={isQwenFlowDPO ? 'Control Dataset 2 (Edit Source 1)' : 'Control Dataset 2'}
                               docKey="datasets.multi_control_paths"
                               value={dataset.control_path_2 ?? ''}
                               className="pt-2"
@@ -1565,9 +2177,9 @@ export default function SimpleJob({
                                 )
                               }
                               options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
-                            />
-                            <SelectInput
-                              label="Control Dataset 3"
+                            />}
+                            {!isFizgigImageSlider && <SelectInput
+                              label={isQwenFlowDPO ? 'Control Dataset 3 (Edit Source 2)' : 'Control Dataset 3'}
                               docKey="datasets.multi_control_paths"
                               value={dataset.control_path_3 ?? ''}
                               className="pt-2"
@@ -1578,16 +2190,16 @@ export default function SimpleJob({
                                 )
                               }
                               options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
-                            />
+                            />}
                           </>
                         )}
-                        <NumberInput
+                        {!isPairedImageTraining && <NumberInput
                           label="LoRA Weight"
                           value={dataset.network_weight}
                           className="pt-2"
                           onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].network_weight`)}
                           placeholder="eg. 1.0"
-                        />
+                        />}
                         <NumberInput
                           label="Num Repeats"
                           value={dataset.num_repeats || 1}
@@ -1604,7 +2216,7 @@ export default function SimpleJob({
                           onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].default_caption`)}
                           placeholder="eg. A photo of a cat"
                         />
-                        <NumberInput
+                        {!isPairedImageTraining && <NumberInput
                           label="Caption Dropout Rate"
                           className="pt-2"
                           value={dataset.caption_dropout_rate}
@@ -1614,7 +2226,7 @@ export default function SimpleJob({
                           placeholder="eg. 0.05"
                           min={0}
                           required
-                        />
+                        />}
                         <CreatableSelectInput
                           label="Caption Extension"
                           className="pt-2"
@@ -1644,17 +2256,18 @@ export default function SimpleJob({
                       <div>
                         <FormGroup label="Settings" className="">
                           <Checkbox
-                            label="Cache Latents"
+                            label={isFizgigImageSlider ? 'Cache +1 Latents (required)' : isQwenFlowDPO ? 'Cache Preferred Latents (required)' : 'Cache Latents'}
                             checked={dataset.cache_latents_to_disk || false}
                             onChange={value =>
                               setJobConfig(value, `config.process[0].datasets[${i}].cache_latents_to_disk`)
                             }
+                            disabled={isPairedImageTraining}
                           />
-                          <Checkbox
+                          {!isPairedImageTraining && <Checkbox
                             label="Is Regularization"
                             checked={dataset.is_reg || false}
                             onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].is_reg`)}
-                          />
+                          />}
                           {modelArch?.additionalSections?.includes('datasets.auto_frame_count') && (
                             <Checkbox
                               label="Auto Frame Count"
@@ -1775,8 +2388,13 @@ export default function SimpleJob({
                   onClick={() => {
                     const newDataset = objectCopy(defaultDatasetConfig);
                     // automaticallt add the controls for a new dataset
-                    const controls = modelArch?.controls ?? [];
+                    const controls = isPairedImageTraining ? [] : (modelArch?.controls ?? []);
                     newDataset.controls = controls;
+                    if (isPairedImageTraining) {
+                      newDataset.cache_latents_to_disk = true;
+                      newDataset.caption_dropout_rate = 0;
+                      newDataset.network_weight = 1;
+                    }
                     setJobConfig([...jobConfig.config.process[0].datasets, newDataset], 'config.process[0].datasets');
                   }}
                   className="w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
@@ -1790,6 +2408,12 @@ export default function SimpleJob({
         {isPromptSlider && <div className={sampleOnlyLockedClass}>{sliderTargetsEditor}</div>}
         <div>
           <Card title="Sample">
+            <Checkbox
+              label="Sample on Record Low"
+              checked={jobConfig.config.process[0].save.sample_on_record_low ?? true}
+              onChange={value => setJobConfig(value, 'config.process[0].save.sample_on_record_low')}
+              docKey="config.process[0].save.sample_on_record_low"
+            />
             <div className={sampleTopStyleClass}>
               <div>
                 <NumberInput
@@ -1976,6 +2600,15 @@ export default function SimpleJob({
                   onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.api_url')}
                   placeholder="http://127.0.0.1:8188"
                 />
+                {modelArch?.name !== 'minimax_h3' && (
+                  <TextAreaInput
+                    label="Negative Prompt"
+                    value={comfyConfig?.negative_prompt || ''}
+                    onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.negative_prompt')}
+                    placeholder="Optional negative prompt for ComfyUI samples"
+                    rows={2}
+                  />
+                )}
                 <CreatableSelectInput
                   label="Sample Renderer Workflow"
                   value={comfyConfig?.workflow_path || 'config/comfy_templates/krea2_lora_sample.json.njk'}
@@ -2331,10 +2964,10 @@ export default function SimpleJob({
                       {modelArch?.additionalSections?.includes('datasets.multi_control_paths') && (
                         <FormGroup label="Control Images" className="pt-2 ml-4">
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-2 mt-2">
-                            {['ctrl_img_1', 'ctrl_img_2', 'ctrl_img_3'].map((ctrlKey, ctrl_idx) => (
+                            {(isQwenFlowDPO ? ['ctrl_img_1', 'ctrl_img_2'] : ['ctrl_img_1', 'ctrl_img_2', 'ctrl_img_3']).map((ctrlKey, ctrl_idx) => (
                               <SampleControlImage
                                 key={ctrlKey}
-                                instruction={`Add Control Image ${ctrl_idx + 1}`}
+                                instruction={isQwenFlowDPO ? `Add Edit Source ${ctrl_idx + 1}` : `Add Control Image ${ctrl_idx + 1}`}
                                 className=""
                                 src={sample[ctrlKey as keyof typeof sample] as string}
                                 onNewImageSelected={imagePath => {
@@ -2404,6 +3037,29 @@ export default function SimpleJob({
         {status === 'success' && <p className="text-green-500 text-center">Training saved successfully!</p>}
         {status === 'error' && <p className="text-red-500 text-center">Error saving training. Please try again.</p>}
       </form>
+      <Modal isOpen={savePromptSetOpen} onClose={() => setSavePromptSetOpen(false)} title="Save Prompt Set" size="sm">
+        <form onSubmit={event => { event.preventDefault(); void savePromptSet(); }} className="space-y-4 p-4">
+          <TextInput
+            label="Prompt set name"
+            value={newPromptSetName}
+            onChange={setNewPromptSetName}
+            placeholder="e.g. close-up vs full-body"
+            required
+          />
+          <p className="text-xs text-gray-400">
+            Names may contain letters, numbers, spaces, dots, underscores and hyphens. Existing sets are not overwritten.
+          </p>
+          {promptSetError && <p className="text-sm text-red-400" role="alert">{promptSetError}</p>}
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setSavePromptSetOpen(false)}
+              className="rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600">Cancel</button>
+            <button type="submit" disabled={promptSetBusy || !newPromptSetName.trim()}
+              className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40">
+              {promptSetBusy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </form>
+      </Modal>
       <AddSingleImageModal />
     </>
   );

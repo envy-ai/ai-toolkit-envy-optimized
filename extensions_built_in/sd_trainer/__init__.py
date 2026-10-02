@@ -56,6 +56,36 @@ class DiffusionTrainerExtension(Extension):
         return DiffusionTrainer
 
 
+class FizgigImageSliderExtension(Extension):
+    uid = "fizgig_image_slider"
+    name = "Fizgig Image Slider (Qwen Image 2.1)"
+
+    @classmethod
+    def get_process(cls):
+        from .FizgigSliderTrainer import FizgigSliderTrainer
+        return FizgigSliderTrainer
+
+
+class FizgigPromptSliderExtension(Extension):
+    uid = "fizgig_prompt_slider"
+    name = "Fizgig Prompt Slider (Qwen Image 2.1)"
+
+    @classmethod
+    def get_process(cls):
+        from .FizgigSliderTrainer import FizgigSliderTrainer
+        return FizgigSliderTrainer
+
+
+class QwenFlowDPOExtension(Extension):
+    uid = "qwen_flow_dpo"
+    name = "Qwen Image 2.1 Flow-DPO (LoRA)"
+
+    @classmethod
+    def get_process(cls):
+        from .QwenFlowDPOTrainer import QwenFlowDPOTrainer
+        return QwenFlowDPOTrainer
+
+
 # for backwards compatability
 class TextualInversionTrainer(SDTrainerExtension):
     uid = "textual_inversion_trainer"
@@ -67,4 +97,7 @@ AI_TOOLKIT_EXTENSIONS = [
     TextualInversionTrainer,
     UITrainerExtension,
     DiffusionTrainerExtension,
+    FizgigImageSliderExtension,
+    FizgigPromptSliderExtension,
+    QwenFlowDPOExtension,
 ]

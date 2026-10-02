@@ -25,6 +25,7 @@ from toolkit.config_modules import ControlTypes
 from toolkit.control_generator import ControlGenerator
 from toolkit.dto import DTO, DISK_PREFIX
 from toolkit.metadata import get_meta_for_safetensors
+from toolkit.image_resampling import MITCHELL_RESIZE_VERSION, resize_mitchell
 from toolkit.models.pixtral_vision import PixtralVisionImagePreprocessorCompatible
 from toolkit.prompt_utils import inject_trigger_into_prompt
 from torchvision import transforms
@@ -71,6 +72,32 @@ transforms_dict = {
 
 img_ext_list = ['.jpg', '.jpeg', '.png', '.webp']
 video_ext_list = ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv']
+
+
+def _text_embedding_file_identity(path):
+    """Return cheap file metadata suitable for a text-embedding cache key."""
+    normalized_path = os.fsdecode(os.fspath(path))
+    try:
+        stat = os.stat(normalized_path)
+    except OSError:
+        # Preserve the path in the key. If the file appears later, its size and
+        # mtime will produce a different identity instead of reusing this one.
+        return {
+            "path": normalized_path,
+            "size": None,
+            "mtime_ns": None,
+        }
+    return {
+        "path": normalized_path,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _text_embedding_file_identities(paths):
+    if isinstance(paths, (str, bytes, os.PathLike)):
+        return _text_embedding_file_identity(paths)
+    return [_text_embedding_file_identity(path) for path in paths]
 
 
 def standardize_images(images):
@@ -637,7 +664,7 @@ class ImageProcessingDTOMixin:
                     img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
                 # Apply bucketing
-                img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
+                img = resize_mitchell(img, (self.scale_to_width, self.scale_to_height))
                 img = img.crop((
                     self.crop_x,
                     self.crop_y,
@@ -951,7 +978,7 @@ class ImageProcessingDTOMixin:
 
         if self.dataset_config.buckets:
             # scale and crop based on file item
-            img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
+            img = resize_mitchell(img, (self.scale_to_width, self.scale_to_height))
             # crop to x_crop, y_crop, x_crop + crop_width, y_crop + crop_height
             if img.width < self.crop_x + self.crop_width or img.height < self.crop_y + self.crop_height:
                 # todo look into this. This still happens sometimes
@@ -1065,7 +1092,7 @@ class InpaintControlFileItemDTOMixin:
 
             if self.dataset_config.buckets:
                 # scale and crop based on file item
-                img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
+                img = resize_mitchell(img, (self.scale_to_width, self.scale_to_height))
                 # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
                 # crop
                 img = img.crop((
@@ -1212,7 +1239,7 @@ class ControlFileItemDTOMixin:
 
                 if self.dataset_config.buckets:
                     # scale and crop based on file item
-                    img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
+                    img = resize_mitchell(img, (self.scale_to_width, self.scale_to_height))
                     # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
                     # crop
                     img = img.crop((
@@ -1660,7 +1687,7 @@ class MaskFileItemDTOMixin:
 
         if self.dataset_config.buckets:
             # scale and crop based on file item
-            img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
+            img = resize_mitchell(img, (self.scale_to_width, self.scale_to_height))
             # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
             # crop
             img = img.crop((
@@ -1735,7 +1762,7 @@ class UnconditionalFileItemDTOMixin:
 
         if self.dataset_config.buckets:
             # scale and crop based on file item
-            img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
+            img = resize_mitchell(img, (self.scale_to_width, self.scale_to_height))
             # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
             # crop
             img = img.crop((
@@ -1825,6 +1852,9 @@ class LatentCachingFileItemDTOMixin:
             ("latent_space_version", self.latent_space_version),
             ("latent_version", self.latent_version),
         ])
+        if (getattr(self.dataset_config, 'fizgig_slider_pair', False)
+                or getattr(self.dataset_config, 'flow_dpo_pair', False)):
+            item["source_file_identity_v1"] = _text_embedding_file_identity(self.path)
         is_video = False
         # when adding items, do it after so we dont change old latents
         if self.flip_x:
@@ -1859,6 +1889,9 @@ class LatentCachingFileItemDTOMixin:
         if self.dataset_config.cache_tensors_to_disk:
             # tensor is stored in the cache file, invalidate caches made without it
             item["cache_tensors_to_disk"] = True
+        if self.dataset_config.buckets and not self.is_audio_model:
+            # A resampler change changes both cached pixels and their VAE latents.
+            item["bucket_resize_filter"] = MITCHELL_RESIZE_VERSION
         return item
 
     def get_latent_path(self: 'FileItemDTO', recalculate=False):
@@ -2220,6 +2253,7 @@ class TextEmbeddingFileItemDTOMixin:
         if dopsd_self_ref:
             # teacher embeds carry the item's own media as the vision reference
             item["dopsd_self_ref"] = True
+            item["self_ref_file_identity_v1"] = _text_embedding_file_identity(self.path)
             return item
         # dropout embeds are encoded as plain text, keep control conditioning
         # out of their cache key
@@ -2228,8 +2262,27 @@ class TextEmbeddingFileItemDTOMixin:
         # if we have a control image, cache the path
         if self.encode_control_in_text_embeddings and self.control_path is not None:
             item["control_path"] = self.control_path
+            item["control_file_identity_v1"] = _text_embedding_file_identities(self.control_path)
+            if getattr(self, "cache_processed_control_text_embeddings", False):
+                # The joint text/image sequence depends on the presented
+                # reference dimensions, not just its source path.  Include the
+                # bucket transform so resolution/crop changes cannot reuse a
+                # structurally incompatible embedding.
+                item["processed_control_presentation_v1"] = {
+                    "resize_filter": MITCHELL_RESIZE_VERSION,
+                    "scale_to_width": self.scale_to_width,
+                    "scale_to_height": self.scale_to_height,
+                    "crop_x": self.crop_x,
+                    "crop_y": self.crop_y,
+                    "crop_width": self.crop_width,
+                    "crop_height": self.crop_height,
+                    "flip_x": self.flip_x,
+                    "flip_y": self.flip_y,
+                }
         if self.encode_control_in_text_embeddings and getattr(self, 'control_video_paths', None):
-            item["control_videos"] = sorted(self.control_video_paths)
+            control_video_paths = sorted(self.control_video_paths)
+            item["control_videos"] = control_video_paths
+            item["control_video_file_identity_v1"] = _text_embedding_file_identities(control_video_paths)
             # v2: reference-video vision blocks are no longer resampled by the
             # processor (do_sample_frames=False); older video-ref embeds are
             # misaligned with their presentation. Only items WITH control
@@ -2242,10 +2295,11 @@ class TextEmbeddingFileItemDTOMixin:
             and self.is_video
         ):
             item["first_frame_in_te"] = True
+            item["first_frame_file_identity_v1"] = _text_embedding_file_identity(self.path)
         return item
 
     def _build_text_embedding_path(self: 'FileItemDTO', caption_override=None, text_only=False, dopsd_self_ref=False):
-        # we store text embeddings in a folder in same path as image called _text_embedding_cache
+        # Store text embeddings in a cache folder beside the source media.
         img_dir = os.path.dirname(self.path)
         te_dir = os.path.join(img_dir, '_t_e_cache')
         hash_dict = self.get_text_embedding_info_dict(caption_override=caption_override, text_only=text_only, dopsd_self_ref=dopsd_self_ref)
@@ -2300,11 +2354,13 @@ class TextEmbeddingFileItemDTOMixin:
         if self._dop_blank_text_embedding_path is not None and not recalculate:
             return self._dop_blank_text_embedding_path
         else:
-            # if the DOP dropout caption matches the dropout caption, this hashes to
-            # the same path as the blank embedding and the cache file is shared.
-            # text_only: dropout embeds carry no control conditioning
+            # Models with joint text/reference sequences must keep the item's
+            # reference conditioning even when only the caption is dropped.
             self._dop_blank_text_embedding_path = self._build_text_embedding_path(
-                caption_override=self.get_dop_dropout_caption(), text_only=True
+                caption_override=self.get_dop_dropout_caption(),
+                text_only=not getattr(
+                    self, "caption_dropout_keeps_control_images", False
+                ),
             )
 
         return self._dop_blank_text_embedding_path
@@ -2342,12 +2398,13 @@ class TextEmbeddingFileItemDTOMixin:
         if self._blank_text_embedding_path is not None and not recalculate:
             return self._blank_text_embedding_path
         else:
-            # if the dropout caption matches the normal caption (and the item has no
-            # control conditioning), this hashes to the same path as the normal
-            # embedding and the cache file is shared.
-            # text_only: dropout embeds carry no control conditioning
+            # Models with joint text/reference sequences must keep the item's
+            # reference conditioning even when only the caption is dropped.
             self._blank_text_embedding_path = self._build_text_embedding_path(
-                caption_override=self.get_dropout_caption(), text_only=True
+                caption_override=self.get_dropout_caption(),
+                text_only=not getattr(
+                    self, "caption_dropout_keeps_control_images", False
+                ),
             )
 
         return self._blank_text_embedding_path
@@ -2423,7 +2480,8 @@ class TextEmbeddingCachingMixin:
                     if dop_path != text_embedding_path:
                         # trigger word was in the caption, cache the DOP version too
                         encode_targets.append((dop_path, file_item.caption_dop))
-                # dropout embeds are encoded as plain text (no control images)
+                # Most models encode dropout embeds as plain text.  Joint
+                # text/reference models opt into retaining the same controls.
                 dropout_target_paths = set()
                 if self.dataset_config.caption_dropout_rate > 0:
                     blank_path = file_item.get_blank_text_embedding_path(recalculate=True)
@@ -2450,25 +2508,59 @@ class TextEmbeddingCachingMixin:
                         file_item.control_path is not None or len(control_video_paths) > 0
                     ):
                         ctrl_img_list = []
-                        control_path_list = file_item.control_path
-                        if control_path_list is None:
-                            control_path_list = []
-                        elif not isinstance(control_path_list, list):
-                            control_path_list = [control_path_list]
-                        for i in range(len(control_path_list)):
-                            try:
-                                img = Image.open(control_path_list[i]).convert("RGB")
-                                img = exif_transpose(img)
-                                # convert to 0 to 1 tensor
-                                img = (
-                                    TF.to_tensor(img)
-                                    .unsqueeze(0)
-                                    .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
+                        processed_controls_loaded = False
+                        if (
+                            getattr(
+                                file_item,
+                                "cache_processed_control_text_embeddings",
+                                False,
+                            )
+                            and file_item.control_path is not None
+                        ):
+                            # Use the identical resize/crop/flip presentation
+                            # used by DataLoaderBatchDTO.  Reopening the source
+                            # image here can produce a different Qwen vision
+                            # token count than the live control tensor.
+                            file_item.load_control_image()
+                            processed_controls_loaded = True
+                            control_tensors = file_item.control_tensor_list
+                            if control_tensors is None:
+                                control_tensor = file_item.control_tensor
+                                if control_tensor is None:
+                                    control_tensors = []
+                                elif control_tensor.dim() == 4:
+                                    control_tensors = list(control_tensor)
+                                else:
+                                    control_tensors = [control_tensor]
+                            for tensor in control_tensors:
+                                if tensor.dim() == 3:
+                                    tensor = tensor.unsqueeze(0)
+                                ctrl_img_list.append(
+                                    tensor.to(
+                                        self.sd.device_torch,
+                                        dtype=self.sd.torch_dtype,
+                                    )
                                 )
-                                ctrl_img_list.append(img)
-                            except Exception as e:
-                                print_acc(f"Error: {e}")
-                                print_acc(f"Error loading control image: {control_path_list[i]}")
+                        else:
+                            control_path_list = file_item.control_path
+                            if control_path_list is None:
+                                control_path_list = []
+                            elif not isinstance(control_path_list, list):
+                                control_path_list = [control_path_list]
+                            for i in range(len(control_path_list)):
+                                try:
+                                    img = Image.open(control_path_list[i]).convert("RGB")
+                                    img = exif_transpose(img)
+                                    # convert to 0 to 1 tensor
+                                    img = (
+                                        TF.to_tensor(img)
+                                        .unsqueeze(0)
+                                        .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
+                                    )
+                                    ctrl_img_list.append(img)
+                                except Exception as e:
+                                    print_acc(f"Error: {e}")
+                                    print_acc(f"Error loading control image: {control_path_list[i]}")
                         # control VIDEOS ride into the presentation by path (models
                         # with supports_video_control_images turn them into
                         # timestamped vision blocks); images first, then videos.
@@ -2484,18 +2576,33 @@ class TextEmbeddingCachingMixin:
                             ctrl_img = ctrl_img_list[0]
                         else:
                             ctrl_img = ctrl_img_list
-                        for path, caption in encode_targets:
-                            if path in dropout_target_paths:
-                                # dropout embeds are plain text. Only fall back to the
-                                # control images if the model cannot encode without them
-                                try:
-                                    prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption)
-                                except Exception:
-                                    prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption, control_images=ctrl_img)
-                            else:
-                                prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption, control_images=ctrl_img)
-                            prompt_embeds.save(path)
-                            del prompt_embeds
+                        try:
+                            for path, caption in encode_targets:
+                                if (
+                                    path in dropout_target_paths
+                                    and not getattr(
+                                        file_item,
+                                        "caption_dropout_keeps_control_images",
+                                        False,
+                                    )
+                                ):
+                                    # Plain-text dropout remains the default for
+                                    # models whose control slots are optional.
+                                    try:
+                                        prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption)
+                                    except Exception:
+                                        prompt_embeds = self.sd.encode_prompt(
+                                            caption, control_images=ctrl_img
+                                        )
+                                else:
+                                    prompt_embeds = self.sd.encode_prompt(
+                                        caption, control_images=ctrl_img
+                                    )
+                                prompt_embeds.save(path)
+                                del prompt_embeds
+                        finally:
+                            if processed_controls_loaded:
+                                file_item.cleanup_control()
                     elif (
                         getattr(self.sd, 'encode_first_frame_in_text_embeddings', False)
                         and self.dataset_config.do_i2v

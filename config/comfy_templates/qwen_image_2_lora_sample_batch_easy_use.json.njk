@@ -13,6 +13,27 @@
     "_meta": {"title": "Seed {{ loop.index }}"}
   },
   {% endfor %}
+  {% for control_image in control_images %}
+  "{{ 1400 + loop.index0 }}": {
+    "inputs": {"image": {{ control_image | json }}},
+    "class_type": "LoadImage",
+    "_meta": {"title": "Load Primary Reference Image {{ loop.index }}"}
+  },
+  {% endfor %}
+  {% for control_image in control_images_2 %}
+  "{{ 1600 + loop.index0 }}": {
+    "inputs": {"image": {{ control_image | json }}},
+    "class_type": "LoadImage",
+    "_meta": {"title": "Load Second Reference Image {{ loop.index }}"}
+  },
+  {% endfor %}
+  {% for control_image in control_images_3 %}
+  "{{ 1800 + loop.index0 }}": {
+    "inputs": {"image": {{ control_image | json }}},
+    "class_type": "LoadImage",
+    "_meta": {"title": "Load Third Reference Image {{ loop.index }}"}
+  },
+  {% endfor %}
   {% for prompt in prompts %}
   {% if loop.index0 > 0 %}
   "{{ 1200 + loop.index0 - 1 }}": {
@@ -34,6 +55,42 @@
     },
     "class_type": "easy batchAnything",
     "_meta": {"title": "Seed List {{ loop.index }}"}
+  },
+  {% endif %}
+  {% endfor %}
+  {% for control_image in control_images %}
+  {% if loop.index0 > 0 %}
+  "{{ 1500 + loop.index0 - 1 }}": {
+    "inputs": {
+      "any_1": [{% if loop.index0 == 1 %}"1400"{% else %}"{{ 1500 + loop.index0 - 2 }}"{% endif %}, 0],
+      "any_2": ["{{ 1400 + loop.index0 }}", 0]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {"title": "Primary Reference Image List {{ loop.index }}"}
+  },
+  {% endif %}
+  {% endfor %}
+  {% for control_image in control_images_2 %}
+  {% if loop.index0 > 0 %}
+  "{{ 1700 + loop.index0 - 1 }}": {
+    "inputs": {
+      "any_1": [{% if loop.index0 == 1 %}"1600"{% else %}"{{ 1700 + loop.index0 - 2 }}"{% endif %}, 0],
+      "any_2": ["{{ 1600 + loop.index0 }}", 0]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {"title": "Second Reference Image List {{ loop.index }}"}
+  },
+  {% endif %}
+  {% endfor %}
+  {% for control_image in control_images_3 %}
+  {% if loop.index0 > 0 %}
+  "{{ 1900 + loop.index0 - 1 }}": {
+    "inputs": {
+      "any_1": [{% if loop.index0 == 1 %}"1800"{% else %}"{{ 1900 + loop.index0 - 2 }}"{% endif %}, 0],
+      "any_2": ["{{ 1800 + loop.index0 }}", 0]
+    },
+    "class_type": "easy batchAnything",
+    "_meta": {"title": "Third Reference Image List {{ loop.index }}"}
   },
   {% endif %}
   {% endfor %}
@@ -116,13 +173,18 @@
   {% if inference_lora_enabled %}
   "37": {
     "inputs": {
+      {% if inference_lora_absolute_path %}
+      "absolute_path": {{ inference_lora_absolute_path | json }},
+      "lora_strength": {{ inference_lora_strength }},
+      {% else %}
       "lora_name": {{ inference_lora | json }},
       "strength_model": {{ inference_lora_strength }},
       "strength_clip": {{ inference_lora_strength }},
+      {% endif %}
       "model": ["36", 0],
       "clip": ["36", 1]
     },
-    "class_type": "LoraLoader",
+    "class_type": {% if inference_lora_absolute_path %}"load_lora_from_absolute_path"{% else %}"LoraLoader"{% endif %},
     "_meta": {"title": "Load Inference LoRA"}
   },
   {% endif %}
@@ -148,8 +210,12 @@
     "inputs": {
       "clip": [{% if inference_lora_enabled %}"37"{% else %}"36"{% endif %}, 1],
       "prompt": ["70", 0],
-      "negative_prompt": "",
-      "resolution": 1024
+      "negative_prompt": {{ negative_prompt | json }},
+      "resolution": 1024{% if control_images | length > 0 %},
+      "vae": ["6", 0],
+      "images.image_1": ["80", 0]{% if control_images_2 | length > 0 %},
+      "images.image_2": ["86", 0]{% endif %}{% if control_images_3 | length > 0 %},
+      "images.image_3": ["88", 0]{% endif %}{% endif %}
     },
     "class_type": "TextEncodeQwenImage21",
     "_meta": {"title": "Text Encode Qwen Image 2.1"}
@@ -166,5 +232,29 @@
     "inputs": {"any_1": ["41", 2], "any_2": ["3", 0]},
     "class_type": "easy batchAnything",
     "_meta": {"title": "Append Image to Batch"}
-  }
+  }{% if control_images | length > 0 %},
+  "80": {
+    "inputs": {
+      "any": ["{{ 1500 + sample_count - 2 }}", 0],
+      "index": ["41", 1]
+    },
+    "class_type": "easy indexAnything",
+    "_meta": {"title": "Primary Reference Image by Loop Index"}
+  }{% if control_images_2 | length > 0 %},
+  "86": {
+    "inputs": {
+      "any": ["{{ 1700 + sample_count - 2 }}", 0],
+      "index": ["41", 1]
+    },
+    "class_type": "easy indexAnything",
+    "_meta": {"title": "Second Reference Image by Loop Index"}
+  }{% endif %}{% if control_images_3 | length > 0 %},
+  "88": {
+    "inputs": {
+      "any": ["{{ 1900 + sample_count - 2 }}", 0],
+      "index": ["41", 1]
+    },
+    "class_type": "easy indexAnything",
+    "_meta": {"title": "Third Reference Image by Loop Index"}
+  }{% endif %}{% endif %}
 }

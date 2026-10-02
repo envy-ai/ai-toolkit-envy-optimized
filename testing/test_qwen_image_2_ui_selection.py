@@ -28,6 +28,8 @@ class QwenImage2UiSelectionTests(unittest.TestCase):
         self.assertIn('"config.process[0].model.name_or_path"', arch)
         self.assertIn('"config.process[0].sample.comfy.workflow_path"', arch)
         self.assertIn('"config/comfy_templates/qwen_image_2_lora_sample.json.njk"', arch)
+        self.assertIn('"model.assistant_lora_path"', arch)
+        self.assertIn('"model.text_encoder_path"', arch)
 
     def test_qwen_image_2_workflow_is_selectable(self):
         source = (REPO_ROOT / "ui/src/app/jobs/new/SimpleJob.tsx").read_text()

@@ -116,6 +116,10 @@ export interface SaveConfig {
   dtype: string;
   save_every: number;
   max_step_saves_to_keep: number;
+  record_low_window_size?: number;
+  record_low_start_step?: number;
+  sample_on_record_low?: boolean;
+  max_record_low_saves_to_keep?: number;
   save_format: string;
   push_to_hub: boolean;
 }
@@ -175,6 +179,8 @@ export interface TrainConfig {
   gradient_accumulation: number;
   train_unet: boolean;
   train_text_encoder: boolean;
+  do_cfg?: boolean;
+  do_random_cfg?: boolean;
   gradient_checkpointing: boolean;
   noise_scheduler: string;
   timestep_type: string;
@@ -200,6 +206,14 @@ export interface TrainConfig {
   blank_prompt_preservation_multiplier?: number;
   switch_boundary_every: number;
   loss_type: 'mse' | 'mae' | 'wavelet' | 'stepped';
+  frequency_loss_type?: 'none' | 'low_pass' | 'high_pass' | 'band_pass' | 'notch';
+  frequency_loss_weight?: number;
+  frequency_loss_cutoff?: number;
+  frequency_loss_min_period?: number;
+  frequency_loss_max_period?: number;
+  frequency_loss_transition?: number;
+  frequency_loss_patch_size?: number;
+  frequency_loss_activation_offload?: boolean;
   min_snr_gamma?: number;
   max_denoising_steps?: number;
   do_differential_guidance?: boolean;
@@ -230,6 +244,7 @@ export interface ModelConfig {
   layer_offloading_transformer_percent?: number;
   layer_offloading_text_encoder_percent?: number;
   assistant_lora_path?: string;
+  text_encoder_path?: string;
   inference_lora_path?: string;
   unconditional_lora_path?: string;
   compile?: boolean;
@@ -262,6 +277,7 @@ export interface SampleItem {
 export interface ComfySampleConfig {
   enabled: boolean;
   api_url: string;
+  negative_prompt: string;
   workflow_path: string;
   model: string;
   vae: string;
@@ -325,6 +341,48 @@ export interface SliderConfig {
   batch_full_slide?: boolean;
 }
 
+export interface FizgigPromptTriplet {
+  neutral_prompt: string;
+  positive_prompt: string;
+  negative_prompt: string;
+  cfg_negative_prompt?: string;
+  cfg_negative_prompt_positive?: string;
+  cfg_negative_prompt_negative?: string;
+}
+
+export type FizgigPromptEntry =
+  | { kind: 'simple'; prompt: string }
+  | ({ kind: 'specific' } & FizgigPromptTriplet);
+
+export interface FizgigSliderConfig {
+  diff_weight?: number;
+  positive_prefix?: string;
+  negative_prefix?: string;
+  cfg_scale?: number;
+  cfg_negative_prefix?: string;
+  cfg_negative_prefix_positive?: string;
+  cfg_negative_prefix_negative?: string;
+  cfg_negative_prompt?: string;
+  cfg_negative_prompt_positive?: string;
+  cfg_negative_prompt_negative?: string;
+  prompt_entries?: FizgigPromptEntry[];
+  // Backward compatibility with earlier prompt-slider jobs.
+  prompt_triplets?: FizgigPromptTriplet[];
+  // Existing single-triplet jobs use these fields until edited in the form.
+  neutral_prompt?: string;
+  positive_prompt?: string;
+  negative_prompt?: string;
+  guidance?: number;
+  bank_size?: number;
+  bank_resolution?: number;
+  bank_steps?: number;
+}
+
+export interface FlowDPOConfig {
+  beta: number;
+  sft_weight: number;
+}
+
 export interface ProcessConfig {
   type: string;
   sqlite_db_path?: string;
@@ -334,6 +392,8 @@ export interface ProcessConfig {
   device: string;
   network?: NetworkConfig;
   slider?: SliderConfig;
+  fizgig_slider?: FizgigSliderConfig;
+  flow_dpo?: FlowDPOConfig;
   save: SaveConfig;
   datasets: DatasetConfig[];
   train: TrainConfig;

@@ -544,6 +544,8 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
         "Comfy-Org/Qwen-Image-2.1",
         defaultNameOrPath,
       ],
+      "config.process[0].model.assistant_lora_path": [undefined, undefined],
+      "config.process[0].model.text_encoder_path": [undefined, undefined],
       "config.process[0].model.quantize": [true, false],
       "config.process[0].model.quantize_te": [true, false],
       "config.process[0].model.low_vram": [true, false],
@@ -568,6 +570,8 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
     additionalSections: [
       "datasets.multi_control_paths",
       "sample.multi_ctrl_imgs",
+      "model.assistant_lora_path",
+      "model.text_encoder_path",
       "model.low_vram",
       "model.layer_offloading",
     ],

@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
-import { Eye, Trash2, Pen, Play, Pause, Cog, X, Copy, Save, OctagonX, Image } from 'lucide-react';
+import { Eye, Trash2, Pen, Play, Pause, Cog, X, Copy, Database, Save, OctagonX, Image } from 'lucide-react';
 import { LuLoader } from 'react-icons/lu';
 import { Button } from '@headlessui/react';
 import { openConfirm } from '@/components/ConfirmModal';
@@ -231,6 +231,17 @@ export default function JobActionBar({
               >
                 <Copy className="w-4 h-4" />
                 Clone Job
+              </Link>
+            </MenuItem>
+          )}
+          {job.job_type === 'train' && (
+            <MenuItem>
+              <Link
+                href={`/jobs/new?cloneId=${job.id}&withEmbeddings=1`}
+                className="cursor-pointer px-4 py-1 hover:bg-gray-800 rounded flex items-center gap-2"
+              >
+                <Database className="w-4 h-4" />
+                Clone Job w/ Embeddings
               </Link>
             </MenuItem>
           )}

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Noise Pair Synthesizer</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">AI Toolkit · Dataset Lab</p>
+        <h1>Noise Pair Synthesizer</h1>
+        <p class="subtitle">Build a controlled noisy training target from a clean source.</p>
+      </div>
+      <div class="actions">
+        <label class="button primary" for="fileInput">Load image</label>
+        <input id="fileInput" type="file" accept="image/*" hidden>
+        <button class="button" id="demoButton" type="button">Demo image</button>
+        <button class="button" id="importSettingsButton" type="button">Import settings</button>
+        <input id="settingsInput" type="file" accept="application/json,.json" hidden>
+        <button class="button" id="exportSettingsButton" type="button">Export settings</button>
+        <button class="button" id="downloadInputButton" type="button">Download input</button>
+        <button class="button accent" id="downloadButton" type="button">Download PNG</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="controls" aria-label="Synthesis controls">
+        <section class="control-section">
+          <div class="section-heading">
+            <span class="step">01</span>
+            <div><h2>Contrast copy</h2><p>The image blended over the clean source.</p></div>
+          </div>
+          <label class="checkbox-row">
+            <input id="resizeToMegapixel" type="checkbox">
+            <span>
+              <strong>Resize input to 1 MP</strong>
+              <small>Preserve aspect ratio at approximately 1,048,576 pixels.</small>
+            </span>
+          </label>
+          <label class="slider-row">
+            <span>Contrast</span><output for="copyContrast"></output>
+            <input id="copyContrast" type="range" min="0" max="3" step="0.01" value="1.34">
+          </label>
+          <label class="slider-row">
+            <span>Brightness</span><output for="copyBrightness"></output>
+            <input id="copyBrightness" type="range" min="-1" max="1" step="0.01" value="-0.22">
+          </label>
+          <label class="slider-row">
+            <span>Effect strength</span><output for="effectStrength"></output>
+            <input id="effectStrength" type="range" min="0" max="2" step="0.01" value="1.01">
+          </label>
+        </section>
+
+        <section class="control-section tone-large">
+          <div class="section-heading">
+            <span class="step">02</span>
+            <div><h2>Large Perlin</h2><p>Used in dark areas of the edge mask.</p></div>
+          </div>
+          <label class="slider-row">
+            <span>Period</span><output for="largePeriod"></output>
+            <input id="largePeriod" data-noise-control type="range" min="2" max="128" step="1" value="20">
+          </label>
+          <label class="slider-row">
+            <span>Mask contrast</span><output for="largeContrast"></output>
+            <input id="largeContrast" type="range" min="0" max="5" step="0.01" value="0.13">
+          </label>
+          <label class="slider-row">
+            <span>Mask brightness</span><output for="largeBrightness"></output>
+            <input id="largeBrightness" type="range" min="-1" max="1" step="0.01" value="-0.14">
+          </label>
+          <label class="slider-row">
+            <span>Color variation</span><output for="largeColorVariation"></output>
+            <input id="largeColorVariation" type="range" min="0" max="1" step="0.01" value="0">
+          </label>
+        </section>
+
+        <section class="control-section tone-small">
+          <div class="section-heading">
+            <span class="step">03</span>
+            <div><h2>Small Perlin</h2><p>Used on bright detected edges.</p></div>
+          </div>
+          <label class="slider-row">
+            <span>Period</span><output for="smallPeriod"></output>
+            <input id="smallPeriod" data-noise-control type="range" min="1" max="64" step="1" value="6">
+          </label>
+          <label class="slider-row">
+            <span>Mask contrast</span><output for="smallContrast"></output>
+            <input id="smallContrast" type="range" min="0" max="5" step="0.01" value="3.08">
+          </label>
+          <label class="slider-row">
+            <span>Mask brightness</span><output for="smallBrightness"></output>
+            <input id="smallBrightness" type="range" min="-1" max="1" step="0.01" value="-0.01">
+          </label>
+          <label class="slider-row">
+            <span>Color variation</span><output for="smallColorVariation"></output>
+            <input id="smallColorVariation" type="range" min="0" max="1" step="0.01" value="0">
+          </label>
+        </section>
+
+        <section class="control-section tone-edge">
+          <div class="section-heading">
+            <span class="step">04</span>
+            <div><h2>Edge selector</h2><p>Dark chooses large noise; light chooses small.</p></div>
+          </div>
+          <label class="slider-row">
+            <span>Gaussian blur</span><output for="edgeBlur"></output>
+            <input id="edgeBlur" type="range" min="0" max="32" step="0.25" value="4">
+          </label>
+          <label class="slider-row">
+            <span>Mask contrast</span><output for="edgeContrast"></output>
+            <input id="edgeContrast" type="range" min="0" max="8" step="0.01" value="3.23">
+          </label>
+          <label class="slider-row">
+            <span>Mask brightness</span><output for="edgeBrightness"></output>
+            <input id="edgeBrightness" type="range" min="-1" max="1" step="0.01" value="1">
+          </label>
+          <div class="seed-row">
+            <label for="seed">Seed</label>
+            <input id="seed" data-noise-control type="number" min="0" max="4294967295" step="1" value="1337">
+            <button id="randomizeButton" class="icon-button" type="button" title="Randomize seed" aria-label="Randomize seed">↻</button>
+          </div>
+        </section>
+      </aside>
+
+      <section class="preview-column" id="dropZone">
+        <div class="preview-header">
+          <div>
+            <p class="eyebrow">Live output</p>
+            <h2 id="imageName">Demo source</h2>
+          </div>
+          <div class="status-group">
+            <span id="dimensions">—</span>
+            <span class="status" id="status">Ready</span>
+          </div>
+        </div>
+        <div class="output-frame">
+          <canvas id="outputCanvas" aria-label="Synthesized output preview"></canvas>
+          <div class="drop-message">Drop an image anywhere here</div>
+        </div>
+
+        <div class="diagnostics">
+          <figure><canvas id="sourceCanvas"></canvas><figcaption>Pipeline input</figcaption></figure>
+          <figure><canvas id="largeCanvas"></canvas><figcaption>Large Perlin</figcaption></figure>
+          <figure><canvas id="smallCanvas"></canvas><figcaption>Small Perlin</figcaption></figure>
+          <figure><canvas id="edgeCanvas"></canvas><figcaption>Adjusted edge mask</figcaption></figure>
+          <figure><canvas id="mixedCanvas"></canvas><figcaption>Final blend mask</figcaption></figure>
+        </div>
+        <p class="formula">output = clean ↔ contrast copy, mixed per RGB channel by (large Perlin ↔ small Perlin, selected by edges)</p>
+      </section>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

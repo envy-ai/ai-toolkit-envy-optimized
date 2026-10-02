@@ -18,6 +18,7 @@ import albumentations as A
 
 from toolkit import image_utils
 from toolkit.buckets import get_bucket_for_image_size, BucketResolution
+from toolkit.image_resampling import resize_mitchell
 from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
 from toolkit.dataloader_mixins import CaptionMixin, BucketsMixin, LatentCachingMixin, Augments, CLIPCachingMixin, ControlCachingMixin, TextEmbeddingCachingMixin
 from toolkit.data_transfer_object.data_loader import FileItemDTO, DataLoaderBatchDTO
@@ -380,9 +381,9 @@ class PairedImageDataset(Dataset):
             img2_crop_width = bucket_resolution["width"]
 
             # scale then center crop images
-            img1 = img1.resize((img1_scale_to_width, img1_scale_to_height), Image.BICUBIC)
+            img1 = resize_mitchell(img1, (img1_scale_to_width, img1_scale_to_height))
             img1 = transforms.CenterCrop((img1_crop_height, img1_crop_width))(img1)
-            img2 = img2.resize((img2_scale_to_width, img2_scale_to_height), Image.BICUBIC)
+            img2 = resize_mitchell(img2, (img2_scale_to_width, img2_scale_to_height))
             img2 = transforms.CenterCrop((img2_crop_height, img2_crop_width))(img2)
 
             # combine them side by side
@@ -605,6 +606,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                     size_database=self.size_database,
                     dataset_root=dataset_folder,
                     encode_control_in_text_embeddings=self.sd.encode_control_in_text_embeddings if self.sd else False,
+                    caption_dropout_keeps_control_images=getattr(self.sd, 'caption_dropout_keeps_control_images', False) if self.sd else False,
+                    cache_processed_control_text_embeddings=getattr(self.sd, 'cache_processed_control_text_embeddings', False) if self.sd else False,
                     encode_first_frame_in_text_embeddings=getattr(self.sd, 'encode_first_frame_in_text_embeddings', False) if self.sd else False,
                     dopsd_self_ref=getattr(self.sd, 'dopsd_self_ref', False) if self.sd else False,
                     text_embedding_space_version=text_embedding_space_version,

@@ -339,6 +339,7 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
     {
       title: 'Name',
       key: 'name',
+      className: 'max-w-xs whitespace-normal break-all',
       render: row => {
         let title = row.name;
         let href = `/jobs/${row.id}`;
@@ -362,7 +363,7 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
           );
         }
         return (
-          <Link href={href} className="font-medium whitespace-nowrap">
+          <Link href={href} className="font-medium whitespace-normal break-all">
             {['running', 'stopping'].includes(row.status) ? (
               <CgSpinner className="inline animate-spin mr-2 text-blue-400" />
             ) : null}
@@ -414,7 +415,7 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
     {
       title: 'Info',
       key: 'info',
-      className: 'truncate max-w-xs',
+      className: 'max-w-xs whitespace-normal break-words [overflow-wrap:anywhere]',
     },
     {
       title: 'Actions',

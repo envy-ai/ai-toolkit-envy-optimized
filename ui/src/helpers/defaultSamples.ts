@@ -3,6 +3,7 @@ import { ComfySampleConfig, SampleConfig } from "@/types";
 export const defaultComfySampleConfig: ComfySampleConfig = {
   enabled: false,
   api_url: 'http://127.0.0.1:8188',
+  negative_prompt: '',
   workflow_path: 'config/comfy_templates/krea2_lora_sample.json.njk',
   model: '',
   vae: '',

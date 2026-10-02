@@ -3,6 +3,15 @@ import { ConfigDoc } from '@/types';
 import { IoFlaskSharp } from 'react-icons/io5';
 
 const docs: { [key: string]: ConfigDoc } = {
+  'config.process[0].save.sample_on_record_low': {
+    title: 'Sample on Record Low',
+    description: (
+      <>
+        Generate an extra sample when a record-low checkpoint is saved. Turning this off still allows samples
+        scheduled by Sample Every, baseline samples, and the final sample. This setting can be edited during training.
+      </>
+    ),
+  },
   'config.name': {
     title: 'Training Name',
     description: (
@@ -65,12 +74,41 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'config.process[0].model.assistant_lora_path': {
+    title: 'Training Adapter Path',
+    description: (
+      <>
+        Optional full path to a training adapter safetensors file. Its weights stay frozen while your separate LoRA
+        trains. The adapter is disabled for sample generation and is not included in your saved LoRA.
+      </>
+    ),
+  },
+  'config.process[0].model.text_encoder_path': {
+    title: 'Text Encoder Safetensors Path',
+    description: (
+      <>
+        Optional full path to a compatible Qwen3-VL-8B ComfyUI text encoder safetensors file, including files outside
+        the ComfyUI models folder. Leave empty to use the default encoder. The processor and model config still
+        come from the base model source.
+      </>
+    ),
+  },
   'config.process[0].network.pretrained_lora_path': {
     title: 'Pretrained LoRA Path',
     description: (
       <>
         Optional local path to an existing LoRA to use as the starting weights for training. This initializes the
         network weights without resuming the pretrained LoRA&apos;s training step metadata.
+      </>
+    ),
+  },
+  'config.process[0].network.linear_alpha': {
+    title: 'Linear Alpha',
+    description: (
+      <>
+        Controls the LoRA update scale as <code>alpha / rank</code>. The value is used during training and saved as
+        per-layer alpha in the output safetensors file so compatible loaders such as ComfyUI preserve the same scale.
+        Set alpha equal to rank for a scale of 1.
       </>
     ),
   },
@@ -193,6 +231,60 @@ const docs: { [key: string]: ConfigDoc } = {
         Caching text embeddings will process and cache all the text embeddings from the text encoder to the disk. The
         text encoder will be unloaded from the GPU. This does not work with things that dynamically change the prompt
         such as trigger words, caption dropout, etc.
+      </>
+    ),
+  },
+  'train.frequency_loss_type': {
+    title: 'Pixel Frequency Loss',
+    description: (
+      <>
+        Adds a decoded-pixel frequency loss without replacing the normal diffusion loss, so the job continues learning
+        content. Low pass trains periods longer than the cutoff, high pass trains shorter periods, band pass trains only
+        the selected period range, and notch trains everything outside the selected range. This requires a VAE decode
+        during every training step and therefore uses additional VRAM and compute.
+      </>
+    ),
+  },
+  'train.frequency_loss_weight': {
+    title: 'Frequency Loss Weight',
+    description: <>Scales the auxiliary frequency loss before it is added to the normal training loss.</>,
+  },
+  'train.frequency_loss_cutoff': {
+    title: 'Frequency Cutoff Period',
+    description: (
+      <>The output-image period in pixels used by the low-pass or high-pass filter. For example, 18 targets an 18-pixel wavelength.</>
+    ),
+  },
+  'train.frequency_loss_min_period': {
+    title: 'Shortest Frequency Period',
+    description: <>The shortest output-image period included in a band-pass or excluded by a notch filter.</>,
+  },
+  'train.frequency_loss_max_period': {
+    title: 'Longest Frequency Period',
+    description: <>The longest output-image period included in a band-pass or excluded by a notch filter.</>,
+  },
+  'train.frequency_loss_transition': {
+    title: 'Frequency Transition Width',
+    description: (
+      <>Softens filter boundaries across this many pixels of period. A soft transition reduces ringing; zero makes a hard boundary.</>
+    ),
+  },
+  'train.frequency_loss_patch_size': {
+    title: 'Frequency Loss Patch Size',
+    description: (
+      <>
+        Decodes a random crop of approximately this many output pixels for the auxiliary loss. Smaller patches reduce
+        VAE memory and step time; they should still span many cycles of the longest selected period. Use 0 to decode the
+        full image.
+      </>
+    ),
+  },
+  'train.frequency_loss_activation_offload': {
+    title: 'Offload Frequency Activations',
+    description: (
+      <>
+        Moves VAE tensors saved for backward to pinned system memory. This substantially reduces VRAM usage at the cost
+        of PCIe transfers and additional step time.
       </>
     ),
   },

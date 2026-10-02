@@ -99,7 +99,7 @@ class LoraAnalysisTests(unittest.TestCase):
                 {
                     "diffusion_model.blocks.0.mlp.fc1.lora_A.weight": torch.tensor([[1.0, 0.0]]),
                     "diffusion_model.blocks.0.mlp.fc1.lora_B.weight": torch.zeros((2, 1)),
-                    "diffusion_model.blocks.0.mlp.fc1.magnitude": torch.tensor([2.0, 1.0]),
+                    "diffusion_model.blocks.0.mlp.fc1.dora_scale": torch.tensor([2.0, 1.0]),
                 },
                 lora_path,
                 metadata={"ss_base_model": str(base_path)},

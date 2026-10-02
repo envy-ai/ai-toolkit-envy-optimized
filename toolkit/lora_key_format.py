@@ -20,7 +20,7 @@ def peft_key_to_internal_key(key: str, network_type: str = "lora") -> str:
     if network_type.lower() == "lokr":
         load_key = load_key.replace("$$lokr_w1", ".lokr_w1")
         load_key = load_key.replace("$$lokr_w2", ".lokr_w2")
-        if load_key.endswith("$$alpha"):
-            load_key = load_key[:-7] + ".alpha"
+    if load_key.endswith("$$alpha"):
+        load_key = load_key[:-7] + ".alpha"
 
     return load_key

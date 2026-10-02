@@ -29,6 +29,7 @@ export default function TrainingForm() {
   const runId = searchParams.get('id');
   const sampleOnlyMode = searchParams.get('sampleOnly') === '1';
   const cloneId = searchParams.get('cloneId');
+  const cloneWithEmbeddings = searchParams.get('withEmbeddings') === '1';
   const [gpuIDs, setGpuIDs] = useState<string | null>(null);
   const { settings, isSettingsLoaded } = useSettings();
   const { gpuList, isGPUInfoLoaded } = useGPUInfo();
@@ -115,11 +116,19 @@ export default function TrainingForm() {
           setGpuIDs(data.gpu_ids);
           const newJobConfig = migrateJobConfig(JSON.parse(data.job_config));
           newJobConfig.config.name = `${newJobConfig.config.name}_copy`;
+          if (cloneWithEmbeddings) {
+            // Text-embedding caches are stored beside the dataset, so enabling
+            // caching is enough for a clone using the same data and encoder to
+            // reuse the existing files. Unload TE is a separate, incompatible
+            // optimization mode in the form.
+            newJobConfig.config.process[0].train.cache_text_embeddings = true;
+            newJobConfig.config.process[0].train.unload_text_encoder = false;
+          }
           setJobConfig(newJobConfig);
         })
         .catch(error => console.error('Error fetching training:', error));
     }
-  }, [cloneId]);
+  }, [cloneId, cloneWithEmbeddings]);
 
   useEffect(() => {
     if (runId) {
@@ -246,7 +255,11 @@ export default function TrainingForm() {
                   nextConfig.config.process[0].type = value;
                   setJobConfig(nextConfig);
                 }}
-                options={jobTypeOptions}
+                options={jobTypeOptions.filter(option =>
+                  jobConfig.config.process[0].model.arch === 'qwen_image_2'
+                  || (!option.value.startsWith('fizgig_') && option.value !== 'qwen_flow_dpo')
+                  || option.value === jobConfig.config.process[0].type,
+                )}
               />
             </div>
             <div className="hidden sm:block mx-4 bg-gray-200 dark:bg-gray-800 w-1 h-6"></div>

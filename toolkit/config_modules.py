@@ -23,6 +23,16 @@ else:
 class SaveConfig:
     def __init__(self, **kwargs):
         self.save_every: int = kwargs.get('save_every', 1000)
+        self.record_low_window_size: int = kwargs.get('record_low_window_size', 3000)
+        self.record_low_start_step: int = kwargs.get('record_low_start_step', 50)
+        self.sample_on_record_low: bool = kwargs.get('sample_on_record_low', True)
+        self.max_record_low_saves_to_keep: int = kwargs.get('max_record_low_saves_to_keep', 5)
+        if self.record_low_window_size < 1:
+            raise ValueError('record_low_window_size must be at least 1')
+        if self.record_low_start_step < 0:
+            raise ValueError('record_low_start_step cannot be negative')
+        if self.max_record_low_saves_to_keep < 1:
+            raise ValueError('max_record_low_saves_to_keep must be at least 1')
         self.dtype: str = kwargs.get('dtype', 'float16')
         self.max_step_saves_to_keep: int = kwargs.get('max_step_saves_to_keep', 5)
         self.save_format: SaveFormat = kwargs.get('save_format', 'safetensors')
@@ -84,6 +94,7 @@ class ComfySampleConfig:
     def __init__(self, **kwargs):
         self.enabled: bool = kwargs.get('enabled', False)
         self.api_url: str = kwargs.get('api_url', 'http://127.0.0.1:8188')
+        self.negative_prompt: str = kwargs.get('negative_prompt', '')
         self.workflow_path: str = kwargs.get(
             'workflow_path', 'config/comfy_templates/krea2_lora_sample.json.njk'
         )
@@ -560,6 +571,22 @@ class TrainConfig:
         self.do_fft_loss = kwargs.get('do_fft_loss', False)
         self.do_fft_velocity_equiv_weight = kwargs.get('do_fft_velocity_equiv_weight', False)
 
+        # Optional decoded-pixel auxiliary loss. The normal diffusion loss is
+        # retained so frequency targeting does not replace content learning.
+        self.frequency_loss_type = kwargs.get('frequency_loss_type', 'none')
+        self.frequency_loss_weight = float(kwargs.get('frequency_loss_weight', 0.1))
+        self.frequency_loss_cutoff = float(kwargs.get('frequency_loss_cutoff', 18.0))
+        self.frequency_loss_min_period = float(kwargs.get('frequency_loss_min_period', 14.0))
+        self.frequency_loss_max_period = float(kwargs.get('frequency_loss_max_period', 28.0))
+        self.frequency_loss_transition = float(kwargs.get('frequency_loss_transition', 4.0))
+        self.frequency_loss_patch_size = int(kwargs.get('frequency_loss_patch_size', 384))
+        self.frequency_loss_activation_offload = bool(
+            kwargs.get('frequency_loss_activation_offload', True)
+        )
+        self.frequency_loss_enabled = (
+            self.frequency_loss_type != 'none' and self.frequency_loss_weight > 0
+        )
+
         # scale the prediction by this. Increase for more detail, decrease for less
         self.pred_scaler = kwargs.get('pred_scaler', 1.0)
 
@@ -682,6 +709,8 @@ class ModelConfig:
         self.lora_path = kwargs.get('lora_path', None)
         # mainly for decompression loras for distilled models
         self.assistant_lora_path = kwargs.get('assistant_lora_path', None)
+        # optional standalone ComfyUI text-encoder checkpoint for model loaders that support it
+        self.text_encoder_path = kwargs.get('text_encoder_path', None)
         self.inference_lora_path = kwargs.get('inference_lora_path', None)
         # a lora that stays inactive except during the unconditional (negative)
         # CFG pass -- used to learn the unconditional branch without a second model
@@ -1037,6 +1066,7 @@ class DatasetConfig:
                                          None)  # focus mask (black and white. White has higher loss than black)
         self.unconditional_path: str = kwargs.get('unconditional_path',
                                                   None)  # path where matching unconditional images are located
+        self.flow_dpo_pair: bool = kwargs.get('flow_dpo_pair', False)
         self.invert_mask: bool = kwargs.get('invert_mask', False)  # invert mask
         self.mask_min_value: float = kwargs.get('mask_min_value', 0.0)  # min value for . 0 - 1
         self.poi: Union[str, None] = kwargs.get('poi', None)
@@ -1048,6 +1078,9 @@ class DatasetConfig:
         self.cache_latents: bool = kwargs.get('cache_latents', False)
         # cache latents to disk will store them on disk. If both are true, it will save to disk, but keep in memory
         self.cache_latents_to_disk: bool = kwargs.get('cache_latents_to_disk', False)
+        # Qwen/Fizgig image sliders rely on a cached +1 pole; tie that cache
+        # to source modification time so a re-export never trains stale pairs.
+        self.fizgig_slider_pair: bool = kwargs.get('fizgig_slider_pair', False)
         # cache tensors to disk. Useful for saving video files tensors to the disk so we have the clean pixelspace versions of video and audio
         self.cache_tensors_to_disk: bool = kwargs.get('cache_tensors_to_disk', False)
 
@@ -1586,3 +1619,29 @@ def validate_configs(
 
     if train_config.diff_output_preservation and train_config.blank_prompt_preservation:
         raise ValueError("Cannot use both differential output preservation and blank prompt preservation at the same time. Please set one of them to False.")
+
+    valid_frequency_loss_types = {'none', 'low_pass', 'high_pass', 'band_pass', 'notch'}
+    if train_config.frequency_loss_type not in valid_frequency_loss_types:
+        raise ValueError(
+            f"Unknown frequency_loss_type {train_config.frequency_loss_type!r}; "
+            f"expected one of {sorted(valid_frequency_loss_types)}"
+        )
+    if train_config.frequency_loss_weight < 0:
+        raise ValueError("frequency_loss_weight must be zero or greater")
+    if train_config.frequency_loss_cutoff <= 0:
+        raise ValueError("frequency_loss_cutoff must be greater than zero")
+    if train_config.frequency_loss_min_period <= 0 or train_config.frequency_loss_max_period <= 0:
+        raise ValueError("frequency loss periods must be greater than zero")
+    if (
+        train_config.frequency_loss_type in {'band_pass', 'notch'}
+        and train_config.frequency_loss_min_period >= train_config.frequency_loss_max_period
+    ):
+        raise ValueError("frequency_loss_min_period must be less than frequency_loss_max_period")
+    if train_config.frequency_loss_transition < 0:
+        raise ValueError("frequency_loss_transition must be zero or greater")
+    if train_config.frequency_loss_patch_size < 0:
+        raise ValueError("frequency_loss_patch_size must be zero or greater")
+    if train_config.frequency_loss_enabled and train_config.train_turbo:
+        raise ValueError("Pixel frequency loss is not supported with train_turbo")
+    if train_config.frequency_loss_enabled and train_config.loss_target != 'noise':
+        raise ValueError("Pixel frequency loss currently requires loss_target: noise")

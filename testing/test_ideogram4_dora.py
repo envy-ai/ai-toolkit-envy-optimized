@@ -20,6 +20,7 @@ class FakeIdeogram4BaseModel:
     arch = "ideogram4"
     is_transformer = True
     use_old_lokr_format = False
+    lora_keys_use_comfy_prefix = True
 
     def get_transformer_block_names(self):
         return ["layers"]
@@ -73,7 +74,7 @@ class Ideogram4DoRATests(unittest.TestCase):
         self.assertTrue(all(isinstance(lora, DoRAModule) for lora in network.unet_loras))
         self.assertTrue(all("layers" in lora.lora_name for lora in network.unet_loras))
 
-    def test_ideogram4_dora_state_dict_saves_and_loads_magnitude_keys(self):
+    def test_ideogram4_dora_state_dict_saves_comfy_keys_and_loads_both_formats(self):
         transformer = make_tiny_ideogram4_transformer()
         base_model = FakeIdeogram4BaseModel()
         network = LoRASpecialNetwork(
@@ -94,10 +95,17 @@ class Ideogram4DoRATests(unittest.TestCase):
         save_dict = network.get_state_dict(dtype=torch.float32)
 
         self.assertIn(
-            "diffusion_model.layers.0.attention.qkv.magnitude",
+            "diffusion_model.layers.0.attention.qkv.dora_scale",
             save_dict,
         )
         extra = network.load_weights(save_dict)
+        self.assertIsNone(extra)
+
+        legacy_save_dict = {
+            key.replace(".dora_scale", ".magnitude"): value
+            for key, value in save_dict.items()
+        }
+        extra = network.load_weights(legacy_save_dict)
         self.assertIsNone(extra)
 
     def test_ideogram4_model_returns_transformer_for_training(self):

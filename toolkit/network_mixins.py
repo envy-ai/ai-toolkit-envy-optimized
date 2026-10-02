@@ -59,7 +59,57 @@ def print_once(msg):
 
 
 def _is_dora_magnitude_key(key: str) -> bool:
-    return key.endswith(".magnitude") or "lora_magnitude_vector" in key
+    return (
+        key.endswith(".magnitude")
+        or key.endswith(".dora_scale")
+        or "lora_magnitude_vector" in key
+    )
+
+
+def _dora_key_for_comfy(key: str) -> str:
+    """Return the DoRA magnitude key understood by ComfyUI's LoRA loader."""
+    magnitude_suffixes = (
+        ".lora_magnitude_vector.default.weight",
+        ".lora_magnitude_vector.weight",
+        ".lora_magnitude_vector",
+        ".magnitude",
+    )
+    for suffix in magnitude_suffixes:
+        if key.endswith(suffix):
+            return key[:-len(suffix)] + ".dora_scale"
+    return key
+
+
+def _dora_key_for_internal_load(key: str) -> str:
+    """Accept ComfyUI DoRA checkpoints while retaining our internal name."""
+    magnitude_suffixes = (
+        ".dora_scale",
+        ".lora_magnitude_vector.default.weight",
+        ".lora_magnitude_vector.weight",
+        ".lora_magnitude_vector",
+    )
+    for suffix in magnitude_suffixes:
+        if key.endswith(suffix):
+            return key[:-len(suffix)] + ".magnitude"
+    return key
+
+
+def _dora_value_for_comfy(key: str, value: torch.Tensor) -> torch.Tensor:
+    """Shape linear DoRA magnitudes for ComfyUI's row-wise broadcasting."""
+    if _is_dora_magnitude_key(key) and value.ndim == 1:
+        return value.unsqueeze(1)
+    return value
+
+
+def _dora_value_for_internal_load(key: str, value: torch.Tensor) -> torch.Tensor:
+    """Restore ComfyUI's column-shaped magnitude to our 1-D parameter."""
+    if (
+        _is_dora_magnitude_key(key)
+        and value.ndim > 1
+        and all(size == 1 for size in value.shape[1:])
+    ):
+        return value.reshape(value.shape[0])
+    return value
 
 
 def _without_dora_magnitude_layers(state_dict: OrderedDict) -> OrderedDict:
@@ -350,6 +400,33 @@ class ToolkitModuleMixin:
             num_interleaves = lora_output_batch_size // multiplier_batch_size
             # todo check if this is correct, do we just concat when doing cfg?
             multiplier = multiplier.repeat_interleave(num_interleaves)
+
+        if self.__class__.__name__ == "DoRAModule":
+            if getattr(network, "signed_dora_slider", False):
+                if not is_scalar_multiplier:
+                    raise ValueError("Signed DoRA sliders require a scalar network strength")
+                # Match ComfyUI's DoRA loader: first form the complete +1
+                # adapted weight, then apply strength to its delta from the
+                # base weight. Re-normalizing W +/- LoRA separately would
+                # train a different -1 endpoint than ComfyUI displays.
+                dora_scale = (self.magnitude / self._comfy_base_norm).to(
+                    org_forwarded.device, dtype=org_forwarded.dtype
+                )
+                scale_shape = [1] * (org_forwarded.ndim - 1) + [-1]
+                dora_scale = dora_scale.view(*scale_shape)
+                base_weight_output = org_forwarded
+                bias = self.get_orig_bias()
+                if bias is not None:
+                    base_weight_output = base_weight_output - bias.to(
+                        org_forwarded.device, dtype=org_forwarded.dtype
+                    )
+                full_delta_output = (
+                    base_weight_output * (dora_scale - 1)
+                    + lora_output.to(org_forwarded.dtype) * dora_scale
+                )
+                return org_forwarded + broadcast_and_multiply(
+                    full_delta_output, multiplier
+                ).to(org_forwarded.dtype)
 
         scaled_lora_output = broadcast_and_multiply(lora_output, multiplier)
         scaled_lora_output = scaled_lora_output.to(org_forwarded.dtype)
@@ -650,13 +727,11 @@ class ToolkitNetworkMixin:
         if self.peft_format:
             # lora_down = lora_A
             # lora_up = lora_B
-            # no alpha
+            # Keep per-layer alpha in standalone safetensors. Unlike a full
+            # PEFT adapter directory, this file has no adapter_config.json.
 
             new_save_dict = {}
             for key, value in save_dict.items():
-                # lokr needs alpha
-                if key.endswith('.alpha') and self.network_type.lower() != "lokr":
-                    continue
                 new_save_dict[internal_key_to_peft_key(key)] = value
 
             save_dict = new_save_dict
@@ -674,6 +749,18 @@ class ToolkitNetworkMixin:
         
         if self.base_model_ref is not None:
             save_dict = self.base_model_ref().convert_lora_weights_before_save(save_dict)
+
+        # ComfyUI's vanilla LoRA loaders look for ``<layer>.dora_scale``.
+        # Keep ``magnitude`` as the module parameter name internally, but write
+        # the interoperable suffix after all model-specific key conversion.
+        if self.network_type.lower() == "dora":
+            save_dict = OrderedDict(
+                (
+                    _dora_key_for_comfy(key),
+                    _dora_value_for_comfy(key, value),
+                )
+                for key, value in save_dict.items()
+            )
         return save_dict
 
     def save_weights(
@@ -737,7 +824,15 @@ class ToolkitNetworkMixin:
 
         load_sd = OrderedDict()
         for key, value in weights_sd.items():
-            load_key = keymap[key] if key in keymap else key
+            # New checkpoints use ComfyUI's public DoRA suffix.  Translate it
+            # before consulting legacy keymaps so both new and old files can
+            # still be resumed by ai-toolkit.
+            input_key = (
+                _dora_key_for_internal_load(key)
+                if self.network_type.lower() == "dora"
+                else key
+            )
+            load_key = keymap[input_key] if input_key in keymap else input_key
             # replace old double __ with single _
             if self.is_pixart:
                 load_key = load_key.replace('__', '_')
@@ -745,9 +840,6 @@ class ToolkitNetworkMixin:
             if self.peft_format:
                 # lora_down = lora_A
                 # lora_up = lora_B
-                # no alpha
-                if load_key.endswith('.alpha') and self.network_type.lower() != "lokr":
-                    continue
                 load_key = peft_key_to_internal_key(
                     load_key,
                     network_type=self.network_type,
@@ -757,10 +849,27 @@ class ToolkitNetworkMixin:
                 # lora_transformer_transformer_blocks_7_attn_to_v.lokr_w1 to lycoris_transformer_blocks_7_attn_to_v.lokr_w1
                 load_key = load_key.replace('lycoris_', 'lora_transformer_')
 
-            load_sd[load_key] = value
+            load_sd[load_key] = (
+                _dora_value_for_internal_load(key, value)
+                if self.network_type.lower() == "dora"
+                else value
+            )
 
         # extract extra items from state dict
         current_state_dict = self.state_dict()
+
+        if self.peft_format and self.network_type.lower() in ("lora", "dora"):
+            # Historical ai-toolkit PEFT checkpoints omitted alpha and were
+            # trained with alpha == rank. Preserve that meaning when resuming
+            # one, while allowing new checkpoints to carry explicit alpha.
+            for current_key, current_value in current_state_dict.items():
+                if not current_key.endswith(".alpha") or current_key in load_sd:
+                    continue
+                down_key = current_key.removesuffix(".alpha") + ".lora_down.weight"
+                down_weight = load_sd.get(down_key, current_state_dict.get(down_key))
+                if down_weight is not None:
+                    load_sd[current_key] = current_value.new_tensor(down_weight.shape[0])
+
         extra_dict = OrderedDict()
         to_delete = []
         for key in list(load_sd.keys()):
@@ -817,6 +926,14 @@ class ToolkitNetworkMixin:
             return self.load_weights(file, force_weight_mapping=True)
 
         info = self.load_state_dict(load_sd, False)
+        for module in self.get_all_modules():
+            if (
+                hasattr(module, "alpha")
+                and hasattr(module, "lora_dim")
+                and hasattr(module, "_set_runtime_scale")
+            ):
+                alpha = float(module.alpha.detach().float().item())
+                module._set_runtime_scale(alpha / module.lora_dim)
         if len(extra_dict.keys()) == 0:
             extra_dict = None
         return extra_dict

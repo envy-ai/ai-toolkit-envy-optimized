@@ -257,6 +257,8 @@ class StableDiffusion:
         
         # set true for models that encode control image into text embeddings
         self.encode_control_in_text_embeddings = False
+        self.caption_dropout_keeps_control_images = False
+        self.cache_processed_control_text_embeddings = False
         # control files may be VIDEOS (paths exposed on the batch as
         # control_video_paths_list); see minimax_h3 ref2va
         self.supports_video_control_images = False

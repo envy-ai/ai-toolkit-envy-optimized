@@ -79,6 +79,16 @@
       "title": "Load VAE (VAE Utils)"
     }
   },
+  {% if negative_prompt %}
+  "7": {
+    "inputs": {
+      "text": {{ negative_prompt | json }},
+      "clip": [{% if inference_lora_enabled %}"37"{% else %}"36"{% endif %}, 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "CLIP Text Encode (Negative Prompt)"}
+  },
+  {% else %}
   "7": {
     "inputs": {
       "conditioning": [
@@ -91,6 +101,7 @@
       "title": "ConditioningZeroOut"
     }
   },
+  {% endif %}
   "17": {
     "inputs": {
       "seed": [
