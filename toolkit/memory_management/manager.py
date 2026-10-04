@@ -340,7 +340,25 @@ class MemoryManager:
 
             original_forward = getattr(lmm, "_original_forward", None)
             if original_forward is not None:
-                if hasattr(child, "ara_lora_ref"):
+                target = getattr(lmm, "_managed_forward", None)
+                owner, attribute, current = child, 'forward', child.forward
+                seen = set()
+                # Training adapters are often attached AFTER streaming. Walk
+                # their bound forward -> org_forward chain, restoring only the
+                # manager's callable, including when adapters are stacked.
+                while target is not None and current is not target:
+                    adapter = getattr(current, '__self__', None)
+                    wrapped = getattr(adapter, 'org_module', ())
+                    if (adapter is None or id(adapter) in seen
+                            or not isinstance(wrapped, (list, tuple))
+                            or not wrapped or wrapped[0] is not child
+                            or not hasattr(adapter, 'org_forward')):
+                        break
+                    seen.add(id(adapter))
+                    owner, attribute, current = adapter, 'org_forward', adapter.org_forward
+                if target is not None and current is target:
+                    setattr(owner, attribute, original_forward)
+                elif hasattr(child, "ara_lora_ref"):
                     ara = child.ara_lora_ref()
                     if ara is not None:
                         ara.org_forward = original_forward

@@ -498,6 +498,8 @@ class OstrisModelMixin:
                 subfolder=subfolder,
                 **kwargs,
             )
+            model.aitk_load_source = {"path": os.path.realpath(file_path), "config_path": config_path,
+                                      "subfolder": subfolder}
         else:
             if os.path.isdir(name_or_path):
                 # a local dir may be the model folder itself or a full checkpoint
@@ -509,6 +511,8 @@ class OstrisModelMixin:
             model = cls.aitk_from_pretrained(
                 name_or_path, subfolder=subfolder, dtype=dtype, **kwargs
             )
+            model.aitk_load_source = {"path": name_or_path, "subfolder": subfolder,
+                                      "revision": kwargs.get("revision")}
 
         # quantize_on_load=False: qtype was only a comfy-candidate ranking
         # hint (the .load() path quantizes in aitk_post_load instead)

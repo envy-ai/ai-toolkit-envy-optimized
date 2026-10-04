@@ -8,6 +8,7 @@ the normal Qwen prompt encoder never reserves image-reference tokens for it.
 import os
 import random
 import math
+import copy
 from collections import OrderedDict
 
 import torch
@@ -15,10 +16,13 @@ import torch.nn.functional as F
 from PIL import Image, ImageOps
 from tqdm.auto import tqdm
 
-from extensions_built_in.diffusion_models.qwen_image_2.src.pipeline import calculate_shift
+from toolkit.flow_training import (FlowTrainingProfile, trainer_flow_profile,
+                                   guided_flow_prediction, render_flow_bank_image)
+from toolkit.training_capabilities import validate_specialized_model
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
-from toolkit.data_loader import get_dataloader_datasets
+from toolkit.data_loader import get_dataloader_datasets, get_dataloader_from_datasets
 from toolkit.train_tools import get_torch_dtype
+from .fizgig_multipoint import parse_points, parse_multipoint_prompts, validate_multipoint_images
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -201,15 +205,36 @@ def parse_cfg_negative_prompts(slider, triplets):
     return prompts
 
 
+def parse_anchor_prompts(slider):
+    entries = slider.get("anchor_prompts", [])
+    if not isinstance(entries, list):
+        raise ValueError("Slider anchor prompts must be a list")
+    prompts = []
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict) or not isinstance(entry.get("prompt"), str) or not entry["prompt"].strip():
+            raise ValueError(f"Anchor prompt {index} requires a positive prompt")
+        negative = entry.get("negative_prompt", "")
+        if not isinstance(negative, str):
+            raise ValueError(f"Anchor prompt {index} negative prompt must be text")
+        prompts.append((entry["prompt"].strip(), negative.strip()))
+    return prompts
+
+
 class FizgigSliderTrainer(DiffusionTrainer):
     """Common process for `fizgig_image_slider` and `fizgig_prompt_slider`."""
 
     def __init__(self, process_id: int, job, config: OrderedDict, **kwargs):
+        if (config.get("fizgig_slider") or {}).get("multipoint") is True:
+            # BaseTrainProcess saves job.raw_config. Keep the user's legacy
+            # drafts there, and route folders/captions only in a working copy.
+            config = copy.deepcopy(config)
         mode = config.get("type")
         if mode not in ("fizgig_image_slider", "fizgig_prompt_slider"):
             raise ValueError(f"Unknown Fizgig slider type: {mode}")
-        if config.get("model", {}).get("arch") != "qwen_image_2":
-            raise ValueError("Fizgig sliders currently support Qwen Image 2.1 only")
+        validate_specialized_model(config, mode)
+        self.flow_profile = FlowTrainingProfile.from_model_config(config['model'])
+        from toolkit.training_capabilities import cfg_reference_mode
+        self.cfg_reference = cfg_reference_mode(config['model'])
         network = config.get("network") or {}
         if network.get("type") not in ("lora", "dora"):
             raise ValueError("Fizgig sliders require a LoRA or DoRA network (not LoKr)")
@@ -217,7 +242,7 @@ class FizgigSliderTrainer(DiffusionTrainer):
         if train.get("train_text_encoder"):
             raise ValueError("Fizgig sliders train the image transformer only")
         if train.get("noise_scheduler") != "flowmatch":
-            raise ValueError("Fizgig sliders require the Qwen flowmatch scheduler")
+            raise ValueError("Fizgig sliders require the flowmatch scheduler")
         if train.get("do_cfg") or train.get("do_random_cfg"):
             raise ValueError("Fizgig sliders do not support CFG training")
         if train.get("diff_output_preservation") or train.get("blank_prompt_preservation"):
@@ -229,6 +254,11 @@ class FizgigSliderTrainer(DiffusionTrainer):
         if (train.get("ema_config") or {}).get("use_ema"):
             raise ValueError("Fizgig sliders do not support EMA")
         slider = config.get("fizgig_slider") or {}
+        self.slider_multipoint = slider.get("multipoint", False)
+        if not isinstance(self.slider_multipoint, bool):
+            raise ValueError("Multi-point must be a boolean")
+        self.slider_points = parse_points(slider.get("multipoint_config")) if self.slider_multipoint else []
+        self.slider_multipoint_latents = {}
         self.slider_mode = "image_pairs" if mode == "fizgig_image_slider" else "prompt_pairs"
         self.slider_diff_weight = float(slider.get("diff_weight", 1.0))
         self.slider_guidance = float(slider.get("guidance", 3.0))
@@ -236,9 +266,14 @@ class FizgigSliderTrainer(DiffusionTrainer):
         self.slider_bank_resolution = int(slider.get("bank_resolution", 768))
         self.slider_bank_steps = int(slider.get("bank_steps", 25))
         self.slider_cfg = float(slider.get("cfg_scale", 1.0))
+        self.slider_anchor_prompts = parse_anchor_prompts(slider)
+        self.slider_preservation_weight = float(slider.get("preservation_weight", 1.0))
+        if not math.isfinite(self.slider_preservation_weight) or self.slider_preservation_weight < 0:
+            raise ValueError("Slider Preservation Weight must be finite and nonnegative")
+        self.slider_anchor_image_configs = []
         if not 0 <= self.slider_diff_weight <= 1:
             raise ValueError("Image slider difference weight must be between 0 and 1")
-        if self.slider_guidance <= 0 or self.slider_bank_size < 1 or self.slider_bank_steps < 1:
+        if (not self.slider_multipoint and self.slider_guidance <= 0) or self.slider_bank_size < 1 or self.slider_bank_steps < 1:
             raise ValueError("Prompt slider guidance, bank size and bank steps must be positive")
         if self.slider_bank_resolution < 64 or self.slider_bank_resolution % 32:
             raise ValueError("Prompt slider practice image resolution must be a multiple of 32 and at least 64")
@@ -247,17 +282,50 @@ class FizgigSliderTrainer(DiffusionTrainer):
 
         if self.slider_mode == "image_pairs":
             datasets = config.get("datasets") or []
-            validate_image_slider_pairs(datasets)
-            for dataset in datasets:
-                dataset["unconditional_path"] = dataset.pop("control_path_1")
+            if self.slider_multipoint:
+                self.slider_image_groups = validate_multipoint_images(datasets, self.slider_points)
+            else:
+                validate_image_slider_pairs(datasets)
+            for group_index, dataset in enumerate(datasets):
+                anchor_path = dataset.get("anchor_path")
+                if anchor_path:
+                    if not os.path.isdir(anchor_path):
+                        raise ValueError(f"Slider anchor image folder does not exist: {anchor_path}")
+                    # Independent preservation examples, not paired targets or
+                    # edit references. Use their own captions and bucket caches.
+                    self.slider_anchor_image_configs.append({
+                        "folder_path": anchor_path, "resolution": dataset.get("resolution", [1024]),
+                        "caption_ext": dataset.get("caption_ext", "txt"),
+                        "default_caption": "", "caption_dropout_rate": 0,
+                        "cache_latents_to_disk": True, "cache_text_embeddings": True,
+                        "buckets": True, "num_frames": 1, "batch_size": 1,
+                        "num_workers": 0, "num_repeats": 1,
+                        "fizgig_slider_anchor": True,
+                    })
+                if self.slider_multipoint:
+                    group = self.slider_image_groups[group_index]
+                    dataset["folder_path"] = group["folders"][group["reference_id"]]
+                    dataset["dataset_path"] = None
+                    dataset["fizgig_multipoint_group"] = group_index
+                    dataset["control_path_1"] = None
+                    dataset["unconditional_path"] = None
+                else:
+                    dataset["unconditional_path"] = dataset.pop("control_path_1")
                 dataset["caption_dropout_rate"] = 0.0
                 dataset["fizgig_slider_pair"] = True
         else:
-            self.slider_prompt_triplets = parse_prompt_triplets(slider)
-            self.slider_cfg_negative_prompts = (
-                parse_cfg_negative_prompts(slider, self.slider_prompt_triplets)
-                if self.slider_cfg > 1.0 else None
-            )
+            if self.slider_multipoint:
+                self.slider_multipoint_prompts = parse_multipoint_prompts(slider["multipoint_config"], self.slider_points)
+                # Reuse the neutral-only practice renderer, with no target-count
+                # multiplier. The actual target predictions use a separate bank.
+                self.slider_prompt_triplets = [(entry["neutral"][0],) for entry in self.slider_multipoint_prompts]
+                self.slider_cfg_negative_prompts = [(entry["neutral"][1],) for entry in self.slider_multipoint_prompts] if self.slider_cfg > 1 else None
+            else:
+                self.slider_prompt_triplets = parse_prompt_triplets(slider)
+                self.slider_cfg_negative_prompts = (
+                    parse_cfg_negative_prompts(slider, self.slider_prompt_triplets)
+                    if self.slider_cfg > 1.0 else None
+                )
             if self.slider_bank_size < len(self.slider_prompt_triplets):
                 raise ValueError(
                     "Prompt slider Practice Images must be at least the number of prompt triplets"
@@ -267,15 +335,25 @@ class FizgigSliderTrainer(DiffusionTrainer):
             train["unload_text_encoder"] = True
 
         super().__init__(process_id, job, config, **kwargs)
-        self.retain_vae_after_caching = self.slider_mode == "prompt_pairs"
+        self.retain_vae_after_caching = self.slider_mode == "prompt_pairs" or bool(
+            self.slider_anchor_prompts and self.slider_preservation_weight
+        )
         self.slider_bank = []
         self.slider_embeds = None
         self.slider_cfg_negative_embeds = None
         self.negative_latents = {}
+        self.slider_anchor_embeds = []
+        self.slider_anchor_bank = []
 
     def update_training_metadata(self):
         super().update_training_metadata()
-        metadata = {"ss_slider": self.slider_mode}
+        from toolkit.flow_training import flow_training_metadata
+        metadata = {"ss_slider": self.slider_mode, **flow_training_metadata(self)}
+        if self.slider_multipoint:
+            import json
+            metadata["ss_slider_multipoint"] = json.dumps(self.slider_points)
+            if self.slider_mode == "prompt_pairs":
+                metadata["ss_slider_multipoint_prompts"] = json.dumps(self.slider_multipoint_prompts)
         if self.slider_mode == "image_pairs":
             metadata["ss_slider_diff_weight"] = str(self.slider_diff_weight)
         else:
@@ -285,35 +363,155 @@ class FizgigSliderTrainer(DiffusionTrainer):
             metadata["ss_slider_cfg_scale"] = str(self.slider_cfg)
             if self.slider_cfg_negative_prompts is not None:
                 metadata["ss_slider_cfg_negative_prompts"] = json.dumps(self.slider_cfg_negative_prompts)
+        if self.slider_anchor_prompts or self.slider_anchor_image_configs:
+            import json
+            metadata["ss_slider_anchor_prompts"] = json.dumps(self.slider_anchor_prompts)
+            metadata["ss_slider_preservation_weight"] = str(self.slider_preservation_weight)
+            metadata["ss_slider_anchor_image_folders"] = json.dumps([
+                config["folder_path"] for config in self.slider_anchor_image_configs
+            ])
         self.add_meta(metadata)
 
     def hook_before_train_loop(self):
+        from toolkit.flow_training import log_flow_training_profile
+        log_flow_training_profile(self)
         if self.network_config.type == "dora":
             # The slider switches strength between +1 and -1 every step.
             # Ordinary DoRA re-normalizes W +/- LoRA independently, whereas
             # ComfyUI scales the complete +1 DoRA delta around the base.
             self.network.signed_dora_slider = True
         if self.slider_mode == "image_pairs":
-            self._cache_negative_latents()
-        else:
+            if getattr(self, "slider_multipoint", False):
+                self._run_with_optimizer_state_offload(self._cache_multipoint_image_latents)
+            else:
+                self._cache_negative_latents()
+        if getattr(self, "slider_anchor_image_configs", []) and self.slider_preservation_weight:
+            self._run_with_optimizer_state_offload(self._cache_anchor_images)
+        if self.slider_mode == "prompt_pairs" or (getattr(self, "slider_anchor_prompts", []) and self.slider_preservation_weight):
             # Encode every triplet with only the text encoder resident.
             self.sd.set_device_state_preset("cache_text_encoder")
             try:
                 with torch.no_grad():
-                    self.slider_embeds = [
-                        tuple(self.sd.encode_prompt([prompt]).detach().to("cpu") for prompt in triplet)
-                        for triplet in self.slider_prompt_triplets
-                    ]
-                    if self.slider_cfg_negative_prompts is not None:
-                        self.slider_cfg_negative_embeds = [
+                    text_negatives = getattr(self, 'slider_cfg', 2) > 1 and getattr(self, 'cfg_reference', None) != 'image_only'
+                    if self.slider_mode == "prompt_pairs":
+                        self.slider_embeds = [
                             tuple(self.sd.encode_prompt([prompt]).detach().to("cpu") for prompt in triplet)
-                            for triplet in self.slider_cfg_negative_prompts
+                            for triplet in self.slider_prompt_triplets
                         ]
+                        if self.slider_cfg_negative_prompts is not None and text_negatives:
+                            self.slider_cfg_negative_embeds = [
+                                tuple(self.sd.encode_prompt([prompt]).detach().to("cpu") for prompt in triplet)
+                                for triplet in self.slider_cfg_negative_prompts
+                            ]
+                        if getattr(self, "slider_multipoint", False):
+                            self.slider_target_embeds = [{
+                                point["id"]: (
+                                    self.sd.encode_prompt([entry["targets"][point["id"]][0]]).detach().to("cpu"),
+                                    self.sd.encode_prompt([entry["targets"][point["id"]][1]]).detach().to("cpu") if text_negatives else None,
+                                ) for point in self.slider_points if point["strength"] != 0
+                            } for entry in self.slider_multipoint_prompts]
+                    self.slider_anchor_embeds = [
+                        (self.sd.encode_prompt([positive]).detach().to("cpu"),
+                         self.sd.encode_prompt([negative]).detach().to("cpu") if text_negatives else None)
+                        for positive, negative in getattr(self, "slider_anchor_prompts", [])
+                        if self.slider_preservation_weight
+                    ]
             finally:
                 self.sd.restore_device_state()
         super().hook_before_train_loop()
         if self.slider_mode == "prompt_pairs":
             self._build_prompt_bank()
+        if getattr(self, "slider_anchor_embeds", []):
+            self._build_anchor_prompt_bank()
+
+    def _cache_anchor_images(self):
+        try:
+            loader = get_dataloader_from_datasets(self.slider_anchor_image_configs, 1, self.sd)
+            with torch.no_grad():
+                for dataset in get_dataloader_datasets(loader):
+                    if not dataset.file_list:
+                        raise ValueError(f"Anchor image folder has no usable images: {dataset.dataset_path}")
+                    for item in tqdm(dataset.file_list, desc="Caching slider anchor images"):
+                        try:
+                            latent = item.get_latent().detach().unsqueeze(0).cpu()
+                            item.load_prompt_embedding()
+                            self.slider_anchor_bank.append((latent, item.prompt_embeds.detach().to("cpu"), None))
+                        finally:
+                            item.cleanup_latent()
+                            item.cleanup_text_embedding()
+        finally:
+            # Encoder must leave GPU before the optimizer-offload wrapper
+            # restores optimizer state. Normal setup subsequently unloads TE.
+            self.sd.text_encoder_to("cpu")
+        self.print(f"Slider cached {len(self.slider_anchor_bank)} anchor image presentations in RAM")
+
+    def _build_anchor_prompt_bank(self):
+        from torchvision.transforms.functional import to_tensor
+
+        self.sd.save_device_state()
+        network = self.network
+        previous_active = network.is_active
+        try:
+            self.sd.text_encoder_to("cpu")
+            self.sd.unet.to(self.device_torch)
+            self.sd.vae.to(self.sd.vae_device_torch)
+            network.is_active = False
+            # Keep the frozen helper active, as in the training reference passes.
+            with torch.no_grad():
+                pipeline = self.sd.get_generation_pipeline()
+                for index, (positive, negative) in enumerate(tqdm(self.slider_anchor_embeds, desc="Rendering slider anchor practice images")):
+                    image = render_flow_bank_image(
+                        self.sd, pipeline, positive.to(self.device_torch, dtype=self.sd.torch_dtype),
+                        negative.to(self.device_torch, dtype=self.sd.torch_dtype) if negative is not None else None,
+                        height=self.slider_bank_resolution, width=self.slider_bank_resolution,
+                        steps=self.slider_bank_steps, cfg=self.slider_cfg,
+                        seed=int(self.sample_config.seed) + 100_000 + index)
+                    pixels = to_tensor(image).mul(2).sub(1).to(self.device_torch, dtype=self.sd.vae_torch_dtype)
+                    latent = self.sd.encode_images(pixels.unsqueeze(0)).detach().cpu()
+                    self.slider_anchor_bank.append((latent, positive.to("cpu"), negative.to("cpu") if negative is not None else None))
+        finally:
+            # Embeds.to may mutate its container; do not retain bank embeds on GPU.
+            for positive, negative in self.slider_anchor_embeds:
+                positive.to("cpu")
+                if negative is not None:
+                    negative.to("cpu")
+            network.is_active = previous_active
+            self.sd.restore_device_state()
+
+    def _train_anchor_preservation(self, accum_scale):
+        latent, positive, negative = random.choice(self.slider_anchor_bank)
+        dtype = get_torch_dtype(self.train_config.dtype)
+        with torch.no_grad():
+            noisy, timestep, _ = self._noised_state(latent)
+            positive = positive.detach().to(self.device_torch, dtype=dtype)
+            negative = negative.detach().to(self.device_torch, dtype=dtype) if negative is not None else None
+        network = self.network
+        previous_active, previous_multiplier = network.is_active, network.multiplier
+        total = 0.0
+        try:
+            network.is_active = False
+            with torch.no_grad():
+                reference = self._predict(noisy, timestep, positive, negative).detach()
+            network.is_active = True
+            # Both endpoints plus a random intermediate, all against the same
+            # disabled-slider reference. Backprop before changing strength so
+            # checkpoint recomputation uses the correct LoRA/DoRA multiplier.
+            if getattr(self, "slider_multipoint", False):
+                endpoints = [p["strength"] for p in self.slider_points if p["strength"] != 0]
+                intermediate = random.uniform(min(0, *endpoints), max(0, *endpoints))
+                strengths = endpoints + ([intermediate] if intermediate != 0 else [])
+            else:
+                strengths = (-1.0, 1.0, random.uniform(-1.0, 1.0))
+            for strength in strengths:
+                network.multiplier = strength
+                loss = F.mse_loss(self._predict(noisy, timestep, positive, negative), reference)
+                weighted = loss * (self.slider_preservation_weight / len(strengths))
+                self.accelerator.backward(weighted * accum_scale)
+                total += weighted.detach()
+        finally:
+            network.is_active, network.multiplier = previous_active, previous_multiplier
+        self.additional_logs["slider/anchor_loss"] = total.item()
+        return total
 
     @staticmethod
     def _pair_key(item):
@@ -349,14 +547,60 @@ class FizgigSliderTrainer(DiffusionTrainer):
             self.sd.restore_device_state()
         self.print(f"Image slider cached {len(self.negative_latents)} -1 latents in RAM")
 
+    @staticmethod
+    def _multipoint_key(item):
+        group = getattr(getattr(item, "dataset_config", None), "fizgig_multipoint_group", None)
+        return (group, item.path, item.scale_to_width, item.scale_to_height, item.crop_x,
+                item.crop_y, item.crop_width, item.crop_height, item.flip_x, item.flip_y)
+
+    @torch.no_grad()
+    def _cache_multipoint_image_latents(self):
+        # Clone only dataset/item metadata, NOT models or tensors. Reuse the
+        # normal threaded disk-cache pipeline, but copy the reference item's
+        # exact crop/flip so even random crops stay paired across every point.
+        for dataset in get_dataloader_datasets(self.data_loader):
+            group = self.slider_image_groups[dataset.dataset_config.fizgig_multipoint_group]
+            for point in self.slider_points:
+                ident = point["id"]
+                cached_dataset = copy.copy(dataset)
+                # Dataset.__getstate__ deliberately removes sd when copied or
+                # pickled for workers. This cache runs in the main process.
+                cached_dataset.sd = self.sd
+                cached_dataset.dataset_config = copy.copy(dataset.dataset_config)
+                cached_dataset.dataset_config.folder_path = group["folders"][ident]
+                cached_dataset.dataset_config.dataset_path = None
+                cached_dataset.dataset_path = group["folders"][ident]
+                cached_dataset.latent_cache = {}
+                cached_dataset.file_list = []
+                keys = []
+                for original in dataset.file_list:
+                    item = copy.copy(original)
+                    item.dataset_config = cached_dataset.dataset_config
+                    item.path = group["images"][ident][os.path.splitext(os.path.basename(original.path))[0]]
+                    item._latent_path = None
+                    item.is_latent_cached = False
+                    item.tensor = None
+                    for name in ("_encoded_latent", "_cached_first_frame_latent", "_cached_tensor_uint8"):
+                        setattr(item, name, None)
+                    cached_dataset.file_list.append(item)
+                    keys.append(self._multipoint_key(original))
+                cached_dataset.cache_latents_all_latents()
+                if len(cached_dataset.file_list) != len(keys):
+                    raise ValueError("Multi-point cache failed to load a paired image; refusing partial training")
+                bank = self.slider_multipoint_latents.setdefault(ident, {})
+                for key, item in zip(keys, cached_dataset.file_list):
+                    try:
+                        bank[key] = item.get_latent().detach().cpu()
+                    finally:
+                        item.cleanup_latent()
+        self.print("Multi-point image latents cached on CPU/disk with shared crops and flips")
+
     def _build_prompt_bank(self):
         from torchvision.transforms.functional import to_tensor
 
         self.sd.save_device_state()
         network = self.network
         previous_multiplier, previous_active = network.multiplier, network.is_active
-        assistant = self.sd.assistant_lora
-        assistant_active = assistant.is_active if assistant is not None else None
         try:
             # The prompt embeddings are already cached. Keep the Qwen
             # text encoder on CPU rather than co-resident with DiT and VAE.
@@ -365,39 +609,33 @@ class FizgigSliderTrainer(DiffusionTrainer):
             self.sd.vae.to(self.sd.vae_device_torch)
             network.multiplier = 0.0
             network.is_active = False
-            if assistant is not None:
-                assistant.is_active = False
+            # Practice states come from the same assisted base used for training.
             with torch.no_grad():
                 pipeline = self.sd.get_generation_pipeline()
                 for index in tqdm(range(self.slider_bank_size), desc="Rendering slider practice images"):
                     triplet_index = index % len(self.slider_prompt_triplets)
-                    neutral = self.slider_embeds[triplet_index][0].to(
+                    neutral_cpu = self.slider_embeds[triplet_index][0]
+                    neutral = (neutral_cpu.detach() if getattr(self, "slider_multipoint", False) else neutral_cpu).to(
                         self.device_torch, dtype=self.sd.torch_dtype
                     )
                     unconditional = (
-                        self.slider_cfg_negative_embeds[triplet_index][0].to(
+                        (self.slider_cfg_negative_embeds[triplet_index][0].detach()
+                         if getattr(self, "slider_multipoint", False) else self.slider_cfg_negative_embeds[triplet_index][0]).to(
                             self.device_torch, dtype=self.sd.torch_dtype
                         ) if self.slider_cfg_negative_embeds is not None else None
                     )
                     seed = int(self.sample_config.seed) + 1000 + index
-                    generator = torch.Generator(device="cpu").manual_seed(seed)
-                    image = pipeline(
-                        neutral,
-                        unconditional_embeds=unconditional,
+                    image = render_flow_bank_image(
+                        self.sd, pipeline, neutral, unconditional,
                         height=self.slider_bank_resolution,
                         width=self.slider_bank_resolution,
-                        num_inference_steps=self.slider_bank_steps,
-                        guidance_scale=self.slider_cfg,
-                        generator=generator,
-                    )[0].convert("RGB")
+                        steps=self.slider_bank_steps, cfg=self.slider_cfg, seed=seed)
                     pixels = to_tensor(image).mul(2).sub(1).to(self.device_torch, dtype=self.sd.vae_torch_dtype)
                     latent = self.sd.encode_images(pixels.unsqueeze(0)).detach().cpu()
                     self.slider_bank.append((latent, triplet_index))
         finally:
             network.multiplier = previous_multiplier
             network.is_active = previous_active
-            if assistant is not None:
-                assistant.is_active = assistant_active
             self.sd.restore_device_state()
         self.print(
             f"Prompt slider practice bank: {len(self.slider_bank)} images "
@@ -409,7 +647,7 @@ class FizgigSliderTrainer(DiffusionTrainer):
         # interpolation, and velocity target noise - clean.
         clean = clean.to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
         batch_size, _, height, width = clean.shape
-        mu = calculate_shift(height * width)
+        mu = trainer_flow_profile(self).shift(height, width)
         t = torch.sigmoid(torch.randn(batch_size, device=self.device_torch, dtype=torch.float32) + mu)
         min_t = self.train_config.min_denoising_steps / 1000.0
         max_t = self.train_config.max_denoising_steps / 1000.0
@@ -421,6 +659,16 @@ class FizgigSliderTrainer(DiffusionTrainer):
         return noisy, (t * 1000).to(self.device_torch), target
 
     def _predict(self, noisy, timestep, embeds, unconditional_embeds=None):
+        if getattr(self.sd, 'arch', 'qwen_image_2') != 'qwen_image_2':
+            # Image-pair captions and image preservation examples have no
+            # text-negative branch. Match Qwen's existing CFG-1 prediction
+            # there, even when prompt practice images use a higher CFG. The
+            # native Ideogram image-only reference does not need text embeds.
+            cfg = self.slider_cfg if (
+                unconditional_embeds is not None
+                or getattr(self, 'cfg_reference', None) == 'image_only'
+            ) else 1.0
+            return guided_flow_prediction(self.sd, noisy, timestep, embeds, unconditional_embeds, cfg)
         return self.sd.predict_noise(
             latents=noisy,
             timestep=timestep,
@@ -440,13 +688,75 @@ class FizgigSliderTrainer(DiffusionTrainer):
             squared_error = squared_error * weights
         return squared_error.mean()
 
+    def _train_multipoint_prompt(self, accum_scale):
+        latent, entry_index = random.choice(self.slider_bank)
+        noisy, timestep, _ = self._noised_state(latent)
+        neutral = self.slider_embeds[entry_index][0].detach().to(self.device_torch, dtype=self.sd.torch_dtype)
+        negative = self.slider_cfg_negative_embeds[entry_index][0].detach().to(self.device_torch, dtype=self.sd.torch_dtype) if self.slider_cfg_negative_embeds is not None else None
+        points = [p for p in self.slider_points if p["strength"] != 0]
+        total = 0.0
+        for point in points:
+            positive_cpu, negative_cpu = self.slider_target_embeds[entry_index][point["id"]]
+            self.network.is_active = False
+            with torch.no_grad():
+                positive = positive_cpu.detach().to(self.device_torch, dtype=self.sd.torch_dtype)
+                cfg_negative = negative_cpu.detach().to(self.device_torch, dtype=self.sd.torch_dtype) if negative_cpu is not None else None
+                target = self._predict(noisy, timestep, positive, cfg_negative).detach()
+                del positive, cfg_negative
+            self.network.is_active = True
+            self.network.multiplier = point["strength"]
+            loss = F.mse_loss(self._predict(noisy, timestep, neutral, negative), target)
+            self.accelerator.backward(loss * (accum_scale / len(points)))
+            total += loss.detach() / len(points)
+            del loss, target
+        return total
+
+    def _train_multipoint_image(self, batch, accum_scale):
+        if batch is None or batch.latents is None:
+            raise ValueError("Multi-point image slider requires cached image batches")
+        points = [p for p in self.slider_points if p["strength"] != 0]
+        dtype = get_torch_dtype(self.train_config.dtype)
+        def pixels(point):
+            return torch.stack([self.slider_multipoint_latents[point["id"]][self._multipoint_key(item)] for item in batch.file_items])
+        # Spatial weights are computed on CPU; only the current point's target
+        # goes to GPU. More points must not multiply persistent GPU storage.
+        with torch.no_grad():
+            zero = next((p for p in self.slider_points if p["strength"] == 0), None)
+            reference = pixels(zero) if zero else None
+            low = high = None
+            if zero is None:
+                for point in points:
+                    latent = pixels(point).float()
+                    low = latent if low is None else torch.minimum(low, latent)
+                    high = latent if high is None else torch.maximum(high, latent)
+            shared_weights = pair_difference_weights(high, low, self.slider_diff_weight) if zero is None else None
+            embeds = batch.prompt_embeds if batch.prompt_embeds is not None else self.sd.encode_prompt(batch.get_caption_list())
+            embeds = embeds.detach().to(self.device_torch, dtype=dtype)
+        total = 0.0
+        for point in points:
+            with torch.no_grad():
+                clean_cpu = pixels(point)
+                weights = pair_difference_weights(clean_cpu, reference, self.slider_diff_weight) if zero else shared_weights
+                clean = clean_cpu.to(self.device_torch, dtype=dtype)
+                noisy, timestep, target = self._noised_state(clean)
+            self.network.multiplier = point["strength"]
+            prediction = self._predict(noisy, timestep, embeds)
+            loss = ((prediction - target).square().mean(dim=1).flatten(1) * weights.to(self.device_torch)).mean()
+            self.accelerator.backward(loss * (accum_scale / len(points)))
+            total += loss.detach() / len(points)
+            del prediction, loss, clean, noisy, target
+        return total
+
     def train_single_accumulation(self, batch, accum_scale=1.0):
         network = self.network
         previous_multiplier, previous_active = network.multiplier, network.is_active
         total = 0.0
         try:
             network.is_active = True
-            if self.slider_mode == "image_pairs":
+            if getattr(self, "slider_multipoint", False):
+                total = (self._train_multipoint_image(batch, accum_scale) if self.slider_mode == "image_pairs"
+                         else self._train_multipoint_prompt(accum_scale))
+            elif self.slider_mode == "image_pairs":
                 if batch is None:
                     raise ValueError("Image slider requires a paired batch")
                 with torch.no_grad():
@@ -491,6 +801,8 @@ class FizgigSliderTrainer(DiffusionTrainer):
                                       frozen_neutral + multiplier * delta)
                     self.accelerator.backward(loss * (0.5 * accum_scale))
                     total += 0.5 * loss.detach()
+            if getattr(self, "slider_anchor_bank", []) and self.slider_preservation_weight:
+                total += self._train_anchor_preservation(accum_scale)
         finally:
             network.multiplier = previous_multiplier
             network.is_active = previous_active

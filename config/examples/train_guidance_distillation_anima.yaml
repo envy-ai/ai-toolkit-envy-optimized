@@ -1,0 +1,73 @@
+---
+# Experimental port: replace component/data paths; actual-checkpoint VRAM fit is unverified.
+job: extension
+config:
+  name: anima_guidance_distillation
+  process:
+    - type: guidance_distillation
+      training_folder: output
+      device: cuda:0
+      model:
+        arch: anima
+        name_or_path: /path/to/anima/base
+        quantize: true
+        quantize_te: true
+        qtype: convrotint4
+        qtype_te: qfloat8
+        low_vram: true
+        model_kwargs:
+          train_text_conditioner: false # Required for these specialized objectives.
+      network:
+        type: lora
+        linear: 16
+        linear_alpha: 16
+      guidance_distillation:
+        teacher_cfg_scale: 4
+        objective: full_guidance # negative_only requires nonempty text negatives on Ideogram.
+        negative_prompt: "noise, haze, artifacts"
+      datasets:
+        - folder_path: /path/to/target/images
+          caption_ext: txt
+          caption_dropout_rate: 0
+          cache_latents_to_disk: true
+          resolution: [1024]
+          buckets: true
+          shuffle_tokens: false
+      train:
+        batch_size: 1
+        gradient_accumulation: 1
+        steps: 1000
+        train_unet: true
+        train_text_encoder: false
+        cache_text_embeddings: true
+        unload_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        timestep_type: shift
+        min_denoising_steps: 0
+        max_denoising_steps: 999
+        optimizer: adamw8bit
+        lr: 0.0001
+        dtype: bf16
+        loss_type: mse
+      save:
+        save_format: safetensors
+        dtype: bf16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      sample:
+        sampler: flowmatch
+        sample_every: 250
+        sample_steps: 25
+        width: 768
+        height: 768
+        guidance_scale: 1
+        neg: ""
+        seed: 42
+        walk_seed: false
+        samples:
+          - prompt: A cat sitting beside a sunny window, detailed illustration
+            network_multiplier: 1
+meta:
+  name: "[name]"
+  version: "1.0"

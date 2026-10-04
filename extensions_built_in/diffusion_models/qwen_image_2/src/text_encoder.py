@@ -36,6 +36,16 @@ class QwenImage21TextEncoder(Qwen3VLTextEncoder):
     }
 
     @classmethod
+    def load_processor(cls, name_or_path=None, subfolder=None, **kwargs):
+        # Qwen-Image ships tokenizer/processor files without a model config in
+        # processor/. Transformers 5's AutoTokenizer now asks for that config
+        # BEFORE reading tokenizer_config.json. Select the declared Qwen2
+        # tokenizer explicitly: this uses the same vocabulary/template and
+        # keeps fully cached/offline startup working without another download.
+        kwargs.setdefault("tokenizer_type", "qwen2")
+        return super().load_processor(name_or_path, subfolder, **kwargs)
+
+    @classmethod
     def convert_state_dict_on_load(cls, state_dict):
         if not any(k.startswith("model.layers.") for k in state_dict):
             return state_dict

@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState, ReactNode } from 'react';
+import { sliderSpaceSampleLabel } from '@/app/jobs/new/sliderspace';
 import { isVideo, isAudio, isText, encodeFilePathForUrl } from '@/utils/basic';
 
 interface SampleImageCardProps {
@@ -196,6 +197,9 @@ const SampleImageCard: React.FC<SampleImageCardProps> = ({
           {children && isVisible && <div className="absolute inset-0 flex items-center justify-center">{children}</div>}
         </div>
       </div>
+      {sliderSpaceSampleLabel(imageUrl) && <div className="bg-gray-900 px-2 py-1 text-xs text-gray-300 rounded-b-lg">
+        {sliderSpaceSampleLabel(imageUrl)}
+      </div>}
     </div>
   );
 };

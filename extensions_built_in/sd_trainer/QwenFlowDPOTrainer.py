@@ -12,7 +12,8 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from extensions_built_in.diffusion_models.qwen_image_2.src.pipeline import calculate_shift
+from toolkit.flow_training import FlowTrainingProfile, trainer_flow_profile, scoped_training_references
+from toolkit.training_capabilities import validate_specialized_model, validate_edit_references
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 from extensions_built_in.sd_trainer.FizgigSliderTrainer import validate_image_slider_pairs
 from toolkit.data_loader import get_dataloader_datasets
@@ -31,8 +32,10 @@ def flow_dpo_terms(policy_win, policy_lose, reference_win, reference_lose, beta,
 
 class QwenFlowDPOTrainer(DiffusionTrainer):
     def __init__(self, process_id: int, job, config: OrderedDict, **kwargs):
-        if config.get("model", {}).get("arch") != "qwen_image_2":
-            raise ValueError("Qwen Flow-DPO requires Qwen Image 2.1")
+        validate_specialized_model(config, 'flow_dpo')
+        self.flow_profile = FlowTrainingProfile.from_model_config(config['model'])
+        from toolkit.training_capabilities import cfg_reference_mode
+        self.cfg_reference = cfg_reference_mode(config['model'])
         if (config.get("network") or {}).get("type") != "lora":
             raise ValueError("Qwen Flow-DPO currently supports LoRA only")
         network_config = config["network"]
@@ -69,8 +72,12 @@ class QwenFlowDPOTrainer(DiffusionTrainer):
             raise ValueError("Qwen Flow-DPO preferred-image loss weight must be finite and nonnegative")
 
         datasets = config.get("datasets") or []
+        validate_edit_references(config, datasets, paired=True)
         validate_image_slider_pairs(datasets, label="Qwen Flow-DPO", allow_edit_controls=True)
         for dataset in datasets:
+            loss_weight = float(dataset.get("loss_multiplier", 1.0))
+            if not math.isfinite(loss_weight) or loss_weight < 0:
+                raise ValueError("Flow-DPO Dataset Loss Weight must be finite and nonnegative")
             if dataset.get("unconditional_path"):
                 raise ValueError("Qwen Flow-DPO reserves unconditional_path for Control Dataset 1")
             if dataset.get("random_crop") or dataset.get("random_scale"):
@@ -82,10 +89,17 @@ class QwenFlowDPOTrainer(DiffusionTrainer):
             dataset["flow_dpo_pair"] = True
         super().__init__(process_id, job, config, **kwargs)
         self.rejected_latents = {}
+        # Rejected target latents are cached up front; only real edit references
+        # need the VAE during prediction. Do not let Unload VAE delete it then.
+        self.needs_vae_at_train_time = any(
+            dataset.get(key) for dataset in datasets
+            for key in ('control_path', 'control_path_2', 'control_path_3')
+        )
 
     def update_training_metadata(self):
         super().update_training_metadata()
-        self.add_meta({"ss_flow_dpo_beta": str(self.dpo_beta),
+        from toolkit.flow_training import flow_training_metadata
+        self.add_meta({**flow_training_metadata(self), "ss_flow_dpo_beta": str(self.dpo_beta),
                        "ss_flow_dpo_sft_weight": str(self.dpo_sft_weight)})
 
     @staticmethod
@@ -97,6 +111,8 @@ class QwenFlowDPOTrainer(DiffusionTrainer):
         )
 
     def hook_before_train_loop(self):
+        from toolkit.flow_training import log_flow_training_profile
+        log_flow_training_profile(self)
         if self.sd.vae is None:
             raise ValueError("Qwen Flow-DPO requires the VAE to cache rejected images")
         self.sd.set_device_state_preset("cache_latents")
@@ -131,6 +147,7 @@ class QwenFlowDPOTrainer(DiffusionTrainer):
             batch=batch,
         ).float()
 
+    @scoped_training_references
     def train_single_accumulation(self, batch, accum_scale=1.0):
         if batch is None or batch.latents is None or batch.prompt_embeds is None:
             raise ValueError("Qwen Flow-DPO requires cached preferred latents and text embeddings")
@@ -145,7 +162,7 @@ class QwenFlowDPOTrainer(DiffusionTrainer):
             embeds = batch.prompt_embeds.to(self.device_torch, dtype=dtype).detach()
             n, _, height, width = preferred.shape
             t = torch.sigmoid(torch.randn(n, device=self.device_torch, dtype=torch.float32)
-                              + calculate_shift(height * width))
+                              + trainer_flow_profile(self).shift(height, width))
             t_min = self.train_config.min_denoising_steps / 1000.0
             t_max = self.train_config.max_denoising_steps / 1000.0
             t = t_min + (t_max - t_min) * t
@@ -156,6 +173,10 @@ class QwenFlowDPOTrainer(DiffusionTrainer):
             rejected_noisy = ((1 - t_view) * rejected.float() + t_view * noise).to(dtype)
             preferred_target = noise - preferred.float()
             rejected_target = noise - rejected.float()
+            weights = torch.as_tensor(getattr(batch, 'loss_multiplier_list', [1.0] * n),
+                                      device=self.device_torch, dtype=torch.float32)
+            if weights.shape != (n,) or not torch.isfinite(weights).all() or (weights < 0).any():
+                raise ValueError("Flow-DPO requires one finite nonnegative Dataset Loss Weight per image")
 
         def error(noisy, target):
             return (self._predict(noisy, timesteps, embeds, batch) - target).square().flatten(1).mean(1)
@@ -180,11 +201,11 @@ class QwenFlowDPOTrainer(DiffusionTrainer):
             # with respect to each policy error, evaluated at the same weights.
             win_error = error(preferred_noisy, preferred_target)
             self.accelerator.backward(
-                ((coefficient + self.dpo_sft_weight) * win_error).mean() * accum_scale
+                (weights * (coefficient + self.dpo_sft_weight) * win_error).mean() * accum_scale
             )
             del win_error
             lose_error = error(rejected_noisy, rejected_target)
-            self.accelerator.backward((-coefficient * lose_error).mean() * accum_scale)
+            self.accelerator.backward((-weights * coefficient * lose_error).mean() * accum_scale)
             del lose_error
             self.additional_logs.update({
                 "dpo/margin": margin.mean().item(),
@@ -194,6 +215,6 @@ class QwenFlowDPOTrainer(DiffusionTrainer):
                 "dpo/reference_preferred_error": reference_win.mean().item(),
                 "dpo/reference_rejected_error": reference_lose.mean().item(),
             })
-            return loss.mean().detach()
+            return (weights * loss).mean().detach()
         finally:
             network.is_active = was_active

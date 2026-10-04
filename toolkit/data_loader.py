@@ -520,7 +520,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             # prune hidden dirs (.thumbs, .tmp) so their contents never train
             file_list = []
             for root, dirs, files in os.walk(self.dataset_path):
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                dirs[:] = [d for d in dirs if not d.startswith('.') and
+                           (getattr(self.dataset_config, 'kto_label', None) is None or d != '_controls')]
                 file_list.extend(os.path.join(root, file) for file in files if file.lower().endswith(tuple(extensions)) and not file.startswith('.'))
         else:
             # assume json

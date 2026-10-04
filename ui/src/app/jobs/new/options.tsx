@@ -1,6 +1,7 @@
 import React from 'react';
 import { GroupedSelectOption, SelectOption, JobConfig, ConfigDoc } from '@/types';
-import { defaultSliderConfig } from './jobConfig';
+import { activateSliderSpace, defaultDatasetConfig, defaultSliderConfig } from './jobConfig';
+import { activateDiffusionKTO } from './trainingCapabilities';
 
 type Control = 'depth' | 'line' | 'pose' | 'inpaint';
 
@@ -165,7 +166,18 @@ interface JobTypeOption extends SelectOption {
   onDeactivate?: (config: JobConfig) => JobConfig;
 }
 
-export const jobTypeOptions: JobTypeOption[] = [
+const baseJobTypeOptions: JobTypeOption[] = [
+  {
+    value: 'sliderspace',
+    label: 'SliderSpace',
+    disableSections: ['slider', 'datasets', 'trigger_word', 'network.conv', 'train.timestep_type', 'train.unload_text_encoder', 'train.diff_output_preservation', 'train.blank_prompt_preservation'],
+    onActivate: activateSliderSpace,
+    onDeactivate: config => {
+      delete config.config.process[0].sliderspace;
+      if (!config.config.process[0].datasets?.length) config.config.process[0].datasets = [structuredClone(defaultDatasetConfig)];
+      return config;
+    },
+  },
   {
     value: 'diffusion_trainer',
     label: 'LoRA Trainer',
@@ -188,21 +200,89 @@ export const jobTypeOptions: JobTypeOption[] = [
   },
   {
     value: 'fizgig_image_slider',
-    label: 'Fizgig Image Slider (Qwen 2.1)',
+    label: 'Fizgig Image Slider',
     disableSections: ['slider', 'trigger_word', 'train.diff_output_preservation', 'train.blank_prompt_preservation'],
     onActivate: config => activateFizgigSlider(config, 'image'),
     onDeactivate: deactivateFizgigSlider,
   },
   {
     value: 'fizgig_prompt_slider',
-    label: 'Fizgig Prompt Slider (Qwen 2.1)',
+    label: 'Fizgig Prompt Slider',
     disableSections: ['slider', 'datasets', 'trigger_word', 'train.diff_output_preservation', 'train.blank_prompt_preservation'],
     onActivate: config => activateFizgigSlider(config, 'prompt'),
     onDeactivate: deactivateFizgigSlider,
   },
   {
+    value: 'qwen_guidance_distillation',
+    label: 'Guidance Distillation LoRA',
+    disableSections: ['slider', 'trigger_word', 'train.timestep_type', 'train.unload_text_encoder', 'train.diff_output_preservation', 'train.blank_prompt_preservation'],
+    onActivate: config => {
+      const process = config.config.process[0];
+      process.guidance_distillation = {
+        teacher_cfg_scale: 4.0,
+        negative_prompt: (process.sample.comfy?.enabled ? process.sample.comfy.negative_prompt : process.sample.neg) ?? '',
+        objective: 'full_guidance',
+      };
+      if (!process.network) {
+        process.network = {
+          type: 'lora', linear: 32, linear_alpha: 32, conv: 16, conv_alpha: 16,
+          lokr_full_rank: true, lokr_factor: -1, network_kwargs: {},
+        };
+      }
+      process.network.type = 'lora';
+      process.train.train_unet = true;
+      process.train.train_text_encoder = false;
+      process.train.noise_scheduler = 'flowmatch';
+      process.train.timestep_type = 'shift';
+      process.train.cache_text_embeddings = true;
+      process.train.unload_text_encoder = false;
+      process.train.loss_type = 'mse';
+      process.train.content_or_style = 'balanced';
+      process.train.diff_output_preservation = false;
+      process.train.blank_prompt_preservation = false;
+      process.train.frequency_loss_type = 'none';
+      process.train.do_cfg = false;
+      process.train.do_random_cfg = false;
+      process.train.do_guidance_loss = false;
+      process.train.do_differential_guidance = false;
+      if (process.train.ema_config) process.train.ema_config.use_ema = false;
+      process.trigger_word = null;
+      if (!process.datasets.length) process.datasets = [{ ...defaultDatasetConfig }];
+      process.datasets.forEach(dataset => {
+        dataset.cache_latents_to_disk = true;
+        dataset.caption_dropout_rate = 0;
+        dataset.network_weight = 1;
+        dataset.shuffle_tokens = false;
+        dataset.controls = [];
+        dataset.is_reg = false;
+      });
+      process.sample.guidance_scale = 1;
+      process.sample.neg = '';
+      process.sample.samples = process.sample.samples.map(sample => ({
+        ...sample, guidance_scale: 1, neg: '', network_multiplier: 1,
+      }));
+      if (process.sample.comfy) process.sample.comfy.negative_prompt = '';
+      return config;
+    },
+    onDeactivate: config => {
+      delete config.config.process[0].guidance_distillation;
+      return config;
+    },
+  },
+  {
+    value: 'diffusion_kto',
+    label: 'Diffusion-KTO LoRA (experimental)',
+    disableSections: ['slider', 'trigger_word', 'train.timestep_type', 'train.unload_text_encoder', 'train.diff_output_preservation', 'train.blank_prompt_preservation'],
+    onActivate: config => activateDiffusionKTO(config, defaultDatasetConfig),
+    onDeactivate: config => {
+      delete config.config.process[0].diffusion_kto;
+      config.config.process[0].datasets.forEach(dataset => { delete dataset.kto_label; });
+      return config;
+    },
+  },
+  {
     value: 'qwen_flow_dpo',
-    label: 'Flow-DPO LoRA (Qwen 2.1)',
+    label: 'Flow-DPO LoRA',
     disableSections: ['slider', 'trigger_word', 'train.timestep_type', 'train.diff_output_preservation', 'train.blank_prompt_preservation'],
     onActivate: config => {
       const process = config.config.process[0];
@@ -239,9 +319,18 @@ export const jobTypeOptions: JobTypeOption[] = [
   },
 ];
 
+// Keep legacy entries addressable for old configs, but use neutral IDs for new jobs.
+export const jobTypeOptions: JobTypeOption[] = baseJobTypeOptions.flatMap(option => {
+  const aliases: Record<string, string> = { qwen_flow_dpo: 'flow_dpo', qwen_guidance_distillation: 'guidance_distillation' };
+  return aliases[option.value] ? [{ ...option, value: aliases[option.value] }, option] : [option];
+});
+
 function activateFizgigSlider(config: JobConfig, mode: 'image' | 'prompt'): JobConfig {
   const process = config.config.process[0];
   process.fizgig_slider = {
+    multipoint: false,
+    anchor_prompts: [],
+    preservation_weight: 1.0,
     diff_weight: 1.0,
     positive_prefix: '',
     negative_prefix: '',

@@ -21,7 +21,7 @@
       "height": {{ height }},
       "batch_size": 1
     },
-    "class_type": "EmptyLatentImage",
+    "class_type": "{% if krea_native_preview %}EmptySD3LatentImage{% else %}EmptyLatentImage{% endif %}",
     "_meta": {
       "title": "Empty Latent Image"
     }
@@ -79,7 +79,8 @@
       "title": "Load VAE (VAE Utils)"
     }
   },
-  {% if negative_prompt %}
+  {% if not krea_native_preview or cfg > 1 %}
+  {% if negative_prompt or krea_native_preview %}
   "7": {
     "inputs": {
       "text": {{ negative_prompt | json }},
@@ -102,7 +103,12 @@
     }
   },
   {% endif %}
+  {% endif %}
   "17": {
+    {% if krea_native_preview %}
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {"noise": ["80", 0], "guider": ["81", 0], "sampler": ["82", 0], "sigmas": ["83", 0], "latent_image": ["2", 0]}
+    {% else %}
     "inputs": {
       "seed": [
         "26",
@@ -134,7 +140,14 @@
     "_meta": {
       "title": "KSampler"
     }
+    {% endif %}
   },
+  {% if krea_native_preview %}
+  "80": {"class_type": "RandomNoise", "inputs": {"noise_seed": {{ krea_native_seed_literal }}}},
+  "81": {"class_type": "{% if cfg > 1 %}CFGGuider{% else %}BasicGuider{% endif %}", "inputs": {"model": [{% if inference_lora_enabled %}"37"{% else %}"36"{% endif %}, 0], "{% if cfg > 1 %}positive{% else %}conditioning{% endif %}": ["1", 0]{% if cfg > 1 %}, "negative": ["7", 0], "cfg": {{ cfg }}{% endif %}}},
+  "82": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": {{ sampler | json }}}},
+  "83": {"class_type": "ManualSigmas", "inputs": {"sigmas": {{ krea_native_sigmas | json }}}},
+  {% endif %}
   "23": {
     "inputs": {
       "filename_prefix": {{ filename_prefix | json }},
@@ -156,7 +169,7 @@
   },
   "26": {
     "inputs": {
-      "seed": {{ seed }}
+      "seed": {% if krea_native_preview %}{{ krea_native_seed_literal }}{% else %}{{ seed }}{% endif %}
     },
     "class_type": "Seed",
     "_meta": {
@@ -166,7 +179,7 @@
   "36": {
     "inputs": {
       "absolute_path": {{ training_lora_path | json }},
-      "lora_strength": 1,
+      "lora_strength": {{ training_lora_strength }},
       "model": [
         "4",
         0

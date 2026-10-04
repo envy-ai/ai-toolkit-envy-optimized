@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from toolkit.config_modules import TrainConfig
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
@@ -57,7 +58,7 @@ class SDTrainerPromptOffloadTests(unittest.TestCase):
         trainer.device_torch = torch.device("cuda")
         trainer.is_caching_text_embeddings = False
         trainer.sd = FakeSD()
-        trainer.train_config = SimpleNamespace(
+        trainer.train_config = TrainConfig(
             unconditional_prompt="",
             do_prior_divergence=False,
             negative_prompt=None,

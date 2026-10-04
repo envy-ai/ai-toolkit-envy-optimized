@@ -103,6 +103,7 @@ export interface NetworkConfig {
   lokr_full_rank: boolean;
   lokr_factor: number;
   save_magnitude_less_lora?: boolean;
+  loha_dora?: boolean;
   network_kwargs: {
     ignore_if_contains?: string[];
     only_if_contains?: string[];
@@ -151,9 +152,13 @@ export interface DatasetConfig {
   flip_x: boolean;
   flip_y: boolean;
   num_repeats?: number;
+  kto_label?: 'liked' | 'disliked';
+  loss_multiplier?: number;
   control_path_1?: string | null;
   control_path_2?: string | null;
   control_path_3?: string | null;
+  anchor_path?: string | null;
+  multipoint_images?: { point_id: string; folder_path: string }[];
   auto_frame_count?: boolean;
 }
 
@@ -247,6 +252,7 @@ export interface ModelConfig {
   layer_offloading_text_encoder_percent?: number;
   assistant_lora_path?: string;
   text_encoder_path?: string;
+  vae_path?: string;
   inference_lora_path?: string;
   unconditional_lora_path?: string;
   compile?: boolean;
@@ -356,7 +362,34 @@ export type FizgigPromptEntry =
   | { kind: 'simple'; prompt: string }
   | ({ kind: 'specific' } & FizgigPromptTriplet);
 
+export interface FizgigAnchorPrompt {
+  prompt: string;
+  negative_prompt?: string;
+}
+
+export interface FizgigSliderPoint {
+  id: string;
+  strength: number;
+  prefix: string;
+  negative_prefix: string;
+}
+
+export type FizgigMultipointEntry =
+  | { kind: 'simple'; prompt: string }
+  | { kind: 'specific'; neutral_prompt: string; neutral_negative_prompt: string;
+      targets: { point_id: string; prompt: string; negative_prompt: string }[] };
+
+export interface FizgigMultipointConfig {
+  points: FizgigSliderPoint[];
+  neutral_negative_prefix: string;
+  prompt_entries: FizgigMultipointEntry[];
+}
+
 export interface FizgigSliderConfig {
+  multipoint?: boolean;
+  multipoint_config?: FizgigMultipointConfig;
+  anchor_prompts?: FizgigAnchorPrompt[];
+  preservation_weight?: number;
   diff_weight?: number;
   positive_prefix?: string;
   negative_prefix?: string;
@@ -385,6 +418,41 @@ export interface FlowDPOConfig {
   sft_weight: number;
 }
 
+export interface DiffusionKTOConfig {
+  beta: number;
+  liked_weight: number;
+  disliked_weight: number;
+  reference_estimator: 'batch_mean' | 'score_window';
+  score_window_size: number;
+}
+
+export interface GuidanceDistillationConfig {
+  teacher_cfg_scale: number;
+  negative_prompt: string;
+  objective: 'full_guidance' | 'negative_only';
+}
+
+export interface SliderSpaceConfig {
+  discovery_mode: 'provided' | 'generated' | 'both';
+  discovery_datasets: { folder_path: string; default_caption?: string }[];
+  discovery_buckets: boolean;
+  concept_prompts: string[];
+  num_directions: number;
+  discovery_samples: number;
+  resolution: number;
+  discovery_steps: number;
+  cfg_scale: number;
+  negative_prompt: string;
+  seed: number;
+  feature_encoder: string;
+  feature_device: 'cpu' | 'cuda';
+  loss_weight: number;
+  preview_direction: number;
+  preview_strength: number;
+  preview_auto?: boolean;
+  preview_auto_strengths?: string;
+}
+
 export interface ProcessConfig {
   type: string;
   sqlite_db_path?: string;
@@ -396,6 +464,9 @@ export interface ProcessConfig {
   slider?: SliderConfig;
   fizgig_slider?: FizgigSliderConfig;
   flow_dpo?: FlowDPOConfig;
+  diffusion_kto?: DiffusionKTOConfig;
+  guidance_distillation?: GuidanceDistillationConfig;
+  sliderspace?: SliderSpaceConfig;
   save: SaveConfig;
   datasets: DatasetConfig[];
   train: TrainConfig;

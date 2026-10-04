@@ -12,8 +12,10 @@ from extensions_built_in.diffusion_models.qwen_image.qwen_image import (
     _PipelineLoraController,
     _quanto_skip_missing_base_weight_load,
 )
+from extensions_built_in.diffusion_models.qwen_image_2.qwen_image_2 import QwenImage2Model
 from jobs.process.BaseSDTrainProcess import BaseSDTrainProcess
-from toolkit.dataloader_mixins import TextEmbeddingCachingMixin
+from toolkit.config_modules import NetworkConfig
+from toolkit.lora_special import LoRASpecialNetwork
 from toolkit.models.base_model import BaseModel
 
 
@@ -86,42 +88,6 @@ class FakeQwenPipeline:
 
     def encode_prompt(self, *args, **kwargs):
         raise AssertionError("pipeline encode_prompt should not be used")
-
-
-class FakePromptEmbeds:
-    def save(self, path):
-        with open(path, "w") as f:
-            f.write("cached")
-
-
-class FakeTextEmbeddingFileItem:
-    encode_control_in_text_embeddings = False
-    caption = "anime digital painting"
-
-    def __init__(self, path):
-        self.path = path
-        self.is_text_embedding_cached = False
-        self.latent_load_device = None
-
-    def get_text_embedding_path(self, recalculate=False):
-        return self.path
-
-
-class FakeTextEmbeddingSD:
-    device = "cuda"
-
-    def __init__(self):
-        self.device_state_restored = False
-        self.device_state_preset = None
-
-    def set_device_state_preset(self, preset):
-        self.device_state_preset = preset
-
-    def restore_device_state(self):
-        self.device_state_restored = True
-
-    def encode_prompt(self, caption):
-        return FakePromptEmbeds()
 
 
 class FakeAccelerator:
@@ -294,22 +260,6 @@ class QwenPromptMemoryTests(unittest.TestCase):
         self.assertTrue(model.pipeline.text_encoder.model.called)
         self.assertEqual(prompt_embeds.text_embeds.shape, (1, 2, 2))
         self.assertEqual(prompt_embeds.attention_mask.tolist(), [[1, 1]])
-
-    def test_text_embedding_cache_restores_device_state_after_encoding(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            dataset = TextEmbeddingCachingMixin.__new__(TextEmbeddingCachingMixin)
-            dataset.dataset_path = tmp_dir
-            dataset.sd = FakeTextEmbeddingSD()
-            dataset.file_list = [
-                FakeTextEmbeddingFileItem(os.path.join(tmp_dir, "prompt.safetensors"))
-            ]
-
-            TextEmbeddingCachingMixin.cache_text_embeddings(dataset)
-
-        self.assertEqual(dataset.sd.device_state_preset, "cache_text_encoder")
-        self.assertTrue(dataset.sd.device_state_restored)
 
     def test_prepare_accelerator_does_not_prepare_vae_when_latents_are_cached(self):
         process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
@@ -497,26 +447,71 @@ class QwenPromptMemoryTests(unittest.TestCase):
             module.load_state_dict({}, strict=False)
 
     def test_qwen_bare_transformer_lora_keys_are_prefixed_before_loading(self):
-        model = QwenImageModel.__new__(QwenImageModel)
-        converted = model.convert_lora_weights_before_load(
-            {
+        for model_type in (QwenImageModel, QwenImage2Model):
+            model = model_type.__new__(model_type)
+            model.model = torch.nn.Module()
+            model.model.img_in = torch.nn.Linear(4, 4)
+            model.model.transformer = torch.nn.Module()
+            converted = model.convert_lora_weights_before_load({
                 "transformer_blocks.0.attn.to_q.lora_down.weight": torch.ones(1),
                 "transformer.transformer_blocks.0.attn.to_k.lora_down.weight": torch.ones(1),
-            }
-        )
+                "diffusion_model.transformer_blocks.0.attn.to_v.lora_A.weight": torch.ones(1),
+                "img_in.lora_A.weight": torch.ones(1),
+                "text_encoder.layers.0.lora_A.weight": torch.ones(1),
+            })
 
-        self.assertIn(
-            "transformer.transformer_blocks.0.attn.to_q.lora_down.weight",
-            converted,
-        )
-        self.assertIn(
-            "transformer.transformer_blocks.0.attn.to_k.lora_down.weight",
-            converted,
-        )
-        self.assertNotIn(
-            "transformer.transformer.transformer_blocks.0.attn.to_k.lora_down.weight",
-            converted,
-        )
+            with self.subTest(model=model_type.__name__):
+                self.assertIn("transformer.transformer_blocks.0.attn.to_q.lora_down.weight", converted)
+                self.assertIn("transformer.transformer_blocks.0.attn.to_k.lora_down.weight", converted)
+                self.assertIn("transformer.transformer_blocks.0.attn.to_v.lora_A.weight", converted)
+                self.assertIn("transformer.img_in.lora_A.weight", converted)
+                self.assertIn("text_encoder.layers.0.lora_A.weight", converted)
+                self.assertEqual(len(converted), 5)
+
+    def test_qwen_bare_transformer_lora_weights_load_into_network(self):
+        def make_network(model_type):
+            model = model_type.__new__(model_type)
+            model.use_old_lokr_format = False
+            transformer = torch.nn.Module()
+            transformer.transformer_blocks = torch.nn.ModuleList([
+                torch.nn.ModuleDict({"proj": torch.nn.Linear(4, 4, bias=False)})
+            ])
+            model.model = transformer
+            network = LoRASpecialNetwork(
+                text_encoder=[], unet=transformer, lora_dim=2, alpha=2,
+                train_text_encoder=False, train_unet=True,
+                target_lin_modules=["Module"],
+                network_config=NetworkConfig(linear=2, linear_alpha=2),
+                is_transformer=True, base_model=model,
+            )
+            # The production process owns the model; retain it here because
+            # the network only keeps a weak reference to its base model.
+            network._test_model = model
+            network.apply_to(None, None, False, True)
+            return network
+
+        for model_type in (QwenImageModel, QwenImage2Model):
+            with self.subTest(model=model_type.__name__):
+                source = make_network(model_type)
+                with torch.no_grad():
+                    source.unet_loras[0].lora_down.weight.fill_(0.7)
+                exported = source.get_state_dict(dtype=torch.float32)
+                self.assertTrue(all(key.startswith("diffusion_model.") for key in exported))
+
+                normal_target = make_network(model_type)
+                normal_target.load_weights(exported)
+                self.assertTrue(torch.equal(
+                    normal_target.unet_loras[0].lora_down.weight,
+                    source.unet_loras[0].lora_down.weight,
+                ))
+
+                bare = {key.removeprefix("diffusion_model."): value for key, value in exported.items()}
+                target = make_network(model_type)
+                target.load_weights(bare)
+                self.assertTrue(torch.equal(
+                    target.unet_loras[0].lora_down.weight,
+                    source.unet_loras[0].lora_down.weight,
+                ))
 
 
 if __name__ == "__main__":

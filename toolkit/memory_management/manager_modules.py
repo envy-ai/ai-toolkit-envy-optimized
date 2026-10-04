@@ -659,6 +659,35 @@ class BaseLayerMemoryManager:
         self.module: nn.Module = module
         self.manager: "MemoryManager" = manager
 
+    def _get_base_forward(self):
+        self._forward_owner, self._forward_attribute = self.module, 'forward'
+        current = self.module.forward
+        if hasattr(self.module, "ara_lora_ref"):
+            self._forward_owner = self.module.ara_lora_ref()
+            self._forward_attribute = 'org_forward'
+            current = self._forward_owner.org_forward
+        seen = set()
+        # If streaming is attached after adapters, wrap their BASE call rather
+        # than bypassing an outer adapter (or streaming its trainable factors).
+        while True:
+            adapter = getattr(current, '__self__', None)
+            wrapped = getattr(adapter, 'org_module', ())
+            if (adapter is None or id(adapter) in seen
+                    or not isinstance(wrapped, (list, tuple))
+                    or not wrapped or wrapped[0] is not self.module
+                    or not hasattr(adapter, 'org_forward')):
+                break
+            seen.add(id(adapter))
+            self._forward_owner, self._forward_attribute = adapter, 'org_forward'
+            current = adapter.org_forward
+        return current
+
+    def _install_forward(self, forward):
+        # Keep the exact callable so detach can splice it out of an adapter's
+        # org_forward chain without replacing the outer LoRA/DoRA/LoHa hooks.
+        self._managed_forward = forward
+        setattr(self._forward_owner, self._forward_attribute, forward)
+
     @classmethod
     def attach(cls, module: nn.Module, manager: "MemoryManager"):
         if hasattr(module, "_layer_memory_manager"):
@@ -716,11 +745,7 @@ class LinearLayerMemoryManager(BaseLayerMemoryManager):
         _move_params_to_cpu_and_pin(self.module)
 
         # 2) Hijack forward
-        if hasattr(self.module, "ara_lora_ref"):
-            # ARA, we need to replace the lora forward
-            self._original_forward = getattr(self.module.ara_lora_ref(), "org_forward")
-        else:
-            self._original_forward = getattr(self.module, "forward")
+        self._original_forward = self._get_base_forward()
 
         def _mm_forward(x, *args, **kwargs):
             # ensure we only use expected signature (Linear: x)
@@ -735,10 +760,7 @@ class LinearLayerMemoryManager(BaseLayerMemoryManager):
             # NOTE: do NOT move params to device here; autograd fn streams & bounces them
             return _BouncingLinearFn.apply(x, weight_cpu, bias_cpu, device)
 
-        if hasattr(self.module, "ara_lora_ref"):
-            self.module.ara_lora_ref().org_forward = _mm_forward
-        else:
-            self.module.forward = _mm_forward
+        self._install_forward(_mm_forward)
         
         self.module._memory_management_device = self.manager.process_device
 
@@ -781,11 +803,7 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
                 bias.data = _ensure_cpu_pinned(bias.data).detach()
 
         # 2) Hijack forward
-        if hasattr(self.module, "ara_lora_ref"):
-            # ARA, we need to replace the lora forward
-            self._original_forward = getattr(self.module.ara_lora_ref(), "org_forward")
-        else:
-            self._original_forward = getattr(self.module, "forward")
+        self._original_forward = self._get_base_forward()
 
         # Stream/event management, record_stream, and the temporary buffer swap
         # must run eagerly. Dynamo otherwise traces them into a compiled block,
@@ -874,10 +892,7 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
                 _release_forward_slot(state, idx)
             return out
 
-        if hasattr(self.module, "ara_lora_ref"):
-            self.module.ara_lora_ref().org_forward = _mm_forward
-        else:
-            self.module.forward = _mm_forward
+        self._install_forward(_mm_forward)
 
         self.module._memory_management_device = self.manager.process_device
 
@@ -912,11 +927,7 @@ class ConvLayerMemoryManager(BaseLayerMemoryManager):
         groups = self.module.groups
 
         # 2) Hijack forward
-        if hasattr(self.module, "ara_lora_ref"):
-            # ARA, we need to replace the lora forward
-            self._original_forward = getattr(self.module.ara_lora_ref(), "org_forward")
-        else:
-            self._original_forward = getattr(self.module, "forward")
+        self._original_forward = self._get_base_forward()
 
         def _mm_forward(x, *args, **kwargs):
             # Support the typical Conv2d(x) call; if user passes uncommon extras, fallback.
@@ -931,9 +942,6 @@ class ConvLayerMemoryManager(BaseLayerMemoryManager):
                 x, weight_cpu, bias_cpu, device, stride, padding, dilation, groups
             )
 
-        if hasattr(self.module, "ara_lora_ref"):
-            self.module.ara_lora_ref().org_forward = _mm_forward
-        else:
-            self.module.forward = _mm_forward
+        self._install_forward(_mm_forward)
         
         self.module._memory_management_device = self.manager.process_device

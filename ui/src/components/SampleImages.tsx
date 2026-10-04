@@ -13,6 +13,7 @@ import classNames from 'classnames';
 import { FaCaretDown, FaCaretUp } from 'react-icons/fa';
 import SampleImageViewer from './SampleImageViewer';
 import { openConfirm } from './ConfirmModal';
+import { groupSliderSpaceSamples } from '@/app/jobs/new/sliderspace';
 
 interface SampleImagesMenuProps {
   job?: Job | null;
@@ -97,12 +98,13 @@ export default function SampleImages({ job }: SampleImagesProps) {
 
   // Group samples into rows of `numSamples` for the virtualized list — one row per sample iteration.
   const rows = useMemo(() => {
+    if (JSON.parse(job.job_config).config.process[0].type === 'sliderspace') return groupSliderSpaceSamples(sampleImages);
     const out: string[][] = [];
     for (let i = 0; i < sampleImages.length; i += numSamples) {
       out.push(sampleImages.slice(i, i + numSamples));
     }
     return out;
-  }, [sampleImages, numSamples]);
+  }, [sampleImages, numSamples, job.job_config]);
 
   const handleCardClick = useCallback(
     (sample: string, e: React.MouseEvent) => {

@@ -12,6 +12,7 @@ import { isVideo, isAudio, isText, encodeFilePathForUrl } from '@/utils/basic';
 import AudioPlayer from './AudioPlayer';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 import BoundingBoxOverlay, { parseBoundingBoxes } from './BoundingBoxOverlay';
+import { adjacentSliderSpaceSample, groupSliderSpaceSamples, sampleFilenameInfo, sliderSpaceSampleLabel } from '@/app/jobs/new/sliderspace';
 
 interface Props {
   imgPath: string | null; // current image path
@@ -57,33 +58,7 @@ export default function SampleImageViewer({
 
   const imgInfo = useMemo(() => {
     // handle windows C:\\Apps\\AI-Toolkit\\AI-Toolkit\\output\\LoRA-Name\\samples\\1763563000704__000004000_0.jpg
-    const ii = { filename: '', step: 0, promptIdx: 0 };
-    if (imgPath) {
-      // handle windows
-      let filename: string | null = null;
-      if (imgPath.includes('\\')) {
-        const parts = imgPath.split('\\');
-        filename = parts[parts.length - 1];
-      } else {
-        filename = imgPath.split('/').pop() || null;
-      }
-      if (!filename) {
-        console.error('Filename could not be determined from imgPath:', imgPath);
-        return ii;
-      }
-      ii.filename = filename;
-      const parts = filename
-        .split('.')[0]
-        .split('_')
-        .filter(p => p !== '');
-      if (parts.length === 3) {
-        ii.step = parseInt(parts[1]);
-        ii.promptIdx = parseInt(parts[2]);
-      } else {
-        console.error('Unexpected filename format for sample image:', filename);
-      }
-    }
-    return ii;
+    return sampleFilenameInfo(imgPath ?? '');
   }, [imgPath]);
 
   const setImageAtIndex = useCallback(
@@ -100,33 +75,49 @@ export default function SampleImageViewer({
     return sampleImages.findIndex(img => img === imgPath);
   }, [imgPath, sampleImages]);
 
+  const sliderSpaceRows = useMemo(() => sampleImages.some(path => sliderSpaceSampleLabel(path))
+    ? groupSliderSpaceSamples(sampleImages) : null, [sampleImages]);
+  const moveSliderSpace = useCallback((row: number, column: number) => {
+    if (!sliderSpaceRows || !imgPath) return false;
+    const next = adjacentSliderSpaceSample(sliderSpaceRows, imgPath, row, column);
+    if (next) {
+      setShowingControlIdx(null);
+      onChange(next);
+    }
+    return true;
+  }, [sliderSpaceRows, imgPath, onChange]);
+
   const handleArrowUp = useCallback(() => {
+    if (moveSliderSpace(-1, 0)) return;
     if (currentIndex === -1) return;
     setImageAtIndex(currentIndex - numSamples);
-  }, [numSamples, currentIndex, setImageAtIndex]);
+  }, [numSamples, currentIndex, setImageAtIndex, moveSliderSpace]);
 
   const handleArrowDown = useCallback(() => {
+    if (moveSliderSpace(1, 0)) return;
     if (currentIndex === -1) return;
     setImageAtIndex(currentIndex + numSamples);
-  }, [numSamples, currentIndex, setImageAtIndex]);
+  }, [numSamples, currentIndex, setImageAtIndex, moveSliderSpace]);
 
   const handleArrowLeft = useCallback(() => {
+    if (moveSliderSpace(0, -1)) return;
     if (currentIndex === -1) return;
     if (imgInfo.promptIdx === 0) return;
     const minIdx = currentIndex - imgInfo.promptIdx;
     const nextIdx = currentIndex - 1;
     if (nextIdx < minIdx) return;
     setImageAtIndex(nextIdx);
-  }, [sampleImages, currentIndex, imgInfo.promptIdx, setImageAtIndex]);
+  }, [sampleImages, currentIndex, imgInfo.promptIdx, setImageAtIndex, moveSliderSpace]);
 
   const handleArrowRight = useCallback(() => {
+    if (moveSliderSpace(0, 1)) return;
     if (currentIndex === -1) return;
     const stepMinIdx = currentIndex - imgInfo.promptIdx;
     const maxIdx = stepMinIdx + numSamples - 1;
     const nextIdx = currentIndex + 1;
     if (nextIdx > maxIdx) return;
     setImageAtIndex(nextIdx);
-  }, [sampleImages, currentIndex, imgInfo.promptIdx, setImageAtIndex]);
+  }, [sampleImages, currentIndex, imgInfo.promptIdx, setImageAtIndex, moveSliderSpace]);
 
   const handleDelete = useCallback(() => {
     if (!imgPath) return;
@@ -429,6 +420,7 @@ export default function SampleImageViewer({
               )}
 
               <div className="text-xs">
+                {imgPath && sliderSpaceSampleLabel(imgPath) && <div>{sliderSpaceSampleLabel(imgPath)}</div>}
                 <div>
                   <span className="text-gray-400">Step:</span> {imgInfo.step.toLocaleString()}
                 </div>

@@ -166,7 +166,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
         <div className="mt-4">{isGPUInfoLoaded && gpuList.length > 0 && <GPUWidget gpu={gpuList[0]} />}</div>
         {jobType === 'train' && (
           <div className="mt-4">
-            <FilesWidget jobID={job.id} jobName={job.name} />
+            <FilesWidget jobID={job.id} jobName={job.name} isSliderSpace={JSON.parse(job.job_config).config.process[0].type === 'sliderspace'} />
           </div>
         )}
       </div>

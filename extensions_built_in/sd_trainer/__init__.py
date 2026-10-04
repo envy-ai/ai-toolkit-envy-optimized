@@ -58,7 +58,7 @@ class DiffusionTrainerExtension(Extension):
 
 class FizgigImageSliderExtension(Extension):
     uid = "fizgig_image_slider"
-    name = "Fizgig Image Slider (Qwen Image 2.1)"
+    name = "Fizgig Image Slider"
 
     @classmethod
     def get_process(cls):
@@ -68,7 +68,7 @@ class FizgigImageSliderExtension(Extension):
 
 class FizgigPromptSliderExtension(Extension):
     uid = "fizgig_prompt_slider"
-    name = "Fizgig Prompt Slider (Qwen Image 2.1)"
+    name = "Fizgig Prompt Slider"
 
     @classmethod
     def get_process(cls):
@@ -86,6 +86,47 @@ class QwenFlowDPOExtension(Extension):
         return QwenFlowDPOTrainer
 
 
+class QwenGuidanceDistillationExtension(Extension):
+    uid = "qwen_guidance_distillation"
+    name = "Qwen Image 2.1 Guidance Distillation (LoRA)"
+
+    @classmethod
+    def get_process(cls):
+        from .QwenGuidanceDistillationTrainer import QwenGuidanceDistillationTrainer
+        return QwenGuidanceDistillationTrainer
+
+
+class FlowDPOExtension(QwenFlowDPOExtension):
+    uid = 'flow_dpo'
+    name = 'Flow-DPO LoRA'
+
+
+class GuidanceDistillationExtension(QwenGuidanceDistillationExtension):
+    uid = 'guidance_distillation'
+    name = 'Guidance Distillation LoRA'
+
+
+class DiffusionKTOExtension(Extension):
+    uid = 'diffusion_kto'
+    name = 'Diffusion-KTO LoRA (experimental flow adaptation)'
+
+    @classmethod
+    def get_process(cls):
+        from .DiffusionKTOTrainer import DiffusionKTOTrainer
+        return DiffusionKTOTrainer
+
+
+# Semantic discovery directions, initially ordinary Qwen Image 2.1 LoRAs.
+class SliderSpaceExtension(Extension):
+    uid = 'sliderspace'
+    name = 'SliderSpace (LoRAs)'
+
+    @classmethod
+    def get_process(cls):
+        from .SliderSpaceTrainer import SliderSpaceTrainer
+        return SliderSpaceTrainer
+
+
 # for backwards compatability
 class TextualInversionTrainer(SDTrainerExtension):
     uid = "textual_inversion_trainer"
@@ -100,4 +141,9 @@ AI_TOOLKIT_EXTENSIONS = [
     FizgigImageSliderExtension,
     FizgigPromptSliderExtension,
     QwenFlowDPOExtension,
+    QwenGuidanceDistillationExtension,
+    FlowDPOExtension,
+    GuidanceDistillationExtension,
+    DiffusionKTOExtension,
+    SliderSpaceExtension,
 ]

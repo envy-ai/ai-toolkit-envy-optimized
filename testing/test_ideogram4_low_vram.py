@@ -134,6 +134,12 @@ class Ideogram4LowVramTests(unittest.TestCase):
                 self.device = None
                 self.dtype = None
 
+            @classmethod
+            def load_from_state_dict(cls, state_dict, dtype):
+                instance = cls(None)
+                instance.load_state_dict(state_dict)
+                return instance.to('cpu', dtype=dtype)
+
             def load_state_dict(self, state_dict):
                 self.state_dict_loaded = state_dict
 
@@ -151,6 +157,7 @@ class Ideogram4LowVramTests(unittest.TestCase):
 
         model = Ideogram4Model.__new__(Ideogram4Model)
         model.torch_dtype = torch.bfloat16
+        model.vae_torch_dtype = torch.bfloat16
         model.vae_device_torch = torch.device("cuda")
         model.model_config = SimpleNamespace(low_vram=True)
         model._status_update_hooks = []

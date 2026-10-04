@@ -3,6 +3,7 @@ import pathlib
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -117,6 +118,10 @@ def _install_krea_import_stubs(load_calls):
     )
     module("toolkit.lora_special", LoRASpecialNetwork=Stub)
     module("toolkit.models.base_model", BaseModel=object)
+    module('toolkit.models.v2._mixin', OstrisModelMixin=Stub)
+    module('toolkit.models.v2.vae.qwen_image', QwenImageVAE=Stub, QwenImageVAEHolderMixin=Stub)
+    module('toolkit.models.v2.text_encoders.qwen3_vl', Qwen3VLTextEncoder=Stub,
+           patch_qwen_vl_patch_embed=lambda *args, **kwargs: None)
     module("toolkit.basic", flush=lambda *args, **kwargs: None)
     module("toolkit.advanced_prompt_embeds", AdvancedPromptEmbeds=Stub)
     module(
@@ -153,20 +158,22 @@ def _install_krea_import_stubs(load_calls):
 
 
 def _load_krea_module(load_calls):
-    assistant = _install_krea_import_stubs(load_calls)
-    package_name = "extensions_built_in.diffusion_models.krea2"
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(REPO_ROOT / "extensions_built_in/diffusion_models/krea2")]
-    sys.modules[package_name] = package
-
-    spec = importlib.util.spec_from_file_location(
-        f"{package_name}.krea2",
-        REPO_ROOT / "extensions_built_in/diffusion_models/krea2/krea2.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module, assistant
+    # This test's lightweight import stubs must never replace real dependencies
+    # for subsequent Qwen/quantization tests in the same process.
+    with patch.dict(sys.modules):
+        assistant = _install_krea_import_stubs(load_calls)
+        package_name = "extensions_built_in.diffusion_models.krea2"
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(REPO_ROOT / "extensions_built_in/diffusion_models/krea2")]
+        sys.modules[package_name] = package
+        spec = importlib.util.spec_from_file_location(
+            f"{package_name}.krea2",
+            REPO_ROOT / "extensions_built_in/diffusion_models/krea2/krea2.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module, assistant
 
 
 class Krea2InferenceLoraTests(unittest.TestCase):
@@ -177,15 +184,18 @@ class Krea2InferenceLoraTests(unittest.TestCase):
         model.model_config = types.SimpleNamespace(
             inference_lora_path="/tmp/krea2_raw_to_turbo_r256.safetensors"
         )
+        training_assistant = object()
+        model.assistant_lora = training_assistant
 
         model._load_inference_lora()
 
-        self.assertIs(model.assistant_lora, assistant)
+        self.assertIs(model.inference_lora_network, assistant)
+        self.assertIs(model.assistant_lora, training_assistant)
         self.assertEqual(
             load_calls,
             [("/tmp/krea2_raw_to_turbo_r256.safetensors", model)],
         )
-        self.assertFalse(model.assistant_lora.is_active)
+        self.assertFalse(model.inference_lora_network.is_active)
 
 
 if __name__ == "__main__":

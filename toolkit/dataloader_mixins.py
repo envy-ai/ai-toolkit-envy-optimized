@@ -1212,8 +1212,13 @@ class ControlFileItemDTOMixin:
         
         for control_path in control_path_list:
             try:
-                img = Image.open(control_path)
-                img = exif_transpose(img)
+                from toolkit.control_image import KREA_EDIT_CONTROL_PRESENTATION, load_control_rgb
+                if (not self.load_rgba and getattr(self, 'text_embedding_control_presentation', None)
+                        == KREA_EDIT_CONTROL_PRESENTATION):
+                    img = load_control_rgb(control_path, self.dataset_config.control_transparent_color)
+                else:
+                    img = Image.open(control_path)
+                    img = exif_transpose(img)
 
                 if self.load_rgba:
                     # keep the alpha instead of flattening it; sources without
@@ -1871,7 +1876,9 @@ class LatentCachingFileItemDTOMixin:
             ("latent_version", self.latent_version),
         ])
         if (getattr(self.dataset_config, 'fizgig_slider_pair', False)
-                or getattr(self.dataset_config, 'flow_dpo_pair', False)):
+                or getattr(self.dataset_config, 'fizgig_slider_anchor', False)
+                or getattr(self.dataset_config, 'flow_dpo_pair', False)
+                or getattr(self.dataset_config, 'kto_label', None) in ('liked', 'disliked')):
             item["source_file_identity_v1"] = _text_embedding_file_identity(self.path)
         is_video = False
         # when adding items, do it after so we dont change old latents
@@ -2285,6 +2292,14 @@ class TextEmbeddingFileItemDTOMixin:
         if self.encode_control_in_text_embeddings and self.control_path is not None:
             item["control_path"] = self.control_path
             item["control_file_identity_v1"] = _text_embedding_file_identities(self.control_path)
+            presentation = getattr(self, 'text_embedding_control_presentation', None)
+            if presentation is not None:
+                # Opt-in for new specialized Krea edit caches only. Changing
+                # the alpha background changes both VLM and latent references.
+                item['specialized_control_presentation'] = {
+                    'version': presentation,
+                    'transparent_color': list(self.dataset_config.control_transparent_color),
+                }
             if getattr(self, "cache_processed_control_text_embeddings", False):
                 # The joint text/image sequence depends on the presented
                 # reference dimensions, not just its source path.  Include the
@@ -2715,9 +2730,6 @@ class TextEmbeddingCachingMixin:
                             del prompt_embeds
                 file_item.is_text_embedding_cached = True
                 i += 1
-            # restore device state
-            # if did_move:
-            #     self.sd.restore_device_state()
 
 
 class CLIPCachingMixin:

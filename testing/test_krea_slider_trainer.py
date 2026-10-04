@@ -99,10 +99,9 @@ class KreaSliderTrainerTests(unittest.TestCase):
         self.assertTrue(torch.equal(expanded, torch.tensor([157] * 12)))
 
     def test_slider_config_defaults_to_single_action_batches(self):
-        repo_root = Path(__file__).resolve().parents[1]
-        config_source = (repo_root / "toolkit/config_modules.py").read_text()
-
-        self.assertIn("kwargs.get('batch_full_slide', False)", config_source)
+        from toolkit.config_modules import SliderConfig
+        self.assertFalse(SliderConfig().batch_full_slide)
+        self.assertTrue(SliderConfig(batch_full_slide=True).batch_full_slide)
 
     def test_slider_latent_noise_uses_krea_latent_shape(self):
         try:

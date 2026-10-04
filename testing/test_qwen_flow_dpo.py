@@ -52,6 +52,7 @@ class QwenFlowDPOTests(unittest.TestCase):
             with patch.object(DiffusionTrainer, "__init__", return_value=None):
                 trainer = QwenFlowDPOTrainer(0, None, config)
             self.assertEqual(trainer.dpo_beta, 1.0)
+            self.assertTrue(trainer.needs_vae_at_train_time)
             self.assertEqual(dataset["unconditional_path"], str(lose))
             self.assertEqual(dataset["control_path_2"], str(source))
             self.assertNotIn("control_path_1", dataset)
@@ -86,6 +87,22 @@ class QwenFlowDPOTests(unittest.TestCase):
             }
             with self.assertRaisesRegex(ValueError, "one edit source"):
                 QwenFlowDPOTrainer(0, None, config)
+
+    def test_invalid_dataset_loss_weights_fail_before_base_initialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            win, lose = [Path(directory) / name for name in ('win', 'lose')]
+            for folder in (win, lose):
+                folder.mkdir()
+                Image.new('RGB', (64, 64)).save(folder / 'a.png')
+            for weight in (-1., float('nan'), float('inf')):
+                config = {'model': {'arch': 'qwen_image_2'}, 'network': {'type': 'lora'},
+                    'train': {'noise_scheduler': 'flowmatch', 'cache_text_embeddings': True},
+                    'datasets': [{'folder_path': str(win), 'control_path_1': str(lose),
+                                  'cache_latents_to_disk': True, 'loss_multiplier': weight}]}
+                with self.subTest(weight=weight), patch.object(DiffusionTrainer, '__init__') as base, \
+                     self.assertRaisesRegex(ValueError, 'Dataset Loss Weight'):
+                    QwenFlowDPOTrainer(0, None, config)
+                base.assert_not_called()
 
     def test_preferred_latent_cache_tracks_file_mtime(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -152,12 +152,14 @@ export interface NumberInputProps extends InputProps {
   onChange: (value: number | null) => void;
   min?: number;
   max?: number;
+  step?: number | 'any';
+  clampOnBlur?: boolean;
   // when true, clearing the input calls onChange(null) instead of being ignored
   allowEmpty?: boolean;
 }
 
 export const NumberInput = (props: NumberInputProps) => {
-  const { label, value, onChange, placeholder, required, min, max, allowEmpty, docKey = null } = props;
+  const { label, value, onChange, placeholder, required, min, max, allowEmpty, step = 'any', clampOnBlur = true, docKey = null } = props;
   let { doc } = props;
   if (!doc && docKey) {
     doc = getDoc(docKey);
@@ -210,6 +212,7 @@ export const NumberInput = (props: NumberInputProps) => {
           }
         }}
         onBlur={() => {
+          if (!clampOnBlur) return;
           const numValue = Number(inputValue);
           if (inputValue === '' || isNaN(numValue)) {
             return;
@@ -231,7 +234,7 @@ export const NumberInput = (props: NumberInputProps) => {
         required={required}
         min={min}
         max={max}
-        step="any"
+        step={step}
       />
     </div>
   );

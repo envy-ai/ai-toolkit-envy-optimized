@@ -763,3 +763,4 @@ class QwenImageModel(QwenImageVAEHolderMixin, BaseModel):
         return ["transformer_blocks"]
 
     lora_keys_use_comfy_prefix = True
+    lora_accept_bare_transformer_keys = True

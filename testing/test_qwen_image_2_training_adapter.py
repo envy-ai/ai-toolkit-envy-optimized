@@ -5,11 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from toolkit.assistant_lora import load_assistant_lora_from_path
 from toolkit.config_modules import ModelConfig, NetworkConfig
 from toolkit.lora_special import LoRASpecialNetwork
+from toolkit.models.sliderspace_network import SliderSpaceNetwork
 from extensions_built_in.diffusion_models.qwen_image_2.qwen_image_2 import QwenImage2Model
 
 
@@ -81,6 +82,48 @@ class QwenImage2TrainingAdapterTests(unittest.TestCase):
             self.assertTrue(any(param.grad is not None for param in trainable.parameters()))
             self.assertTrue(all(param.grad is None for param in assistant.parameters()))
             self.assertEqual(len(trainable.unet_loras), 1)
+
+    def test_sliderspace_bank_trains_and_exports_only_directions_beside_frozen_helper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'helper.safetensors'
+            prefix = 'transformer.transformer_blocks.0.attn.to_q'
+            save_file({prefix + '.lora_A.weight': torch.ones(1, 2),
+                       prefix + '.lora_B.weight': torch.ones(2, 1)}, str(path))
+            model = self.make_model()
+            model.model = QwenImage21Transformer2DModel().requires_grad_(False)
+            model.pipeline, model.text_encoder = SimpleNamespace(), []
+            helper = load_assistant_lora_from_path(str(path), model, strict=True)
+            helper_before = {key: value.clone() for key, value in helper.state_dict().items()}
+            bank = SliderSpaceNetwork([], model.model, num_directions=2, lora_dim=1, alpha=1,
+                train_unet=True, train_text_encoder=False, network_type='lora',
+                network_config=NetworkConfig(linear=1, linear_alpha=1, transformer_only=True),
+                transformer_only=True, is_transformer=True,
+                target_lin_modules=model.target_lora_modules, base_model=model)
+            bank.apply_to([], model.model, False, True)
+            bank.force_to('cpu', torch.float32)
+            bank._update_torch_multiplier()
+            optimizer = torch.optim.SGD(bank.prepare_optimizer_params(.01, .01, .01), lr=.01)
+            optimized = {id(parameter) for group in optimizer.param_groups for parameter in group['params']}
+            self.assertTrue(optimized.isdisjoint({id(parameter) for parameter in helper.parameters()}))
+            inputs = torch.ones(1, 2)
+            bank.is_active = False
+            torch.testing.assert_close(model.model(inputs), torch.full((1, 2), 2.))
+            bank.select_direction(1)
+            bank.is_active = True
+            model.model(inputs).square().sum().backward()
+            self.assertTrue(any(parameter.grad is not None for parameter in bank.directions[1].parameters()))
+            self.assertTrue(all(parameter.grad is None for parameter in bank.directions[0].parameters()))
+            self.assertTrue(all(parameter.grad is None for parameter in helper.parameters()))
+            optimizer.step()
+            for key, value in helper.state_dict().items():
+                torch.testing.assert_close(value, helper_before[key])
+            self.assertTrue(helper.is_active)
+            export = Path(directory) / 'direction.safetensors'
+            bank.save_weights(str(export), dtype=torch.float32)
+            exported = load_file(str(export))
+            self.assertFalse(any(key.startswith('directions.') for key in exported))
+            torch.testing.assert_close(exported['diffusion_model.transformer_blocks.0.attn.to_q.lora_B.weight'],
+                                       bank.directions[1].unet_loras[0].lora_up.weight)
 
     def test_load_model_uses_external_encoder_and_loads_assistant(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -43,6 +44,8 @@ DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH = (
 DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH = (
     "config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk"
 )
+DEFAULT_COMFY_ANIMA_WORKFLOW_PATH = 'config/comfy_templates/anima_lora_sample.json.njk'
+DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH = 'config/comfy_templates/ideogram4_lora_sample.json.njk'
 NUNJUCKS_RENDERER_PATH = "ui/scripts/render_comfy_template.mjs"
 
 
@@ -79,6 +82,11 @@ class ComfySampleRequest:
     training_lora_strength: float = 1.0
     inference_lora_absolute_path: str = ""
     negative_prompt: str = ""
+    model_arch: str = ""
+    model_kwargs: Optional[dict] = None
+    specialized_flow: bool = False
+    model_dtype: str = 'bfloat16'
+    control_background: Optional[List[int]] = None
 
 
 @dataclass
@@ -110,6 +118,11 @@ class ComfyBatchSampleRequest:
     training_lora_strength: float = 1.0
     inference_lora_absolute_path: str = ""
     negative_prompt: str = ""
+    model_arch: str = ""
+    model_kwargs: Optional[dict] = None
+    specialized_flow: bool = False
+    model_dtype: str = 'bfloat16'
+    control_background: Optional[List[int]] = None
 
 
 def _minimax_h3_sample_dimensions(width: int, height: int) -> tuple[int, int]:
@@ -181,9 +194,47 @@ def _training_lora_context(training_lora_filename: str, training_lora_path: str)
 
 
 def build_template_context(request: Any) -> Dict[str, Any]:
+    kwargs = request.model_kwargs or {}
+    krea_native_preview = request.specialized_flow and request.model_arch == 'krea2'
+    krea_context = {'krea_native_preview': krea_native_preview, 'krea_native_sigmas': ''}
+    if krea_native_preview:
+        import math
+        import torch
+        from toolkit.flow_training import FlowTrainingProfile
+        if (type(request.steps) is not int or request.steps < 1
+                or request.width < 16 or request.height < 16 or request.width % 16 or request.height % 16):
+            raise ValueError('Specialized Krea previews require positive steps and dimensions divisible by 16')
+        profile = FlowTrainingProfile.from_model_config({'arch': 'krea2', 'model_kwargs': kwargs})
+        mu = profile.shift(request.height // 8, request.width // 8)
+        grid = torch.linspace(1, 0, request.steps + 1)
+        shifted = math.exp(mu) / (math.exp(mu) + (1.0 / grid - 1.0))
+        if not torch.isfinite(shifted).all():
+            raise ValueError('Krea preview schedule produced nonfinite sigmas')
+        seeds = request.seeds if isinstance(request, ComfyBatchSampleRequest) else [request.seed]
+        if any(type(seed) is not int or not 0 <= seed <= 2 ** 64 - 1 for seed in seeds):
+            raise ValueError('Specialized Krea previews require unsigned 64-bit integer seeds')
+        # JSON numbers pass through JavaScript in the template renderer. Keep
+        # seed literals as decimal strings there to avoid rounding above 2**53.
+        krea_context['krea_native_seed_literals'] = [str(seed) for seed in seeds]
+        krea_context['krea_native_seed_literal'] = str(seeds[0]) if seeds else '0'
+        # Installed ManualSigmas does not parse scientific notation. Fixed
+        # decimals preserve every float32 value, including subnormal schedules.
+        krea_context['krea_native_sigmas'] = ', '.join(
+            format(value, '.50f').rstrip('0').rstrip('.') or '0' for value in shifted.tolist())
+    ideogram_context = {
+        'ideogram_cfg_reference': kwargs.get('ideogram_cfg_reference', 'image_only'),
+        'ideogram_schedule_mu': kwargs.get('ideogram_schedule_mu', 0.0),
+        'ideogram_schedule_std': kwargs.get('ideogram_schedule_std', 1.75),
+    }
+    prompt_transform = lambda value: value
+    if request.model_arch == 'ideogram4':
+        from toolkit.ideogram_caption import digest_caption_string
+        prompt_transform = digest_caption_string
     if isinstance(request, ComfyBatchSampleRequest):
         if len(request.prompts) < 2:
             raise ValueError("ComfyUI batch sample requests require at least two prompts")
+        if len(request.seeds) != len(request.prompts):
+            raise ValueError('ComfyUI batch seed count must match the prompt count')
         control_images = request.control_images or []
         control_images_2 = request.control_images_2 or []
         control_images_3 = request.control_images_3 or []
@@ -202,8 +253,8 @@ def build_template_context(request: Any) -> Dict[str, Any]:
         h3_width, h3_height = _minimax_h3_sample_dimensions(request.width, request.height)
         lora_context = _training_lora_context(request.training_lora_filename, request.training_lora_path)
         return {
-            "prompts": request.prompts,
-            "negative_prompt": request.negative_prompt,
+            "prompts": [prompt_transform(prompt) for prompt in request.prompts],
+            "negative_prompt": prompt_transform(request.negative_prompt),
             "sample_count": len(request.prompts),
             "width": request.width,
             "height": request.height,
@@ -239,6 +290,8 @@ def build_template_context(request: Any) -> Dict[str, Any]:
             "has_control_image_2": bool(control_images_2),
             "has_control_image_3": bool(control_images_3),
             **lora_context,
+            **ideogram_context,
+            **krea_context,
         }
 
     training_lora_filename = request.training_lora_filename or os.path.basename(request.training_lora_path)
@@ -249,8 +302,10 @@ def build_template_context(request: Any) -> Dict[str, Any]:
         raise ValueError("ComfyUI control image 3 requires control image 2")
     h3_width, h3_height = _minimax_h3_sample_dimensions(request.width, request.height)
     return {
-        "prompt": request.prompt,
-        "negative_prompt": request.negative_prompt,
+        "prompt": prompt_transform(request.prompt),
+        "negative_prompt": prompt_transform(request.negative_prompt),
+        **ideogram_context,
+        **krea_context,
         "width": request.width,
         "height": request.height,
         "steps": request.steps,
@@ -411,10 +466,129 @@ def get_workflow_for_sample(
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if workflow_path_is_template(workflow_path):
-        return render_nunjucks_workflow(workflow_path, request)
+        workflow = render_nunjucks_workflow(workflow_path, request)
+        if workflow_path == DEFAULT_COMFY_WORKFLOW_PATH:
+            workflow = patch_krea_edit_preview(workflow, request)
+    else:
+        workflow = base_workflow if base_workflow is not None else load_workflow(workflow_path)
+        workflow = patch_workflow_for_sample(workflow, request)
+    validate_model_workflow(workflow, request)
+    return workflow
 
-    workflow = base_workflow if base_workflow is not None else load_workflow(workflow_path)
-    return patch_workflow_for_sample(workflow, request)
+
+def _krea_edit_preview_values(request):
+    kwargs = request.model_kwargs or {}
+    return {'prompt': request.prompt, 'negative_prompt': request.negative_prompt, 'cfg': request.cfg,
+        'width': request.width, 'height': request.height, 'dtype': request.model_dtype,
+        'background': json.dumps(request.control_background or [0, 0, 0]),
+        'vlm_max_pixels': kwargs.get('vlm_max_pixels', 384 ** 2),
+        'control_image_max_pixels': kwargs.get('control_image_max_pixels', 1024 ** 2),
+        'match_target_res': kwargs.get('match_target_res', False)}
+
+
+def patch_krea_edit_preview(workflow, request):
+    """Wire actual references, never paired preference targets, into Krea CFG."""
+    if not (request.specialized_flow and request.model_arch == 'krea2'
+            and (request.model_kwargs or {}).get('edit') and request.control_image):
+        return workflow
+    kwargs = request.model_kwargs or {}
+    conditioning = {'clip': workflow['1']['inputs']['clip'], 'vae': ['6', 0], **_krea_edit_preview_values(request)}
+    for i, image in enumerate((request.control_image, request.control_image_2, request.control_image_3), 1):
+        if image:
+            node_id = str(89 + i)
+            workflow[node_id] = {'class_type': 'LoadImage', 'inputs': {'image': image}}
+            conditioning[f'image{i}'], conditioning[f'mask{i}'] = [node_id, 0], [node_id, 1]
+    workflow['1'] = {'class_type': 'AIToolkitKreaEditConditioning', 'inputs': conditioning}
+    workflow.pop('7', None)
+    guider = workflow['81']['inputs']
+    if request.cfg > 1:
+        guider['negative'] = ['1', 1]
+    workflow['85'] = {'class_type': 'Krea2OstrisEditModelPatch',
+        'inputs': {'model': guider['model'], 'kv_cache': bool(kwargs.get('kv_cache', False))}}
+    guider['model'] = ['85', 0]
+    return workflow
+
+
+def validate_model_workflow(workflow, request):
+    """Reject incompatible CFG references and specialized native schedules."""
+    if request.model_arch == 'krea2' and request.specialized_flow:
+        if not any(node.get('class_type') == 'CLIPLoader' and node.get('inputs', {}).get('type') == 'krea2'
+                   for node in workflow.values()):
+            raise ValueError('Specialized Krea previews require a Krea text encoder workflow.')
+        samplers = [node.get('inputs', {}) for node in workflow.values() if node.get('class_type') == 'SamplerCustomAdvanced']
+        if len(samplers) != 1:
+            raise ValueError('Specialized Krea previews require the native ManualSigmas / SamplerCustomAdvanced schedule.')
+        def linked_node(link):
+            return workflow.get(str(link[0]), {}) if isinstance(link, list) and len(link) == 2 else {}
+        schedule = linked_node(samplers[0].get('sigmas'))
+        expected = build_template_context(request)['krea_native_sigmas']
+        # Strict supplied-template contract avoids silently running KSampler's
+        # distinct schedule. Custom templates can use the same native string.
+        if schedule.get('class_type') != 'ManualSigmas' or schedule.get('inputs', {}).get('sigmas') != expected:
+            raise ValueError('Specialized Krea Comfy schedule must match native practice generation.')
+        guider = linked_node(samplers[0].get('guider'))
+        expected_guider = 'CFGGuider' if request.cfg > 1 else 'BasicGuider'
+        if (guider.get('class_type') != expected_guider
+                or request.cfg > 1 and guider.get('inputs', {}).get('cfg') != request.cfg):
+            raise ValueError('Specialized Krea previews require standard CFG through CFGGuider.')
+        positive_key = 'positive' if request.cfg > 1 else 'conditioning'
+        positive = linked_node(guider.get('inputs', {}).get(positive_key))
+        edit = bool((request.model_kwargs or {}).get('edit') and getattr(request, 'control_image', None))
+        expected_encoder = 'AIToolkitKreaEditConditioning' if edit else 'CLIPTextEncode'
+        if positive.get('class_type') != expected_encoder:
+            raise ValueError(f'Specialized Krea {expected_guider} requires encoded positive text through {positive_key}.')
+        if edit:
+            if guider.get('inputs', {}).get(positive_key)[1] != 0:
+                raise ValueError('Krea edit positive CFG branch must use the positive conditioning output.')
+            patch = linked_node(guider.get('inputs', {}).get('model'))
+            if patch.get('class_type') != 'Krea2OstrisEditModelPatch':
+                raise ValueError('Specialized Krea edit previews require the reference-token model patch.')
+            inputs = positive.get('inputs', {})
+            if any(inputs.get(key) != value for key, value in _krea_edit_preview_values(request).items()):
+                raise ValueError('Krea edit preview prompts, CFG and reference preprocessing must match the request.')
+            if patch.get('inputs', {}).get('kv_cache') != bool((request.model_kwargs or {}).get('kv_cache', False)):
+                raise ValueError('Krea edit preview reference attention must match the trained kv_cache setting.')
+            for i, path in enumerate((request.control_image, request.control_image_2, request.control_image_3), 1):
+                image = linked_node(inputs.get(f'image{i}'))
+                if path and (image.get('class_type') != 'LoadImage' or image.get('inputs', {}).get('image') != path):
+                    raise ValueError('Krea edit preview reference image paths must match the request.')
+                if path and (inputs.get(f'image{i}')[1] != 0 or inputs.get(f'mask{i}') != inputs.get(f'image{i}')[:1] + [1]):
+                    raise ValueError('Krea edit reference alpha masks must come from the matching image loader.')
+                if not path and (inputs.get(f'image{i}') is not None or inputs.get(f'mask{i}') is not None):
+                    raise ValueError('Krea edit preview must not add unrequested reference images.')
+            if request.cfg > 1 and guider.get('inputs', {}).get('negative') != guider.get('inputs', {}).get(positive_key)[:1] + [1]:
+                raise ValueError('Krea edit CFG branches must share the same reference encodings.')
+        if request.cfg > 1:
+            negative = linked_node(guider.get('inputs', {}).get('negative'))
+            if not edit and (negative.get('class_type') != 'CLIPTextEncode' or negative.get('inputs', {}).get('text') != request.negative_prompt):
+                raise ValueError('Specialized Krea CFG must encode the negative prompt, including an empty prompt; zero conditioning differs.')
+        return
+    if request.model_arch != 'ideogram4':
+        return
+    if not any(node.get('class_type') == 'CLIPLoader' and node.get('inputs', {}).get('type') == 'ideogram4'
+               for node in workflow.values()):
+        raise ValueError('Ideogram previews require an Ideogram text encoder workflow.')
+    if request.cfg <= 1:
+        return
+    policy = (request.model_kwargs or {}).get('ideogram_cfg_reference', 'image_only')
+    guiders = [node.get('inputs', {}) for node in workflow.values() if node.get('class_type') == 'DualModelGuider']
+    if len(guiders) != 1 or guiders[0].get('cfg') != request.cfg:
+        raise ValueError('Ideogram CFG previews require a compatible DualModelGuider workflow with the requested CFG.')
+    guider = guiders[0]
+    if guider.get('model_negative', guider.get('model')) != guider.get('model'):
+        raise ValueError('Specialized Ideogram previews require the same model on both CFG branches.')
+    reference = guider.get('negative')
+    if policy == 'image_only':
+        if reference is not None:
+            raise ValueError('Ideogram image-only CFG requires an unconnected negative input, not ConditioningZeroOut/blank text.')
+    elif policy == 'negative_prompt':
+        negative_node = workflow.get(str(reference[0]), {}) if isinstance(reference, list) and len(reference) == 2 else {}
+        from toolkit.ideogram_caption import digest_caption_string
+        if (negative_node.get('class_type') != 'CLIPTextEncode'
+                or negative_node.get('inputs', {}).get('text') != digest_caption_string(request.negative_prompt)):
+            raise ValueError('Ideogram text-negative CFG must encode the configured negative prompt.')
+    else:
+        raise ValueError('Invalid Ideogram CFG reference policy.')
 
 
 def get_workflow_for_samples(
@@ -422,8 +596,12 @@ def get_workflow_for_samples(
     request: ComfyBatchSampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if request.specialized_flow and request.model_arch == 'krea2' and (request.model_kwargs or {}).get('edit'):
+        raise ValueError('Krea edit previews require individual requests to retain per-image references.')
     if workflow_path_is_template(workflow_path):
-        return render_nunjucks_workflow(workflow_path, request)
+        workflow = render_nunjucks_workflow(workflow_path, request)
+        validate_model_workflow(workflow, request)
+        return workflow
 
     raise RuntimeError("ComfyUI prompt batching requires a .njk workflow template")
 
@@ -477,6 +655,8 @@ class ComfyApiClient:
         self.client_id = uuid.uuid4().hex
         self._progress_websocket = None
         self._progress_websocket_warning_printed = False
+        self._object_info = None
+        self._uploaded_images = set()
 
     def _url(self, path: str) -> str:
         return self.api_url + path
@@ -522,18 +702,31 @@ class ComfyApiClient:
                 self._progress_websocket_warning_printed = True
             return False
 
-    def _request_json(self, method: str, path: str, payload: Optional[dict] = None):
+    def _request_json(self, method: str, path: str, payload: Optional[dict] = None, *, timeout=None):
         data = None
         headers = {}
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(self._url(path), data=data, headers=headers, method=method)
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        with urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
             body = response.read()
         if not body:
             return None
         return json.loads(body.decode("utf-8"))
+
+    def validate_workflow_schema(self, workflow):
+        """Read-only preflight for supplied specialized templates, before queueing."""
+        from toolkit.comfy_schema import validate_workflow_schema
+        if self._object_info is None:
+            # A schema request should not inherit the long image-generation
+            # timeout. The snapshot is reused within this preview group only.
+            self._object_info = self._request_json('GET', '/object_info', timeout=min(self.timeout, 15))
+        if (isinstance(self._object_info, dict) and 'AIToolkitKreaEditConditioning' not in self._object_info
+                and any(node.get('class_type') == 'AIToolkitKreaEditConditioning' for node in workflow.values())):
+            raise ValueError('Krea edit Comfy previews require the optional helper in comfy_nodes/ai_toolkit_krea_preview. '
+                'Install it and restart Comfy when idle, or use native previews. No references were silently discarded.')
+        validate_workflow_schema(workflow, self._object_info, uploaded_images=self._uploaded_images)
 
     def post_prompt(self, workflow: Dict[str, Any]) -> str:
         try:
@@ -559,14 +752,27 @@ class ComfyApiClient:
             raise RuntimeError(f"ComfyUI did not return a prompt_id: {response}")
         return response["prompt_id"]
 
-    def upload_image(self, image_path: str, subfolder: str = "ai-toolkit") -> str:
+    def upload_image(self, image_path: str, subfolder: str = "ai-toolkit", *, prepared_image=None) -> str:
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"ComfyUI control image does not exist: {image_path}")
+        # LoadImage choices change after uploads; don't validate a new input
+        # against an older per-preview registry snapshot.
+        self._object_info = None
 
         source_name = os.path.basename(image_path)
         path_hash = hashlib.sha256(os.path.abspath(image_path).encode("utf-8")).hexdigest()[:12]
         upload_name = f"{path_hash}_{source_name}"
         content_type = mimetypes.guess_type(source_name)[0] or "application/octet-stream"
+        if prepared_image is not None:
+            buffer = io.BytesIO()
+            prepared_image.save(buffer, format='PNG')
+            image_data = buffer.getvalue()
+            digest = hashlib.sha256(image_data).hexdigest()[:16]
+            upload_name = f'{path_hash}_{digest}_{os.path.splitext(source_name)[0]}__aitk_rgb.png'
+            content_type = 'image/png'
+        else:
+            with open(image_path, 'rb') as image_file:
+                image_data = image_file.read()
         boundary = f"----ai-toolkit-{uuid.uuid4().hex}"
 
         def field_part(name: str, value: str) -> bytes:
@@ -577,8 +783,6 @@ class ComfyApiClient:
             ).encode("utf-8")
 
         safe_upload_name = upload_name.replace('"', "_").replace("\r", "_").replace("\n", "_")
-        with open(image_path, "rb") as image_file:
-            image_data = image_file.read()
         body = b"".join([
             field_part("type", "input"),
             field_part("subfolder", subfolder),
@@ -604,7 +808,10 @@ class ComfyApiClient:
         if not remote_name:
             raise RuntimeError(f"ComfyUI did not return an uploaded image name: {result}")
         remote_subfolder = result.get("subfolder", subfolder)
-        return f"{remote_subfolder}/{remote_name}" if remote_subfolder else remote_name
+        remote_path = f"{remote_subfolder}/{remote_name}" if remote_subfolder else remote_name
+        if result.get('type') == 'input':
+            self._uploaded_images.add(remote_path)
+        return remote_path
 
     def get_history(self, prompt_id: str) -> Dict[str, Any]:
         return self._request_json("GET", f"/api/history/{urllib.parse.quote(prompt_id)}") or {}

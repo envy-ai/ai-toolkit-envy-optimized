@@ -3,6 +3,30 @@ import { ConfigDoc } from '@/types';
 import { IoFlaskSharp } from 'react-icons/io5';
 
 const docs: { [key: string]: ConfigDoc } = {
+  'fizgig_slider.multipoint': {
+    title: 'Multi-point Sliders',
+    description: <>Opt-in direct targets at arbitrary signed strengths, initially −1, +1 and +2. Add/remove points or use fractions. Zero defines a neutral base-model reference, never a trainable target or preservation anchor. Prompt teachers use each point&apos;s own prompts; image targets share neutral captions. Losses are averaged across nonzero targets. More points increase compute and CPU/disk cache storage, not resident model copies. A single adapter does not guarantee smooth interpolation or accurate extrapolation. Turning this off restores the original two-point settings without deleting either draft.</>,
+  },
+  'fizgig_slider.preservation_weight': {
+    title: 'Preservation Weight',
+    description: <>Adds an anchor prediction-matching loss against the model with the slider disabled. Each step samples one anchor and checks −1, +1, and a random intermediate strength. In multi-point mode it checks every nonzero target and an intermediate across the full range including zero. Checks are averaged before applying this weight. Higher values resist changes to anchors more strongly but can weaken the intended slider effect. Default 1; 0 disables anchor caching, practice generation and loss. Anchors encourage preservation, not perfect concept isolation.</>,
+  },
+  'datasets.anchor_path': {
+    title: 'Anchor Images',
+    description: <>Optional independent folder of images depicting concepts that the image slider should not change. Use matching caption files describing each anchor image. No filename or size matching to the positive/negative image pair folders is required. These are preservation examples, not edit references or a third slider endpoint. Images use the target dataset&apos;s resolutions and standard cached preprocessing; missing captions use an empty prompt.</>,
+  },
+  'guidance_distillation.teacher_cfg_scale': {
+    title: 'Teacher CFG',
+    description: <>Guidance used by the frozen teacher with the trainable LoRA disabled. An optional Qwen helper stays active. The student always predicts with CFG 1. Default 4; CFG 1 supplies no guidance correction. This does not reduce the number of sampling steps.</>,
+  },
+  'guidance_distillation.negative_prompt': {
+    title: 'Teacher Negative Prompt',
+    description: <>A fixed negative prompt learned into the LoRA. It is separate from sample negatives and cannot be changed at inference without retraining. Dataset captions supply the positive prompts; varied, descriptive captions improve coverage. Optional edit references are shared by every teacher and student prediction.</>,
+  },
+  'guidance_distillation.objective': {
+    title: 'Distillation Objective',
+    description: <>Full guidance matches the teacher&apos;s complete CFG prediction, including positive strengthening. Negative contribution only learns the difference between blank-negative CFG and the specified-negative CFG, added to the unguided positive prediction. The latter is a more targeted experiment, not full CFG distillation; an empty negative makes it a no-op.</>,
+  },
   'config.process[0].save.sample_on_record_low': {
     title: 'Sample on Record Low',
     description: (
@@ -75,11 +99,13 @@ const docs: { [key: string]: ConfigDoc } = {
     ),
   },
   'config.process[0].model.assistant_lora_path': {
-    title: 'Training Adapter Path',
+    title: 'Helper LoRA Path',
     description: (
       <>
-        Optional full path to a training adapter safetensors file. Its weights stay frozen while your separate LoRA
-        trains. The adapter is disabled for sample generation and is not included in your saved LoRA.
+        Optional full path to a helper LoRA safetensors file. Its weights stay frozen while your separate LoRA
+        trains. All Qwen Image 2.1 training modes support this helper, including teacher/reference passes and
+        generated practice/discovery images. The helper is disabled for sample generation and is not included
+        in your saved LoRA.
       </>
     ),
   },
@@ -109,6 +135,18 @@ const docs: { [key: string]: ConfigDoc } = {
         Controls the LoRA update scale as <code>alpha / rank</code>. The value is used during training and saved as
         per-layer alpha in the output safetensors file so compatible loaders such as ComfyUI preserve the same scale.
         Set alpha equal to rank for a scale of 1.
+      </>
+    ),
+  },
+  'config.process[0].network.loha_dora': {
+    title: 'LoHa with DoRA (DoHa)',
+    description: (
+      <>
+        LoHa multiplies two low-rank weight updates elementwise. This option also trains each output row&apos;s
+        magnitude using DoRA weight decomposition. Saves standard LyCORIS LoHa keys and ComfyUI-compatible
+        DoRA scales. Uses more parameters and computation than LoRA at the same rank; start with rank 8 or 16.
+        Weight reconstruction is chunked and the frozen quantized base remains unchanged. Currently available
+        for ordinary adapter training, not the LoRA-only DPO/distillation or Fizgig slider modes.
       </>
     ),
   },

@@ -1,0 +1,67 @@
+---
+job: extension
+config:
+  name: qwen21_guidance_distillation
+  process:
+    - type: qwen_guidance_distillation
+      training_folder: output
+      device: cuda:0
+      network:
+        type: lora
+        linear: 32
+        linear_alpha: 32
+      guidance_distillation:
+        teacher_cfg_scale: 4.0
+        negative_prompt: "noise, haze, artifacts"
+        # full_guidance: reproduce the teacher's complete guided prediction.
+        # negative_only: learn only the correction from blank to this negative.
+        objective: full_guidance
+      datasets:
+        # Diverse images with descriptive .txt positive captions.
+        # No pairs needed. Optional control_path_1..3 are edit references,
+        # NOT negative examples, and must match target filenames.
+        - folder_path: /path/to/images/folder
+          caption_ext: txt
+          caption_dropout_rate: 0
+          cache_latents_to_disk: true
+          resolution: [1024]
+      train:
+        batch_size: 1
+        steps: 3000
+        gradient_accumulation: 1
+        train_unet: true
+        train_text_encoder: false
+        cache_text_embeddings: true
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        timestep_type: shift
+        optimizer: adamw8bit
+        lr: 0.0001
+        dtype: bf16
+      model:
+        name_or_path: Comfy-Org/Qwen-Image-2.1
+        arch: qwen_image_2
+        quantize: true
+        qtype: convrot8
+        quantize_te: true
+        qtype_te: convrot8
+        low_vram: true
+      save:
+        dtype: bf16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      sample:
+        sampler: flowmatch
+        sample_every: 250
+        width: 1024
+        height: 1024
+        # Inference uses positive conditioning alone; do not double-guide.
+        guidance_scale: 1.0
+        neg: ""
+        sample_steps: 30
+        seed: 42
+        prompts:
+          - "A colorful illustration of a cat sitting beside a sunny window"
+meta:
+  name: "[name]"
+  version: '1.0'

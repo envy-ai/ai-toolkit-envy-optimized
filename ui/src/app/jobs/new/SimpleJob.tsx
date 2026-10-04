@@ -34,6 +34,12 @@ import { IoFlaskSharp } from 'react-icons/io5';
 import { isMac } from '@/helpers/basic';
 import { apiClient } from '@/utils/api';
 import { Modal } from '@/components/Modal';
+import FizgigMultipointEditor, { MultipointStrengths } from './FizgigMultipointEditor';
+import SliderSpaceEditor, { SliderSpacePreview } from './SliderSpaceEditor';
+import DiffusionKTOEditor from './DiffusionKTOEditor';
+import { multipointNeutralPrompt, sortedPoints, strengthLabel, toggleMultipoint, updateMultipointPoints } from './fizgigMultipoint';
+import { canonicalTrainingMode, cfgNegativeTextEnabled, flowTrainingModels, isSpecializedTrainingMode,
+  switchSpecializedArchitecture, trainingModeVisible } from './trainingCapabilities';
 
 type Props = {
   jobConfig: JobConfig;
@@ -83,6 +89,8 @@ const modelPathSourceOptions: SelectOption[] = [
 ];
 
 const comfyWorkflowOptions: SelectOption[] = [
+  { value: 'config/comfy_templates/anima_lora_sample.json.njk', label: 'Anima LoRA image' },
+  { value: 'config/comfy_templates/ideogram4_lora_sample.json.njk', label: 'Ideogram 4 LoRA image' },
   {
     value: 'config/comfy_templates/krea2_lora_sample.json.njk',
     label: 'Krea 2 LoRA image',
@@ -113,11 +121,17 @@ type SavedPromptSet = Pick<FizgigSliderConfig,
   'cfg_negative_prefix_positive' | 'cfg_negative_prefix_negative'> & {
   version: 1;
   prompt_entries: FizgigPromptEntry[];
+  anchor_prompts?: FizgigSliderConfig['anchor_prompts'];
+  multipoint?: boolean;
+  multipoint_config?: FizgigSliderConfig['multipoint_config'];
 };
 
 const promptSetErrorMessage = (error: unknown): string =>
   (error as { response?: { data?: { error?: string } } })?.response?.data?.error ??
   'Could not reach the prompt sets service.';
+
+const promptSetAlreadyExists = (error: unknown): boolean =>
+  (error as { response?: { status?: number } })?.response?.status === 409;
 
 export default function SimpleJob({
   jobConfig,
@@ -158,9 +172,19 @@ export default function SimpleJob({
   const isFizgigImageSlider = jobConfig.config.process[0].type === 'fizgig_image_slider';
   const isFizgigPromptSlider = jobConfig.config.process[0].type === 'fizgig_prompt_slider';
   const isFizgigSlider = isFizgigImageSlider || isFizgigPromptSlider;
-  const isQwenFlowDPO = jobConfig.config.process[0].type === 'qwen_flow_dpo';
+  const isQwenFlowDPO = canonicalTrainingMode(jobConfig.config.process[0].type) === 'flow_dpo';
+  const isQwenGuidanceDistillation = canonicalTrainingMode(jobConfig.config.process[0].type) === 'guidance_distillation';
+  const isSliderSpace = jobConfig.config.process[0].type === 'sliderspace';
+  const isDiffusionKTO = jobConfig.config.process[0].type === 'diffusion_kto';
+  const trainingModel = jobConfig.config.process[0].model;
+  const specializedMode = isSpecializedTrainingMode(jobConfig.config.process[0].type);
+  const textNegativesEnabled = cfgNegativeTextEnabled(trainingModel);
+  const editSourcesEnabled = !!flowTrainingModels[trainingModel.arch]?.editReferences
+    && (trainingModel.arch !== 'krea2' || !!trainingModel.model_kwargs?.edit);
   const isPairedImageTraining = isFizgigImageSlider || isQwenFlowDPO;
   const fizgigSlider = jobConfig.config.process[0].fizgig_slider;
+  const isMultipoint = fizgigSlider?.multipoint ?? false;
+  const multipointConfig = fizgigSlider?.multipoint_config;
   const promptEntries: FizgigPromptEntry[] = fizgigSlider?.prompt_entries
     ?? fizgigSlider?.prompt_triplets?.map(triplet => ({ kind: 'specific' as const, ...triplet }))
     ?? [{
@@ -173,7 +197,12 @@ export default function SimpleJob({
       cfg_negative_prompt_negative: fizgigSlider?.cfg_negative_prompt_negative ?? fizgigSlider?.cfg_negative_prompt ?? '',
     }];
   const hasSimplifiedPrompts = promptEntries.some(entry => entry.kind === 'simple');
-  const sliderCfgEnabled = (fizgigSlider?.cfg_scale ?? 1) > 1;
+  const sliderCfgEnabled = (fizgigSlider?.cfg_scale ?? 1) > 1 && textNegativesEnabled;
+  const anchorPrompts = fizgigSlider?.anchor_prompts ?? [];
+  const addPreservationPrompt = () => setJobConfig(
+    [...anchorPrompts, { prompt: '', negative_prompt: '' }],
+    'config.process[0].fizgig_slider.anchor_prompts',
+  );
   const updatePromptEntries = (nextEntries: FizgigPromptEntry[]) => {
     const updated = objectCopy(jobConfig);
     const process = updated.config.process[0];
@@ -207,6 +236,7 @@ export default function SimpleJob({
   const [comfyOptions, setComfyOptions] = useState<ComfyOptions>(emptyComfyOptions);
   const [promptSetNames, setPromptSetNames] = useState<string[]>([]);
   const [selectedPromptSet, setSelectedPromptSet] = useState('');
+  const [activePromptSetName, setActivePromptSetName] = useState('');
   const [promptSetBusy, setPromptSetBusy] = useState(false);
   const [promptSetError, setPromptSetError] = useState('');
   const [promptSetNotice, setPromptSetNotice] = useState('');
@@ -236,8 +266,8 @@ export default function SimpleJob({
     const updated = objectCopy(jobConfig);
     const process = updated.config.process[0];
     if (!process.fizgig_slider) return;
-    const oldNeutral = neutralPromptForEntry(promptEntries[0]);
-    const newNeutral = neutralPromptForEntry(promptSet.prompt_entries[0]);
+    const oldNeutral = isMultipoint ? multipointNeutralPrompt(multipointConfig) : neutralPromptForEntry(promptEntries[0]);
+    const newNeutral = promptSet.multipoint ? multipointNeutralPrompt(promptSet.multipoint_config) : neutralPromptForEntry(promptSet.prompt_entries[0]);
     Object.assign(process.fizgig_slider, {
       positive_prefix: promptSet.positive_prefix,
       negative_prefix: promptSet.negative_prefix,
@@ -245,6 +275,9 @@ export default function SimpleJob({
       cfg_negative_prefix_positive: promptSet.cfg_negative_prefix_positive,
       cfg_negative_prefix_negative: promptSet.cfg_negative_prefix_negative,
       prompt_entries: promptSet.prompt_entries,
+      anchor_prompts: promptSet.anchor_prompts ?? [],
+      multipoint: promptSet.multipoint ?? false,
+      ...(promptSet.multipoint_config ? { multipoint_config: promptSet.multipoint_config } : {}),
     });
     // Remove legacy prompt fields so they cannot override the loaded entries.
     delete process.fizgig_slider.prompt_triplets;
@@ -259,7 +292,8 @@ export default function SimpleJob({
         sample.prompt === oldNeutral ? { ...sample, prompt: newNeutral } : sample,
       );
     }
-    process.fizgig_slider.bank_size = Math.max(process.fizgig_slider.bank_size ?? 16, promptSet.prompt_entries.length);
+    process.fizgig_slider.bank_size = Math.max(process.fizgig_slider.bank_size ?? 16,
+      promptSet.multipoint ? promptSet.multipoint_config?.prompt_entries.length ?? 1 : promptSet.prompt_entries.length);
     setJobConfig(updated);
   };
 
@@ -273,6 +307,7 @@ export default function SimpleJob({
         params: { name: selectedPromptSet },
       });
       applyPromptSet(response.data.prompt_set);
+      setActivePromptSetName(selectedPromptSet);
       setPromptSetNotice(`Loaded “${selectedPromptSet}”.`);
     } catch (error) {
       setPromptSetError(promptSetErrorMessage(error));
@@ -281,12 +316,35 @@ export default function SimpleJob({
     }
   };
 
-  const savePromptSet = async () => {
-    const name = newPromptSetName.trim();
+  const deletePromptSet = async () => {
+    const name = selectedPromptSet;
+    if (!name || promptSetBusy) return;
+    if (!window.confirm(`Delete saved prompt set “${name}”? This cannot be undone. The prompts currently on this form will remain.`)) return;
+    setPromptSetBusy(true);
+    setPromptSetError('');
+    setPromptSetNotice('');
+    try {
+      await apiClient.delete('/api/prompt-sets', { params: { name } });
+      setPromptSetNames(previous => previous.filter(savedName => savedName !== name));
+      setSelectedPromptSet('');
+      if (activePromptSetName === name) setActivePromptSetName('');
+      setPromptSetNotice(`Deleted “${name}”. Current form prompts were not changed.`);
+    } catch (error) {
+      setPromptSetError(promptSetErrorMessage(error));
+    } finally {
+      setPromptSetBusy(false);
+    }
+  };
+
+  const savePromptSet = async (requestedName: string, closeModal: boolean) => {
+    const name = requestedName.trim();
     if (!name || promptSetBusy) return;
     const promptSet: SavedPromptSet = {
       version: 1,
       prompt_entries: promptEntries,
+      anchor_prompts: anchorPrompts,
+      multipoint: isMultipoint,
+      ...(multipointConfig ? { multipoint_config: multipointConfig } : {}),
       positive_prefix: fizgigSlider?.positive_prefix ?? '',
       negative_prefix: fizgigSlider?.negative_prefix ?? '',
       cfg_negative_prefix: fizgigSlider?.cfg_negative_prefix ?? '',
@@ -297,12 +355,21 @@ export default function SimpleJob({
     setPromptSetError('');
     setPromptSetNotice('');
     try {
-      await apiClient.post('/api/prompt-sets', { name, prompt_set: promptSet });
+      try {
+        await apiClient.post('/api/prompt-sets', { name, prompt_set: promptSet });
+      } catch (error) {
+        if (!promptSetAlreadyExists(error)) throw error;
+        if (!window.confirm(`Overwrite prompt set “${name}”? This will replace its saved prompts and prefixes.`)) return;
+        await apiClient.post('/api/prompt-sets', { name, prompt_set: promptSet, overwrite: true });
+      }
       setPromptSetNames(previous => [...new Set([...previous, name])].sort((a, b) =>
         a.localeCompare(b, undefined, { sensitivity: 'base' }) || a.localeCompare(b)));
       setSelectedPromptSet(name);
-      setSavePromptSetOpen(false);
-      setNewPromptSetName('');
+      setActivePromptSetName(name);
+      if (closeModal) {
+        setSavePromptSetOpen(false);
+        setNewPromptSetName('');
+      }
       setPromptSetNotice(`Saved “${name}”.`);
     } catch (error) {
       setPromptSetError(promptSetErrorMessage(error));
@@ -443,6 +510,7 @@ export default function SimpleJob({
   if (numTrainingCols == 5) {
     trainingBarClass = 'grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-6';
   }
+  if (isSliderSpace) trainingBarClass = 'grid grid-cols-1 md:grid-cols-2 gap-6';
 
   const transformerQuantizationOptions: GroupedSelectOption[] | SelectOption[] = useMemo(() => {
     const hasARA = modelArch?.accuracyRecoveryAdapters && Object.keys(modelArch.accuracyRecoveryAdapters).length > 0;
@@ -617,6 +685,19 @@ export default function SimpleJob({
         )}
         <div className={`${topBarClass} ${sampleOnlyLockedClass}`}>
           <Card title="Job">
+            <div className="sm:hidden">
+              <SelectInput label="Training mode" value={jobConfig.config.process[0].type}
+                disabled={sampleOnlyMode}
+                options={jobTypeOptions.filter(option => trainingModeVisible(trainingModel.arch, option.value, jobConfig.config.process[0].type))}
+                onChange={value => {
+                  if (value === jobConfig.config.process[0].type) return;
+                  let next = objectCopy(jobConfig);
+                  next = jobTypeOptions.find(option => option.value === next.config.process[0].type)?.onDeactivate?.(next) ?? next;
+                  next = jobTypeOptions.find(option => option.value === value)?.onActivate?.(next) ?? next;
+                  next.config.process[0].type = value;
+                  setJobConfig(next);
+                }} />
+            </div>
             <TextInput
               label="Training Name"
               value={jobConfig.config.name}
@@ -658,6 +739,13 @@ export default function SimpleJob({
               label="Model Architecture"
               value={jobConfig.config.process[0].model.arch}
               onChange={value => {
+                if (value === trainingModel.arch) return;
+                if (specializedMode) {
+                  const next = switchSpecializedArchitecture(jobConfig, value);
+                  setJobConfig(next.config);
+                  alert(next.notice);
+                  return;
+                }
                 handleModelArchChange(
                   modelArchs,
                   jobConfig.config.process[0].model.arch,
@@ -666,8 +754,20 @@ export default function SimpleJob({
                   setJobConfig,
                 );
               }}
-              options={isFizgigSlider || isQwenFlowDPO ? [{ value: 'qwen_image_2', label: 'Qwen-Image-2.1' }] : groupedModelOptions}
+              options={specializedMode ? Object.entries(flowTrainingModels).map(([value, model]) => ({ value, label: model.label })) : groupedModelOptions}
             />
+            {specializedMode && <p className="my-3 text-xs text-gray-400">
+              Krea 2, Anima and Ideogram 4 ports are experimental until actual-checkpoint validation.
+              Training uses the model-native flow profile; practice and previews use its native generation schedule.
+            </p>}
+            {specializedMode && trainingModel.arch === 'ideogram4' && <details className="my-3 rounded border border-gray-700 p-3">
+              <summary className="cursor-pointer text-sm">Ideogram guidance</summary>
+              <SelectInput label="CFG reference" value={String(trainingModel.model_kwargs?.ideogram_cfg_reference ?? 'image_only')}
+                options={[{ value: 'image_only', label: 'Image-only (native default)' }, { value: 'negative_prompt', label: 'Text negative (experimental)' }]}
+                onChange={value => setJobConfig(value, 'config.process[0].model.model_kwargs.ideogram_cfg_reference')} />
+              <p className="mt-2 text-xs text-gray-400">Image-only CFG uses zero text tokens, not a blank caption. Negative text fields are inactive in this mode; their drafts are retained.
+                Text-negative guidance must be supported by the selected preview renderer.</p>
+            </details>}
             <SelectInput
               label="Base Model Source"
               value={modelPathSource}
@@ -689,9 +789,9 @@ export default function SimpleJob({
               }
               required
             />
-            {modelArch?.additionalSections?.includes('model.assistant_lora_path') && (
+            {(!isSliderSpace || modelArch?.name === 'qwen_image_2') && modelArch?.additionalSections?.includes('model.assistant_lora_path') && (
               <TextInput
-                label="Training Adapter Path"
+                label="Helper LoRA Path"
                 value={jobConfig.config.process[0].model.assistant_lora_path ?? ''}
                 docKey="config.process[0].model.assistant_lora_path"
                 onChange={(value: string | undefined) => {
@@ -714,7 +814,7 @@ export default function SimpleJob({
                 placeholder="/absolute/path/to/qwen3vl_8b.safetensors"
               />
             )}
-            {modelArch?.additionalSections?.includes('model.unconditional_lora_path') && (
+            {!isSliderSpace && modelArch?.additionalSections?.includes('model.unconditional_lora_path') && (
               <TextInput
                 label="Unconditional Adapter Path"
                 value={jobConfig.config.process[0].model.unconditional_lora_path ?? ''}
@@ -961,7 +1061,7 @@ export default function SimpleJob({
               label="Target Type"
               value={networkType}
               onChange={value => setJobConfig(value, 'config.process[0].network.type')}
-              options={isQwenFlowDPO ? [
+              options={isQwenFlowDPO || isQwenGuidanceDistillation || isSliderSpace || isDiffusionKTO ? [
                 { value: 'lora', label: 'LoRA' },
               ] : isFizgigSlider ? [
                 { value: 'lora', label: 'LoRA' },
@@ -969,6 +1069,7 @@ export default function SimpleJob({
               ] : [
                 { value: 'lora', label: 'LoRA' },
                 { value: 'dora', label: 'DoRA' },
+                { value: 'loha', label: 'LoHa (LyCORIS)' },
                 { value: 'lokr', label: 'LoKr' },
               ]}
             />
@@ -986,7 +1087,15 @@ export default function SimpleJob({
                 ]}
               />
             )}
-            {(networkType == 'lora' || networkType == 'dora') && (
+            {networkType == 'loha' && (
+              <Checkbox
+                label="DoRA Weight Decomposition (DoHa)"
+                checked={jobConfig.config.process[0].network?.loha_dora ?? false}
+                onChange={value => setJobConfig(value, 'config.process[0].network.loha_dora')}
+                docKey="config.process[0].network.loha_dora"
+              />
+            )}
+            {(networkType == 'lora' || networkType == 'dora' || networkType == 'loha') && (
               <>
                 <TextInput
                   label="Pretrained LoRA Path"
@@ -1051,7 +1160,7 @@ export default function SimpleJob({
                         const currentConvAlpha = jobConfig.config.process[0].network?.conv_alpha;
                         setJobConfig(value, 'config.process[0].network.conv');
                         if (
-                          networkType == 'lora' &&
+                          (networkType == 'lora' || networkType == 'loha') &&
                           (currentConvAlpha === undefined ||
                             currentConvAlpha === null ||
                             currentConvAlpha === currentConv)
@@ -1063,7 +1172,7 @@ export default function SimpleJob({
                       min={0}
                       max={1024}
                     />
-                    {(networkType == 'lora' || networkType == 'dora') && (
+                    {(networkType == 'lora' || networkType == 'dora' || networkType == 'loha') && (
                       <NumberInput
                         label="Conv Alpha"
                         value={
@@ -1136,6 +1245,7 @@ export default function SimpleJob({
                   />
                   <TextInput
                     label="Negative Prompt"
+                    disabled={specializedMode && !textNegativesEnabled}
                     className=""
                     value={jobConfig.config.process[0].slider?.negative_prompt ?? ''}
                     onChange={value => setJobConfig(value, 'config.process[0].slider.negative_prompt')}
@@ -1179,7 +1289,7 @@ export default function SimpleJob({
               min={1}
               required
             />
-            <NumberInput
+            {!isSliderSpace && <><NumberInput
               label="Record Low Window (Steps)"
               value={jobConfig.config.process[0].save.record_low_window_size ?? 3000}
               onChange={value => setJobConfig(value, 'config.process[0].save.record_low_window_size')}
@@ -1203,16 +1313,70 @@ export default function SimpleJob({
               min={1}
               required
             />
+            </>}
           </Card>
         </div>
+        {isSliderSpace && jobConfig.config.process[0].sliderspace && (
+          <SliderSpaceEditor jobConfig={jobConfig} setJobConfig={setJobConfig} datasetOptions={datasetOptions} disabled={sampleOnlyMode} />
+        )}
+        {isDiffusionKTO && <div className={sampleOnlyLockedClass}>
+          <DiffusionKTOEditor jobConfig={jobConfig} setJobConfig={setJobConfig} />
+        </div>}
+        {isQwenGuidanceDistillation && (
+          <div className={sampleOnlyLockedClass}>
+            <Card title="Guidance Distillation">
+              <p className="mb-4 text-sm text-gray-400">
+                Train a CFG-1 LoRA to match the frozen base model using the teacher CFG and negative below.
+                Dataset images provide latent states; their captions provide the positive prompts. Use varied
+                captions covering the subjects and styles you want the LoRA to handle.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <NumberInput
+                  label="Teacher CFG"
+                  value={jobConfig.config.process[0].guidance_distillation?.teacher_cfg_scale ?? 4}
+                  onChange={value => setJobConfig(value, 'config.process[0].guidance_distillation.teacher_cfg_scale')}
+                  min={1}
+                  docKey="guidance_distillation.teacher_cfg_scale"
+                />
+                <SelectInput
+                  label="Distillation Objective"
+                  value={jobConfig.config.process[0].guidance_distillation?.objective ?? 'full_guidance'}
+                  onChange={value => setJobConfig(value, 'config.process[0].guidance_distillation.objective')}
+                  options={[
+                    { value: 'full_guidance', label: 'Full guided teacher result' },
+                    { value: 'negative_only', label: 'Negative prompt contribution only' },
+                  ]}
+                  docKey="guidance_distillation.objective"
+                />
+              </div>
+              <TextAreaInput
+                label="Teacher Negative Prompt"
+                className="mt-4"
+                value={jobConfig.config.process[0].guidance_distillation?.negative_prompt ?? ''}
+                disabled={!textNegativesEnabled || (jobConfig.config.process[0].guidance_distillation?.teacher_cfg_scale ?? 4) <= 1}
+                onChange={value => setJobConfig(value, 'config.process[0].guidance_distillation.negative_prompt')}
+                placeholder="The fixed negative prompt whose effects you want to learn"
+                rows={6}
+                docKey="guidance_distillation.negative_prompt"
+              />
+              <p className="mt-3 text-sm text-gray-400">
+                Full guidance learns the teacher&apos;s complete CFG result. Negative-only learns the difference
+                between your negative and an empty negative at the same CFG; an empty teacher negative makes that
+                objective a no-op. Sample and inference CFG should start at 1 with the LoRA at strength 1.
+                Higher sample CFG adds guidance on top of the learned behavior. This mode keeps the usual step count.
+              </p>
+              {trainingModel.arch === 'ideogram4' && <p className="mt-2 text-xs text-gray-400">Native full guidance uses image-only CFG. Negative-only requires text-negative CFG and a nonempty teacher negative; its baseline is the image-only prediction, not an encoded blank caption.</p>}
+            </Card>
+          </div>
+        )}
         {isQwenFlowDPO && (
           <div className={sampleOnlyLockedClass}>
-            <Card title="Qwen Image 2.1 Flow-DPO">
+            <Card title="Flow-DPO">
               <p className="text-sm text-gray-400 mb-4">
                 Target Dataset contains preferred outputs. Control Dataset 1 contains matching rejected outputs,
-                using the same filename stems and image sizes. It is not sent to Qwen as an edit reference.
-                For edit training, put source images in Control Datasets 2 and 3. Both outputs share the target
-                caption and edit inputs. Beta scales a mean latent-element error difference.
+                using the same filename stems and image sizes. Rejected images are not model edit references.
+                {editSourcesEnabled ? ' For edit training, put source images in Control Datasets 2 and 3.' : ' This model/configuration has no edit-source conditioning.'}
+                {' '}Both outputs share the target caption and any edit inputs. Beta scales a mean latent-element error difference.
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <NumberInput
@@ -1236,16 +1400,21 @@ export default function SimpleJob({
         {isFizgigSlider && (
           <div className={sampleOnlyLockedClass}>
             <Card title={isFizgigImageSlider ? 'Fizgig Image Slider' : 'Fizgig Prompt Slider'}>
+              <Checkbox label="Multi-point" checked={isMultipoint} docKey="fizgig_slider.multipoint"
+                onChange={value => setJobConfig(toggleMultipoint(jobConfig, value))} />
+              {isMultipoint && multipointConfig && <MultipointStrengths points={multipointConfig.points}
+                onChange={points => setJobConfig(updateMultipointPoints(jobConfig, points))} />}
               <p className="text-sm text-gray-400 mb-4">
-                +1 and −1 are trained as opposite strengths of one Qwen Image 2.1 LoRA or DoRA. The three sample
-                prompts use the same seed at strengths −1, 0 and +1.
+                {isMultipoint ? 'Each nonzero strength learns its own target using one LoRA or DoRA. The base model defines neutral.'
+                  : '+1 and −1 are trained as opposite strengths of one LoRA or DoRA. The three sample prompts use the same seed at strengths −1, 0 and +1.'}
               </p>
+              {trainingModel.arch === 'ideogram4' && <p className="mb-3 text-xs text-amber-400">For structured JSON captions, use complete specific prompts or multipoint targets. Prepending a simple text prefix makes JSON no longer a standalone structured caption; strings are not silently rewritten.</p>}
               {isFizgigImageSlider ? (
                 <>
                   <p className="text-sm text-gray-400 mb-4">
-                    Select positive images under Target Dataset and their matched negative images under Control Dataset 1.
-                    Give each pair the same filename stem, framing and size. Control Dataset 1 is not passed to Qwen as
-                    an edit reference.
+                    {isMultipoint ? 'Select matched folders for every strength. Captions describe the neutral input and come from zero if present, otherwise +1, otherwise the lowest numbered point. Zero images are references, not preservation anchors.'
+                      : 'Select positive images under Target Dataset and their matched negative images under Control Dataset 1.'}
+                    {' '}Give each pair the same filename stem, framing and size. Target images are not Qwen edit references.
                   </p>
                   <NumberInput
                     label="Pair Difference Weight"
@@ -1255,16 +1424,26 @@ export default function SimpleJob({
                     max={1}
                     placeholder="0 = uniform loss; 1 = focus on changed areas"
                   />
+                  {anchorPrompts.length > 0 && (
+                    <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <NumberInput label="Anchor CFG (Practice + Training)" value={fizgigSlider?.cfg_scale ?? 1}
+                        onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.cfg_scale')} min={0} />
+                      <NumberInput label="Anchor Practice Image Resolution" value={fizgigSlider?.bank_resolution ?? 768}
+                        onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.bank_resolution')} min={64} />
+                      <NumberInput label="Anchor Practice Render Steps" value={fizgigSlider?.bank_steps ?? 25}
+                        onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.bank_steps')} min={1} />
+                    </div>
+                  )}
                 </>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-                  <NumberInput
+                  {!isMultipoint && <NumberInput
                     label="Guidance / Push Strength"
                     value={jobConfig.config.process[0].fizgig_slider?.guidance ?? 3}
                     onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.guidance')}
                     min={0.01}
                     placeholder="eg. 3"
-                  />
+                  />}
                   <NumberInput
                     label="CFG (Practice + Training)"
                     value={fizgigSlider?.cfg_scale ?? 1}
@@ -1276,7 +1455,7 @@ export default function SimpleJob({
                     label="Total Practice Images"
                     value={jobConfig.config.process[0].fizgig_slider?.bank_size ?? 16}
                     onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.bank_size')}
-                    min={promptEntries.length}
+                    min={isMultipoint ? multipointConfig?.prompt_entries.length ?? 1 : promptEntries.length}
                     placeholder="Distributed across prompt entries"
                   />
                   <NumberInput
@@ -1306,8 +1485,8 @@ export default function SimpleJob({
           <div className={`${sampleOnlyLockedClass} space-y-4`}>
             <Card title="Prompt Sets">
               <p className="mb-3 text-sm text-gray-400">
-                Save or load the ordered simplified prompts and specific triplets, plus all shared prefixes.
-                Training strength and practice-image settings stay with this job.
+                Save or load simplified/specific prompts, anchor prompts, shared prefixes and multi-point strengths.
+                Training weights, image folders and practice-image settings stay with this job.
               </p>
               <div className="flex flex-wrap items-end gap-3">
                 <SelectInput
@@ -1328,16 +1507,55 @@ export default function SimpleJob({
                 </button>
                 <button
                   type="button"
-                  onClick={() => { setPromptSetError(''); setSavePromptSetOpen(true); }}
+                  onClick={() => { void deletePromptSet(); }}
+                  disabled={!selectedPromptSet || promptSetBusy}
+                  className="rounded bg-red-800 px-4 py-2 text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Delete
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activePromptSetName) {
+                      void savePromptSet(activePromptSetName, false);
+                    } else {
+                      setPromptSetError('');
+                      setNewPromptSetName('');
+                      setSavePromptSetOpen(true);
+                    }
+                  }}
                   disabled={promptSetBusy}
                   className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  Save Prompt Set
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setPromptSetError(''); setNewPromptSetName(''); setSavePromptSetOpen(true); }}
+                  disabled={promptSetBusy}
+                  className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Save As
                 </button>
               </div>
+              {activePromptSetName && <p className="mt-2 text-xs text-gray-400">Editing “{activePromptSetName}”.</p>}
               {promptSetError && <p className="mt-2 text-sm text-red-400" role="alert">{promptSetError}</p>}
               {promptSetNotice && <p className="mt-2 text-sm text-green-400" role="status">{promptSetNotice}</p>}
             </Card>
+            {isMultipoint && multipointConfig ? <FizgigMultipointEditor config={multipointConfig} cfgEnabled={sliderCfgEnabled}
+              onAddPreservationPrompt={addPreservationPrompt}
+              onChange={config => {
+                const updated = objectCopy(jobConfig);
+                const oldNeutral = multipointNeutralPrompt(multipointConfig);
+                const newNeutral = multipointNeutralPrompt(config);
+                if (newNeutral !== undefined && oldNeutral !== newNeutral) {
+                  updated.config.process[0].sample.samples = updated.config.process[0].sample.samples.map(sample =>
+                    sample.prompt === oldNeutral ? { ...sample, prompt: newNeutral } : sample);
+                }
+                updated.config.process[0].fizgig_slider!.multipoint_config = config;
+                updated.config.process[0].fizgig_slider!.bank_size = Math.max(fizgigSlider?.bank_size ?? 16, config.prompt_entries.length);
+                setJobConfig(updated);
+              }} /> : <>
             <Card title="Shared Prefixes for Simplified Prompts">
               <p className="mb-4 text-sm text-gray-400">
                 Simplified entries use their base prompt for neutral (0). For each pole, its prefix is placed
@@ -1516,14 +1734,65 @@ export default function SimpleJob({
               >
                 Add Specific Triplet
               </button>
+              <button
+                type="button"
+                onClick={addPreservationPrompt}
+                className="rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600"
+              >
+                Add Preservation Prompt
+              </button>
             </div>
+            </>}
+          </div>
+        )}
+        {isFizgigSlider && (
+          <div className={`${sampleOnlyLockedClass} space-y-4`}>
+            <Card title="Preservation Anchors">
+              <p className="mb-4 text-sm text-gray-400">
+                Preservation prompts (anchors) should stay unchanged at every slider strength. Their predictions are
+                matched to the model with this slider disabled, not merely to each other. This preserves
+                baseline behavior; it does not teach a new dog size. Anchor prompts ignore slider prefixes.
+                One extra practice image is generated for each anchor prompt. Anchor images use their own
+                captions and are selected under each image dataset.
+              </p>
+              <NumberInput label="Preservation Weight" value={fizgigSlider?.preservation_weight ?? 1}
+                onChange={value => setJobConfig(value, 'config.process[0].fizgig_slider.preservation_weight')}
+                min={0} docKey="fizgig_slider.preservation_weight" placeholder="1 = equal loss weight; 0 = disabled" />
+              {isFizgigImageSlider && <button type="button"
+                onClick={addPreservationPrompt}
+                className="mt-4 rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600">
+                Add Anchor Prompt
+              </button>}
+            </Card>
+            {anchorPrompts.map((anchor, index) => (
+              <Card key={index} title={`Preservation Prompt ${index + 1} (Anchor)`}>
+                <div className="mb-3 flex justify-end">
+                  <button type="button"
+                    onClick={() => setJobConfig(anchorPrompts.filter((_, i) => i !== index), 'config.process[0].fizgig_slider.anchor_prompts')}
+                    className="rounded bg-red-700 px-3 py-1.5 text-sm text-white" aria-label={`Remove anchor prompt ${index + 1}`}>
+                    Remove Anchor
+                  </button>
+                </div>
+                <TextAreaInput label="Anchor Positive Prompt" value={anchor.prompt} rows={5} required
+                  placeholder="A medium-sized dog sitting beside a chair"
+                  onChange={value => setJobConfig(anchorPrompts.map((item, i) => i === index ? { ...item, prompt: value } : item), 'config.process[0].fizgig_slider.anchor_prompts')} />
+                <TextAreaInput label="Anchor Negative Prompt (optional)" value={anchor.negative_prompt ?? ''}
+                  rows={4} className="mt-4" disabled={!sliderCfgEnabled}
+                  onChange={value => setJobConfig(anchorPrompts.map((item, i) => i === index ? { ...item, negative_prompt: value } : item), 'config.process[0].fizgig_slider.anchor_prompts')} />
+              </Card>
+            ))}
           </div>
         )}
         <div className={sampleOnlyLockedClass}>
           <Card title="Training">
+            {isSliderSpace && <p className="text-sm text-gray-400">
+              {jobConfig.config.process[0].train.steps.toLocaleString()} total training steps · approximately{' '}
+              {Math.floor(jobConfig.config.process[0].train.steps / (jobConfig.config.process[0].sliderspace?.num_directions || 1)).toLocaleString()} per direction, after discovery.
+              {' '}Batch size and gradient accumulation are fixed at 1. Text embeddings are cached automatically.
+            </p>}
             <div className={trainingBarClass}>
               <div>
-                <NumberInput
+                {!isSliderSpace && <><NumberInput
                   label="Batch Size"
                   value={jobConfig.config.process[0].train.batch_size}
                   onChange={value => setJobConfig(value, 'config.process[0].train.batch_size')}
@@ -1540,8 +1809,9 @@ export default function SimpleJob({
                   min={1}
                   required
                 />
+                </>}
                 <NumberInput
-                  label="Steps"
+                  label={isSliderSpace ? 'Total training steps' : 'Steps'}
                   className="pt-2"
                   value={jobConfig.config.process[0].train.steps}
                   onChange={value => setJobConfig(value, 'config.process[0].train.steps')}
@@ -1607,7 +1877,7 @@ export default function SimpleJob({
                   </>
                 )}
               </div>
-              <div>
+              {!isSliderSpace && <div>
                 {disableSections.includes('train.timestep_type') || isFizgigSlider ? null : (
                   <SelectInput
                     label="Timestep Type"
@@ -1622,7 +1892,7 @@ export default function SimpleJob({
                     ]}
                   />
                 )}
-                {!isFizgigSlider && <>
+                {!isFizgigSlider && !isQwenGuidanceDistillation && !isSliderSpace && !isDiffusionKTO && <>
                 <SelectInput
                   label="Content Or Style"
                   className="pt-2"
@@ -1759,15 +2029,15 @@ export default function SimpleJob({
                     min={0}
                   />
                 )}
-              </div>
-              <div>
+              </div>}
+              {!isSliderSpace && <div>
                 <FormGroup label="EMA (Exponential Moving Average)">
                   <Checkbox
                     label="Use EMA"
                     className="pt-1"
                     checked={jobConfig.config.process[0].train.ema_config?.use_ema || false}
                     onChange={value => setJobConfig(value, 'config.process[0].train.ema_config.use_ema')}
-                    disabled={isFizgigSlider || isQwenFlowDPO}
+                    disabled={isFizgigSlider || isQwenFlowDPO || isQwenGuidanceDistillation || isDiffusionKTO}
                   />
                 </FormGroup>
                 {jobConfig.config.process[0].train.ema_config?.use_ema && (
@@ -1799,7 +2069,7 @@ export default function SimpleJob({
                     label="Cache Text Embeddings"
                     checked={jobConfig.config.process[0].train.cache_text_embeddings || false}
                     docKey={'train.cache_text_embeddings'}
-                    disabled={isFizgigPromptSlider || isQwenFlowDPO}
+                    disabled={isFizgigPromptSlider || isQwenFlowDPO || isQwenGuidanceDistillation || isDiffusionKTO}
                     onChange={value => {
                       setJobConfig(value, 'config.process[0].train.cache_text_embeddings');
                       if (value) {
@@ -1808,8 +2078,8 @@ export default function SimpleJob({
                     }}
                   />
                 </FormGroup>
-              </div>
-              <div>
+              </div>}
+              {!isSliderSpace && <div>
                 {disableSections.includes('train.diff_output_preservation') ||
                 disableSections.includes('train.blank_prompt_preservation') ? null : (
                   <FormGroup label="Regularization">
@@ -1889,7 +2159,7 @@ export default function SimpleJob({
                     )}
                   </>
                 )}
-                <FormGroup label="Other" className="pt-2">
+                {!isQwenGuidanceDistillation && !isSliderSpace && !isDiffusionKTO && <FormGroup label="Other" className="pt-2">
                   <>
                     <Checkbox
                       label="Contrastive Guidance Loss"
@@ -1921,12 +2191,12 @@ export default function SimpleJob({
                       </>
                     )}
                   </>
-                </FormGroup>
-              </div>
+                </FormGroup>}
+              </div>}
             </div>
           </Card>
         </div>
-        <div className={sampleOnlyLockedClass}>
+        {!isSliderSpace && <div className={sampleOnlyLockedClass}>
           <Card
             title="Validation"
             toggled={!!validationConfig}
@@ -2055,13 +2325,14 @@ export default function SimpleJob({
               </>
             )}
           </Card>
-        </div>
-        <div className={sampleOnlyLockedClass}>
+        </div>}
+        {!isSliderSpace && <div className={sampleOnlyLockedClass}>
           <Card title="Advanced" collapsible>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div>
                 <Checkbox
                   label="Do Differential Guidance"
+                  disabled={isQwenGuidanceDistillation || isDiffusionKTO}
                   docKey={'train.do_differential_guidance'}
                   className="pt-1"
                   checked={jobConfig.config.process[0].train.do_differential_guidance || false}
@@ -2094,7 +2365,7 @@ export default function SimpleJob({
               </div>
             </div>
           </Card>
-        </div>
+        </div>}
         {!disableSections.includes('datasets') && (
           <div className={sampleOnlyLockedClass}>
             <Card title="Datasets">
@@ -2132,13 +2403,34 @@ export default function SimpleJob({
                     <h2 className="text-lg font-bold mb-4">Dataset {i + 1}</h2>
                     <div className={datasetStyleClass}>
                       <div>
-                        <SelectInput
-                          label="Target Dataset"
+                        {isDiffusionKTO && <SelectInput label="Feedback Label" value={dataset.kto_label ?? ''}
+                          options={[{ value: '', label: 'Select feedback…' }, { value: 'liked', label: 'Liked' },
+                            { value: 'disliked', label: 'Disliked' }]}
+                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].kto_label`)} />}
+                        {isDiffusionKTO && <NumberInput label="Dataset Loss Weight" className="pt-2"
+                          value={dataset.loss_multiplier ?? 1} min={0} required
+                          onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].loss_multiplier`)} />}
+                        {isFizgigImageSlider && isMultipoint && multipointConfig ? <>
+                          {sortedPoints(multipointConfig.points).map(point => <div key={point.id} className="mb-3">
+                            <NumberInput label={`Strength ${strengthLabel(point.strength)}`} value={point.strength}
+                              onChange={value => { if (value !== null) setJobConfig(updateMultipointPoints(jobConfig,
+                                multipointConfig.points.map(p => p.id === point.id ? { ...p, strength: value } : p))); }} />
+                            <SelectInput label="Image Folder" value={dataset.multipoint_images?.find(mapping => mapping.point_id === point.id)?.folder_path ?? ''}
+                              options={[{ value: '', label: 'Select dataset…' }, ...datasetOptions]}
+                              onChange={value => setJobConfig(multipointConfig.points.map(p => ({ point_id: p.id,
+                                folder_path: p.id === point.id ? value : dataset.multipoint_images?.find(mapping => mapping.point_id === p.id)?.folder_path ?? '' })),
+                                `config.process[0].datasets[${i}].multipoint_images`)} />
+                          </div>)}
+                          <SelectInput label="Anchor Images (optional)" docKey="datasets.anchor_path" value={dataset.anchor_path ?? ''}
+                            options={[{ value: '', label: 'None' }, ...datasetOptions]}
+                            onChange={value => setJobConfig(value === '' ? null : value, `config.process[0].datasets[${i}].anchor_path`)} />
+                        </> : <SelectInput
+                          label={isDiffusionKTO ? 'Image Folder' : 'Target Dataset'}
                           value={dataset.folder_path}
                           onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].folder_path`)}
                           options={datasetOptions}
-                        />
-                        {modelArch?.additionalSections?.includes('datasets.control_path') && (
+                        />}
+                        {!isDiffusionKTO && !isPairedImageTraining && (!isQwenGuidanceDistillation || editSourcesEnabled) && modelArch?.additionalSections?.includes('datasets.control_path') && (
                           <SelectInput
                             label="Control Dataset"
                             docKey="datasets.control_path"
@@ -2150,7 +2442,7 @@ export default function SimpleJob({
                             options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
                           />
                         )}
-                        {modelArch?.additionalSections?.includes('datasets.multi_control_paths') && (
+                        {!isDiffusionKTO && (isPairedImageTraining || (modelArch?.additionalSections?.includes('datasets.multi_control_paths') && (!isQwenGuidanceDistillation || editSourcesEnabled))) && !(isFizgigImageSlider && isMultipoint) && (
                           <>
                             <SelectInput
                               label={isFizgigImageSlider ? 'Control Dataset 1 (−1 Images)' : isQwenFlowDPO ? 'Control Dataset 1 (Rejected Images)' : 'Control Dataset 1'}
@@ -2165,7 +2457,15 @@ export default function SimpleJob({
                               }
                               options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
                             />
-                            {!isFizgigImageSlider && <SelectInput
+                            {isFizgigImageSlider && <SelectInput
+                              label="Anchor Images (optional)"
+                              docKey="datasets.anchor_path"
+                              value={dataset.anchor_path ?? ''}
+                              className="pt-2"
+                              onChange={value => setJobConfig(value === '' ? null : value, `config.process[0].datasets[${i}].anchor_path`)}
+                              options={[{ value: '', label: 'None' }, ...datasetOptions]}
+                            />}
+                            {!isFizgigImageSlider && (!isQwenFlowDPO || editSourcesEnabled) && <SelectInput
                               label={isQwenFlowDPO ? 'Control Dataset 2 (Edit Source 1)' : 'Control Dataset 2'}
                               docKey="datasets.multi_control_paths"
                               value={dataset.control_path_2 ?? ''}
@@ -2178,7 +2478,7 @@ export default function SimpleJob({
                               }
                               options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
                             />}
-                            {!isFizgigImageSlider && <SelectInput
+                            {!isFizgigImageSlider && (!isQwenFlowDPO || editSourcesEnabled) && <SelectInput
                               label={isQwenFlowDPO ? 'Control Dataset 3 (Edit Source 2)' : 'Control Dataset 3'}
                               docKey="datasets.multi_control_paths"
                               value={dataset.control_path_3 ?? ''}
@@ -2193,7 +2493,7 @@ export default function SimpleJob({
                             />}
                           </>
                         )}
-                        {!isPairedImageTraining && <NumberInput
+                        {!isDiffusionKTO && !isPairedImageTraining && !isQwenGuidanceDistillation && <NumberInput
                           label="LoRA Weight"
                           value={dataset.network_weight}
                           className="pt-2"
@@ -2206,6 +2506,7 @@ export default function SimpleJob({
                           className="pt-2"
                           onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].num_repeats`)}
                           placeholder="eg. 1"
+                          min={1}
                           docKey={'dataset.num_repeats'}
                         />
                       </div>
@@ -2216,7 +2517,7 @@ export default function SimpleJob({
                           onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].default_caption`)}
                           placeholder="eg. A photo of a cat"
                         />
-                        {!isPairedImageTraining && <NumberInput
+                        {!isDiffusionKTO && !isPairedImageTraining && !isQwenGuidanceDistillation && <NumberInput
                           label="Caption Dropout Rate"
                           className="pt-2"
                           value={dataset.caption_dropout_rate}
@@ -2256,14 +2557,14 @@ export default function SimpleJob({
                       <div>
                         <FormGroup label="Settings" className="">
                           <Checkbox
-                            label={isFizgigImageSlider ? 'Cache +1 Latents (required)' : isQwenFlowDPO ? 'Cache Preferred Latents (required)' : 'Cache Latents'}
+                            label={isFizgigImageSlider ? (isMultipoint ? 'Cache All Point Latents (required)' : 'Cache +1 Latents (required)') : isQwenFlowDPO ? 'Cache Preferred Latents (required)' : isQwenGuidanceDistillation || isDiffusionKTO ? 'Cache Latents (required)' : 'Cache Latents'}
                             checked={dataset.cache_latents_to_disk || false}
                             onChange={value =>
                               setJobConfig(value, `config.process[0].datasets[${i}].cache_latents_to_disk`)
                             }
-                            disabled={isPairedImageTraining}
+                            disabled={isPairedImageTraining || isQwenGuidanceDistillation || isDiffusionKTO}
                           />
-                          {!isPairedImageTraining && <Checkbox
+                          {!isDiffusionKTO && !isPairedImageTraining && !isQwenGuidanceDistillation && <Checkbox
                             label="Is Regularization"
                             checked={dataset.is_reg || false}
                             onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].is_reg`)}
@@ -2388,12 +2689,16 @@ export default function SimpleJob({
                   onClick={() => {
                     const newDataset = objectCopy(defaultDatasetConfig);
                     // automaticallt add the controls for a new dataset
-                    const controls = isPairedImageTraining ? [] : (modelArch?.controls ?? []);
+                    const controls = isPairedImageTraining || isDiffusionKTO ? [] : (modelArch?.controls ?? []);
                     newDataset.controls = controls;
-                    if (isPairedImageTraining) {
+                    if (isPairedImageTraining || isQwenGuidanceDistillation || isDiffusionKTO) {
                       newDataset.cache_latents_to_disk = true;
                       newDataset.caption_dropout_rate = 0;
                       newDataset.network_weight = 1;
+                    }
+                    if (isDiffusionKTO) newDataset.kto_label = 'liked';
+                    if (isFizgigImageSlider && isMultipoint && multipointConfig) {
+                      newDataset.multipoint_images = multipointConfig.points.map(point => ({ point_id: point.id, folder_path: '' }));
                     }
                     setJobConfig([...jobConfig.config.process[0].datasets, newDataset], 'config.process[0].datasets');
                   }}
@@ -2408,12 +2713,13 @@ export default function SimpleJob({
         {isPromptSlider && <div className={sampleOnlyLockedClass}>{sliderTargetsEditor}</div>}
         <div>
           <Card title="Sample">
-            <Checkbox
+            {isSliderSpace && jobConfig.config.process[0].sliderspace && <SliderSpacePreview jobConfig={jobConfig} setJobConfig={setJobConfig} />}
+            {!isSliderSpace && <Checkbox
               label="Sample on Record Low"
               checked={jobConfig.config.process[0].save.sample_on_record_low ?? true}
               onChange={value => setJobConfig(value, 'config.process[0].save.sample_on_record_low')}
               docKey="config.process[0].save.sample_on_record_low"
-            />
+            />}
             <div className={sampleTopStyleClass}>
               <div>
                 <NumberInput
@@ -2571,7 +2877,7 @@ export default function SimpleJob({
                 </FormGroup>
               </div>
             </div>
-            <TextInput
+            {!isSliderSpace && <TextInput
               label="Inference LoRA Path"
               value={jobConfig.config.process[0].model.inference_lora_path ?? ''}
               docKey="config.process[0].model.inference_lora_path"
@@ -2584,7 +2890,7 @@ export default function SimpleJob({
               }}
               placeholder="output/krea2_raw_to_turbo_r256.safetensors"
               className="pt-2"
-            />
+            />}
             <div className="pt-4">
               <Checkbox
                 label="Use ComfyUI Renderer"
@@ -2711,6 +3017,7 @@ export default function SimpleJob({
                 />
               </div>
             )}
+            {!(isSliderSpace && jobConfig.config.process[0].sliderspace?.preview_auto) && <>
             <div className="pt-2 mb-2 flex items-center justify-between">
               <label className="block text-xs text-gray-300">
                 Sample Prompts ({jobConfig.config.process[0].sample.samples.length})
@@ -2935,7 +3242,7 @@ export default function SimpleJob({
                             }}
                             placeholder={`${jobConfig.config.process[0].sample.walk_seed ? jobConfig.config.process[0].sample.seed + i : jobConfig.config.process[0].sample.seed} (default)`}
                           />
-                          <TextInput
+                          {!isSliderSpace && <TextInput
                             label={`LoRA Scale`}
                             value={sample.network_multiplier ? `${sample.network_multiplier}` : ''}
                             onChange={value => {
@@ -2958,7 +3265,7 @@ export default function SimpleJob({
                               }
                             }}
                             placeholder={`1.0 (default)`}
-                          />
+                          />}
                         </div>
                       </div>
                       {modelArch?.additionalSections?.includes('datasets.multi_control_paths') && (
@@ -3031,14 +3338,15 @@ export default function SimpleJob({
             >
               Add Prompt
             </button>
+            </>}
           </Card>
         </div>
 
         {status === 'success' && <p className="text-green-500 text-center">Training saved successfully!</p>}
         {status === 'error' && <p className="text-red-500 text-center">Error saving training. Please try again.</p>}
       </form>
-      <Modal isOpen={savePromptSetOpen} onClose={() => setSavePromptSetOpen(false)} title="Save Prompt Set" size="sm">
-        <form onSubmit={event => { event.preventDefault(); void savePromptSet(); }} className="space-y-4 p-4">
+      <Modal isOpen={savePromptSetOpen} onClose={() => setSavePromptSetOpen(false)} title="Save Prompt Set As" size="sm">
+        <form onSubmit={event => { event.preventDefault(); void savePromptSet(newPromptSetName, true); }} className="space-y-4 p-4">
           <TextInput
             label="Prompt set name"
             value={newPromptSetName}
@@ -3047,7 +3355,7 @@ export default function SimpleJob({
             required
           />
           <p className="text-xs text-gray-400">
-            Names may contain letters, numbers, spaces, dots, underscores and hyphens. Existing sets are not overwritten.
+            Names may contain letters, numbers, spaces, dots, underscores and hyphens. You will be asked to confirm an overwrite.
           </p>
           {promptSetError && <p className="text-sm text-red-400" role="alert">{promptSetError}</p>}
           <div className="flex justify-end gap-2">
@@ -3055,7 +3363,7 @@ export default function SimpleJob({
               className="rounded bg-gray-700 px-4 py-2 text-white hover:bg-gray-600">Cancel</button>
             <button type="submit" disabled={promptSetBusy || !newPromptSetName.trim()}
               className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40">
-              {promptSetBusy ? 'Saving…' : 'Save'}
+              {promptSetBusy ? 'Saving…' : 'Save As'}
             </button>
           </div>
         </form>

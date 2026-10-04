@@ -2,6 +2,7 @@ import importlib.util
 import os
 import pathlib
 import sys
+import tempfile
 import types
 import unittest
 from types import SimpleNamespace
@@ -84,6 +85,47 @@ def make_krea_model():
 
 
 class Krea2QuantizedCacheTests(unittest.TestCase):
+    def test_fresh_and_warm_loads_identify_the_same_quantized_artifact(self):
+        from toolkit.flow_cache_identity import _component_info
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = str(pathlib.Path(directory) / "transformer.pt")
+            source = pathlib.Path(directory) / "raw.safetensors"
+            torch.save({"weight": torch.ones(2)}, source)
+            transformer = FakeModule()
+            transformer.aitk_load_files = [str(source)]
+            fresh = make_krea_model()
+            fresh.get_quantized_module_cache_path.return_value = cache
+            fresh._load_transformer = mock.Mock(return_value=transformer)
+            fresh.load_quantized_module_cache = mock.Mock(return_value=None)
+            fresh.save_quantized_module_cache.side_effect = lambda module, path, component: torch.save(module, path)
+            with (
+                mock.patch.object(KREA_MODULE, "quantize_model") as quantize,
+                mock.patch.object(KREA_MODULE, "Krea2Pipeline", return_value="pipeline"),
+                mock.patch.object(Krea2Model, "get_train_scheduler", return_value="scheduler"),
+            ):
+                fresh.load_model()
+                quantize.assert_called_once()
+            fresh_identity = _component_info(fresh.model)
+            self.assertEqual(fresh.model.aitk_load_files, [cache])
+
+            warm = make_krea_model()
+            warm.get_quantized_module_cache_path.return_value = cache
+            warm._load_transformer = mock.Mock()
+            # Trusted fixture artifact created above, as in the real module cache.
+            warm.load_quantized_module_cache = mock.Mock(return_value=torch.load(cache, weights_only=False))
+            with (
+                mock.patch.object(KREA_MODULE, "quantize_model") as quantize,
+                mock.patch.object(KREA_MODULE, "Krea2Pipeline", return_value="pipeline"),
+                mock.patch.object(Krea2Model, "get_train_scheduler", return_value="scheduler"),
+            ):
+                warm.load_model()
+                quantize.assert_not_called()
+            warm._load_transformer.assert_not_called()
+            warm.save_quantized_module_cache.assert_not_called()
+            self.assertEqual(_component_info(warm.model), fresh_identity)
+            self.assertTrue(source.is_file())
+
     def test_quantized_transformer_is_saved_to_cache_after_cache_miss(self):
         model = make_krea_model()
         transformer = FakeModule()

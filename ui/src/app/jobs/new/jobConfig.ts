@@ -1,7 +1,73 @@
 'use client';
 import { isMac } from '@/helpers/basic';
 import { defaultComfySampleConfig, defaultSampleConfig } from '@/helpers/defaultSamples';
-import { JobConfig, SampleConfig, DatasetConfig, SliderConfig } from '@/types';
+import { JobConfig, SampleConfig, DatasetConfig, SliderConfig, SliderSpaceConfig } from '@/types';
+import { defaultDiffusionKTOConfig } from './trainingCapabilities';
+
+export const defaultSliderSpaceConfig: SliderSpaceConfig = {
+  discovery_mode: 'generated',
+  discovery_datasets: [],
+  discovery_buckets: true,
+  concept_prompts: [''],
+  num_directions: 4,
+  discovery_samples: 128,
+  resolution: 512,
+  discovery_steps: 20,
+  cfg_scale: 4,
+  negative_prompt: '',
+  seed: 42,
+  feature_encoder: 'openai/clip-vit-base-patch32',
+  feature_device: 'cpu',
+  loss_weight: 1,
+  preview_direction: 1,
+  preview_strength: 1,
+  preview_auto: false,
+  preview_auto_strengths: '-1, 1',
+};
+
+export const activateSliderSpace = (config: JobConfig): JobConfig => {
+  const process = config.config.process[0];
+  process.sliderspace = { ...defaultSliderSpaceConfig, concept_prompts: [''], discovery_datasets: [] };
+  process.datasets = [];
+  process.trigger_word = null;
+  process.save.save_format = 'safetensors';
+  process.save.push_to_hub = false;
+  process.network = {
+    ...process.network,
+    type: 'lora', linear: 4, linear_alpha: 4, conv: 0, conv_alpha: 0,
+    lokr_full_rank: true, lokr_factor: -1,
+    network_kwargs: { ...process.network?.network_kwargs },
+  };
+  delete process.network.pretrained_lora_path;
+  delete process.network.network_kwargs.full_train_in_out;
+  if (process.model.arch !== 'qwen_image_2') delete process.model.assistant_lora_path;
+  delete process.model.inference_lora_path;
+  delete process.model.unconditional_lora_path;
+  Object.assign(process.train, {
+    batch_size: 1, gradient_accumulation: 1, steps: 1000,
+    train_unet: true, train_text_encoder: false,
+    noise_scheduler: 'flowmatch', timestep_type: 'shift', content_or_style: 'balanced',
+    cache_text_embeddings: false, unload_text_encoder: true,
+    loss_type: 'mse', frequency_loss_type: 'none',
+    diff_output_preservation: false, blank_prompt_preservation: false,
+    do_cfg: false, do_random_cfg: false, do_guidance_loss: false, do_differential_guidance: false,
+    train_refiner: false, merge_network_on_save: false, lr: 0.0001,
+  });
+  if (process.train.ema_config) process.train.ema_config.use_ema = false;
+  delete process.train.validation_config;
+  const extraTrain = process.train as unknown as Record<string, unknown>;
+  for (const key of ['gradient_accumulation_steps', 'do_prior_divergence', 'train_turbo', 'do_fft_loss',
+    'learnable_snr_gos', 'diffusion_feature_extractor_path', 'inverted_mask_prior', 'correct_pred_norm', 'free_u', 'do_paramiter_swapping']) {
+    delete extraTrain[key];
+  }
+  const extraProcess = process as unknown as Record<string, unknown>;
+  for (const key of ['adapter', 'decorator', 'embedding']) delete extraProcess[key];
+  if (!process.sample.samples?.length || JSON.stringify(process.sample.samples) === JSON.stringify(defaultSampleConfig.samples)) {
+    process.sample.samples = [{ prompt: '' }];
+  }
+  process.sample.walk_seed = false;
+  return config;
+};
 
 export const defaultDatasetConfig: DatasetConfig = {
   folder_path: '/path/to/images/folder',
@@ -67,6 +133,7 @@ export const defaultJobConfig: JobConfig = {
           lokr_full_rank: true,
           lokr_factor: -1,
           save_magnitude_less_lora: false,
+          loha_dora: false,
           network_kwargs: {
             ignore_if_contains: [],
           },
@@ -150,6 +217,40 @@ export const defaultJobConfig: JobConfig = {
 };
 
 export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
+  if (jobConfig.config.process[0]?.type === 'sliderspace') {
+    const process = jobConfig.config.process[0];
+    if ((process.sliderspace !== undefined && (process.sliderspace === null || typeof process.sliderspace !== 'object' || Array.isArray(process.sliderspace)))
+      || !process.train || typeof process.train !== 'object' || Array.isArray(process.train)
+      || !process.model || typeof process.model !== 'object' || Array.isArray(process.model)
+      || !process.save || typeof process.save !== 'object' || Array.isArray(process.save)) return jobConfig;
+    // Fill absent settings without overwriting imported choices or hiding invalid values.
+    process.sliderspace = {
+      ...defaultSliderSpaceConfig,
+      concept_prompts: [''],
+      discovery_datasets: [],
+      // Old configurations used square cropping; do not silently change resume.
+      discovery_buckets: false,
+      ...process.sliderspace,
+    };
+    process.datasets ??= [];
+  }
+  if (['qwen_guidance_distillation', 'guidance_distillation'].includes(jobConfig.config.process[0]?.type)) {
+    jobConfig.config.process[0].guidance_distillation = {
+      teacher_cfg_scale: 4,
+      negative_prompt: '',
+      objective: 'full_guidance',
+      ...jobConfig.config.process[0].guidance_distillation,
+    };
+  }
+  if (jobConfig.config.process[0]?.type === 'diffusion_kto') {
+    const process = jobConfig.config.process[0];
+    const settings = process.diffusion_kto;
+    // Fill missing objective settings, but never invent feedback labels or
+    // silently repair malformed imports; shared validation reports those.
+    if (settings === undefined || (settings !== null && typeof settings === 'object' && !Array.isArray(settings))) {
+      process.diffusion_kto = { ...defaultDiffusionKTOConfig, ...settings };
+    }
+  }
   // upgrade prompt strings to samples
   if (
     jobConfig?.config?.process &&

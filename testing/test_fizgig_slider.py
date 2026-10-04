@@ -151,6 +151,34 @@ class FizgigSliderTests(unittest.TestCase):
         self.assertIsNone(calls[1]["unconditional_embeddings"])
         self.assertEqual(calls[1]["guidance_scale"], 1.0)
 
+    def test_cross_model_image_captions_skip_text_cfg_but_prompt_negatives_do_not(self):
+        noisy, timestep = torch.zeros(1, 1, 2, 2), torch.tensor([500.0])
+        for arch in ('krea2', 'anima', 'ideogram4'):
+            with self.subTest(arch=arch):
+                calls = []
+                def predict_noise(**kwargs):
+                    calls.append(kwargs)
+                    value = 2 if kwargs['conditional_embeddings'] == 'positive' else 1
+                    return torch.full_like(noisy, value)
+                fake = SimpleNamespace(sd=SimpleNamespace(arch=arch, predict_noise=predict_noise,
+                    model_config=SimpleNamespace(model_kwargs={'ideogram_cfg_reference': 'negative_prompt'})),
+                                       slider_cfg=4.5, cfg_reference='negative_prompt')
+                result = FizgigSliderTrainer._predict(fake, noisy, timestep, 'positive')
+                self.assertEqual(len(calls), 1)
+                torch.testing.assert_close(result, torch.full_like(noisy, 2))
+                calls.clear()
+                result = FizgigSliderTrainer._predict(fake, noisy, timestep, 'positive', 'negative')
+                self.assertEqual(len(calls), 2)
+                torch.testing.assert_close(result, torch.full_like(noisy, 5.5))
+
+    def test_ideogram_native_image_only_reference_keeps_cfg_without_text_negative(self):
+        fake = SimpleNamespace(sd=SimpleNamespace(arch='ideogram4'),
+                               slider_cfg=4.5, cfg_reference='image_only')
+        noisy, timestep = torch.zeros(1, 1, 2, 2), torch.tensor([500.0])
+        with patch('extensions_built_in.sd_trainer.FizgigSliderTrainer.guided_flow_prediction') as predict:
+            FizgigSliderTrainer._predict(fake, noisy, timestep, 'positive')
+        predict.assert_called_once_with(fake.sd, noisy, timestep, 'positive', None, 4.5)
+
     def test_prompt_slider_constructor_discards_dataset(self):
         config = {
             "type": "fizgig_prompt_slider",
@@ -359,14 +387,17 @@ class FizgigSliderTests(unittest.TestCase):
             is_active = True
 
         rendered = []
+        helper = SimpleNamespace(is_active=True)
 
         def pipeline(neutral, **kwargs):
+            self.assertTrue(helper.is_active)
+            self.assertFalse(fake.network.is_active)
             rendered.append((neutral.value, kwargs["unconditional_embeds"].value,
                              kwargs["guidance_scale"]))
             return [Image.new("RGB", (64, 64))]
 
         sd = SimpleNamespace(
-            assistant_lora=None, torch_dtype=torch.float32, vae_torch_dtype=torch.float32,
+            assistant_lora=helper, torch_dtype=torch.float32, vae_torch_dtype=torch.float32,
             save_device_state=lambda: None, restore_device_state=lambda: None,
             text_encoder_to=lambda device: None, unet=SimpleNamespace(to=lambda device: None),
             vae=SimpleNamespace(to=lambda device: None), vae_device_torch=torch.device("cpu"),
@@ -386,6 +417,7 @@ class FizgigSliderTests(unittest.TestCase):
             sample_config=SimpleNamespace(seed=42), print=lambda *args: None,
         )
         FizgigSliderTrainer._build_prompt_bank(fake)
+        self.assertTrue(helper.is_active)
         self.assertEqual(rendered, [
             ("first", "negative first", 3.0), ("second", "negative second", 3.0),
             ("first", "negative first", 3.0), ("second", "negative second", 3.0),

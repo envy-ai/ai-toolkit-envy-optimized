@@ -113,7 +113,7 @@ def _dequantize_fp8_state_dict(
     return out
 
 
-def _load_component_state_dict(base: str, subfolder: str, basename: str) -> dict:
+def _load_component_state_dict(base: str, subfolder: str, basename: str, *, source_files=None) -> dict:
     """Load a component's weights whether local or on the hub, sharded or single."""
     index_name = f"{basename}.safetensors.index.json"
     single_name = f"{basename}.safetensors"
@@ -123,8 +123,11 @@ def _load_component_state_dict(base: str, subfolder: str, basename: str) -> dict
     if os.path.isdir(local_dir):
         index_path = os.path.join(local_dir, index_name)
         if os.path.exists(index_path):
-            return _load_sharded(local_dir, index_path, is_local=True)
-        return load_file(os.path.join(local_dir, single_name))
+            return _load_sharded(local_dir, index_path, is_local=True, source_files=source_files)
+        single_path = os.path.join(local_dir, single_name)
+        if source_files is not None:
+            source_files.append(single_path)
+        return load_file(single_path)
 
     # Hub repo layout: <subfolder>/<file>
     prefix = f"{subfolder}/" if subfolder else ""
@@ -132,19 +135,23 @@ def _load_component_state_dict(base: str, subfolder: str, basename: str) -> dict
         index_path = huggingface_hub.hf_hub_download(
             repo_id=base, filename=f"{prefix}{index_name}", token=HF_TOKEN
         )
-        return _load_sharded(base, index_path, is_local=False, prefix=prefix)
+        return _load_sharded(base, index_path, is_local=False, prefix=prefix, source_files=source_files)
     except EntryNotFoundError:
         single_path = huggingface_hub.hf_hub_download(
             repo_id=base, filename=f"{prefix}{single_name}", token=HF_TOKEN
         )
+        if source_files is not None:
+            source_files.append(single_path)
         return load_file(single_path)
 
 
-def _load_sharded(base, index_path, is_local, prefix="") -> dict:
+def _load_sharded(base, index_path, is_local, prefix="", *, source_files=None) -> dict:
     import json
 
     with open(index_path) as f:
         index = json.load(f)
+    if source_files is not None:
+        source_files.append(index_path)
     shard_files = sorted(set(index["weight_map"].values()))
     state_dict = {}
     num_shards = len(shard_files)
@@ -157,6 +164,8 @@ def _load_sharded(base, index_path, is_local, prefix="") -> dict:
                 repo_id=base, filename=f"{prefix}{shard}", token=HF_TOKEN
             )
         print_acc(f"    loading shard {i + 1}/{num_shards}: {shard}")
+        if source_files is not None:
+            source_files.append(shard_path)
         state_dict.update(load_file(shard_path))
     return state_dict
 
@@ -238,8 +247,9 @@ class Ideogram4Model(BaseModel):
 
         transformer_config = Ideogram4Config()
         self.print_and_status_update("  - fetching transformer weights")
+        source_files = []
         state_dict = _load_component_state_dict(
-            base, "transformer", "diffusion_pytorch_model"
+            base, "transformer", "diffusion_pytorch_model", source_files=source_files
         )
         self.print_and_status_update("  - dequantizing transformer weights")
         state_dict = _dequantize_fp8_state_dict(
@@ -249,6 +259,7 @@ class Ideogram4Model(BaseModel):
         transformer = Ideogram4Transformer2DModel.load_from_state_dict(
             state_dict, dtype, config=transformer_config
         )
+        transformer.aitk_load_files = source_files
         del state_dict
         flush()
 
@@ -265,9 +276,11 @@ class Ideogram4Model(BaseModel):
     def _load_vae(self, base: str):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading VAE")
-        vae_sd = _load_component_state_dict(base, "vae", "diffusion_pytorch_model")
+        source_files = []
+        vae_sd = _load_component_state_dict(base, "vae", "diffusion_pytorch_model", source_files=source_files)
         vae_sd = convert_diffusers_state_dict(vae_sd)
         vae = AutoEncoder.load_from_state_dict(vae_sd, self.vae_torch_dtype)
+        vae.aitk_load_files = source_files
         del vae_sd
         vae_device = "cpu" if self.model_config.low_vram else self.vae_device_torch
         vae.to(vae_device, dtype=dtype)
@@ -564,7 +577,7 @@ class Ideogram4Model(BaseModel):
             images = self.vae.decoder(z)
             return images
         finally:
-            if self.model_config.low_vram:
+            if self.model_config.low_vram and not getattr(self, '_training_decode_depth', 0):
                 self.vae.to("cpu")
                 flush()
 

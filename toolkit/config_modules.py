@@ -204,7 +204,7 @@ class LoRMConfig:
         })
 
 
-NetworkType = Literal['lora', 'locon', 'lorm', 'lokr', 'dora']
+NetworkType = Literal['lora', 'locon', 'lorm', 'lokr', 'dora', 'loha']
 
 
 class NetworkConfig:
@@ -253,6 +253,7 @@ class NetworkConfig:
 
         # Use the old lokr format
         self.old_lokr_format = kwargs.get('old_lokr_format', False)
+        self.loha_dora: bool = kwargs.get('loha_dora', False)
 
         # for multi stage models
         self.split_multistage_loras = kwargs.get('split_multistage_loras', True)
@@ -960,7 +961,8 @@ class SliderConfig:
         self.resolutions: List[List[int]] = kwargs.get('resolutions', [[512, 512]])
         self.prompt_file: str = kwargs.get('prompt_file', None)
         self.prompt_tensors: str = kwargs.get('prompt_tensors', None)
-        self.batch_full_slide: bool = kwargs.get('batch_full_slide', True)
+        # Match the form and avoid retaining all signed-action graphs by default.
+        self.batch_full_slide: bool = kwargs.get('batch_full_slide', False)
         self.use_adapter: bool = kwargs.get('use_adapter', None)  # depth
         self.adapter_img_dir = kwargs.get('adapter_img_dir', None)
         self.low_ram = kwargs.get('low_ram', False)
@@ -1067,6 +1069,9 @@ class DatasetConfig:
         self.unconditional_path: str = kwargs.get('unconditional_path',
                                                   None)  # path where matching unconditional images are located
         self.flow_dpo_pair: bool = kwargs.get('flow_dpo_pair', False)
+        self.kto_label = kwargs.get('kto_label')
+        if self.kto_label is not None and self.kto_label not in ('liked', 'disliked'):
+            raise ValueError('kto_label must be liked or disliked')
         self.invert_mask: bool = kwargs.get('invert_mask', False)  # invert mask
         self.mask_min_value: float = kwargs.get('mask_min_value', 0.0)  # min value for . 0 - 1
         self.poi: Union[str, None] = kwargs.get('poi', None)
@@ -1081,6 +1086,8 @@ class DatasetConfig:
         # Qwen/Fizgig image sliders rely on a cached +1 pole; tie that cache
         # to source modification time so a re-export never trains stale pairs.
         self.fizgig_slider_pair: bool = kwargs.get('fizgig_slider_pair', False)
+        self.fizgig_slider_anchor: bool = kwargs.get('fizgig_slider_anchor', False)
+        self.fizgig_multipoint_group = kwargs.get('fizgig_multipoint_group')
         # cache tensors to disk. Useful for saving video files tensors to the disk so we have the clean pixelspace versions of video and audio
         self.cache_tensors_to_disk: bool = kwargs.get('cache_tensors_to_disk', False)
 

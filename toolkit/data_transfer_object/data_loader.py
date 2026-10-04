@@ -89,6 +89,9 @@ class FileItemDTO(
         self.cache_processed_control_text_embeddings = kwargs.get(
             "cache_processed_control_text_embeddings", False
         )
+        self.text_embedding_control_presentation = getattr(
+            _sd, '_specialized_control_presentation', None
+        )
         self.encode_first_frame_in_text_embeddings = kwargs.get(
             "encode_first_frame_in_text_embeddings", False
         )

@@ -6,7 +6,7 @@ import { getFilename, getFoldername, encodeFilePathForUrl } from '@/utils/basic'
 import { openConfirm } from './ConfirmModal';
 import { apiClient } from '@/utils/api';
 
-export default function FilesWidget({ jobID, jobName }: { jobID: string; jobName: string }) {
+export default function FilesWidget({ jobID, jobName, isSliderSpace = false }: { jobID: string; jobName: string; isSliderSpace?: boolean }) {
   const { files, status, refreshFiles } = useFilesList(jobID, 5000);
 
   const isOptimizerFile = (filePath: string) => getFilename(filePath) === 'optimizer.pt';
@@ -50,10 +50,10 @@ export default function FilesWidget({ jobID, jobName }: { jobID: string; jobName
       <div className="bg-gray-800 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center space-x-2">
           <Brain className="w-5 h-5 text-purple-600 dark:text-purple-400" />
-          <h2 className="font-semibold text-gray-100">Checkpoints</h2>
+          <h2 className="font-semibold text-gray-100">{isSliderSpace ? 'Direction LoRAs' : 'Checkpoints'}</h2>
           <span className="px-2 py-0.5 bg-gray-700 rounded-full text-xs text-gray-300">{checkpointFiles.length}</span>
         </div>
-        {checkpointFiles.length > 0 && (
+        {checkpointFiles.length > 0 && !isSliderSpace && (
           <span
             className="px-3 py-1 rounded-full text-sm bg-purple-500/10 text-purple-500 uppercase cursor-pointer hover:bg-purple-500/20"
             onClick={() => {
@@ -74,6 +74,10 @@ export default function FilesWidget({ jobID, jobName }: { jobID: string; jobName
       </div>
 
       <div className="p-2">
+        {isSliderSpace && <p className="px-2 py-2 text-xs text-gray-400">
+          Load a direction LoRA at positive or negative strength to explore it; 0 returns to the base model.
+          All directions are exported, regardless of preview selection.
+        </p>}
         {status === 'loading' && (
           <div className="flex items-center justify-center py-4">
             <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />

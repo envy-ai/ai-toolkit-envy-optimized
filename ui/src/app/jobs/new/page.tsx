@@ -20,6 +20,8 @@ import SimpleJob from './SimpleJob';
 import AdvancedConfigEditor from '@/components/AdvancedConfigEditor';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { apiClient } from '@/utils/api';
+import { validateSliderSpace, validateSliderSpacePreview } from './sliderspace';
+import { trainingModeVisible, validateTrainingCapabilities } from './trainingCapabilities';
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -71,10 +73,12 @@ export default function TrainingForm() {
         }
 
         migrateJobConfig(parsed);
+        const errors = validateTrainingCapabilities(parsed);
+        if (errors.length) throw new Error(errors.join('\n'));
         setJobConfig(parsed);
       } catch (err) {
         console.error('Failed to parse config file:', err);
-        alert('Failed to parse config file. Please check the file format.');
+        alert(err instanceof Error ? err.message : 'Failed to parse config file. Please check the file format.');
       }
     };
     reader.readAsText(file);
@@ -160,6 +164,12 @@ export default function TrainingForm() {
 
   const saveJob = async () => {
     if (status === 'saving') return;
+    const errors = sampleOnlyMode ? validateSliderSpacePreview(jobConfig) :
+      [...validateTrainingCapabilities(jobConfig), ...validateSliderSpace(jobConfig)];
+    if (errors.length) {
+      alert(errors.join('\n') + (!sampleOnlyMode ? '\nUse Show Advanced to correct settings that are not shown in the simple form.' : ''));
+      return;
+    }
     const nameOrPath = jobConfig.config.process[0].model.name_or_path;
     if (typeof nameOrPath !== 'string' || nameOrPath.trim() === '') {
       alert('Select a model architecture or enter a base model name/path before saving.');
@@ -186,6 +196,8 @@ export default function TrainingForm() {
       .catch(error => {
         if (error.response?.status === 409) {
           alert('Training name already exists. Please choose a different name.');
+        } else if (error.response?.status === 400 && typeof error.response.data?.error === 'string') {
+          alert(error.response.data.error);
         } else {
           alert('Failed to save job. Please try again.');
         }
@@ -241,6 +253,7 @@ export default function TrainingForm() {
               <SelectInput
                 value={`${jobConfig?.config.process[0].type}`}
                 onChange={value => {
+                  if (value === jobConfig.config.process[0].type) return;
                   let nextConfig = objectCopy(jobConfig);
                   const currentOption = jobTypeOptions.find(
                     option => option.value === nextConfig?.config.process[0].type,
@@ -255,11 +268,8 @@ export default function TrainingForm() {
                   nextConfig.config.process[0].type = value;
                   setJobConfig(nextConfig);
                 }}
-                options={jobTypeOptions.filter(option =>
-                  jobConfig.config.process[0].model.arch === 'qwen_image_2'
-                  || (!option.value.startsWith('fizgig_') && option.value !== 'qwen_flow_dpo')
-                  || option.value === jobConfig.config.process[0].type,
-                )}
+                options={jobTypeOptions.filter(option => trainingModeVisible(
+                  jobConfig.config.process[0].model.arch, option.value, jobConfig.config.process[0].type))}
               />
             </div>
             <div className="hidden sm:block mx-4 bg-gray-200 dark:bg-gray-800 w-1 h-6"></div>

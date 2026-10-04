@@ -4,6 +4,9 @@ import { isMac } from '@/helpers/basic';
 import fs from 'fs';
 import path from 'path';
 import { cached } from '@/server/apiCache';
+import { mergeSampleOnlyJobConfig } from '@/helpers/sampleOnlyJobConfig';
+import { validateTrainingCapabilities } from '@/app/jobs/new/trainingCapabilities';
+import { validateSliderSpace } from '@/app/jobs/new/sliderspace';
 
 const TOOLKIT_ROOT = path.resolve('@', '..', '..');
 const defaultTrainFolder = path.join(TOOLKIT_ROOT, 'output');
@@ -22,40 +25,6 @@ const getTrainingFolder = async () => {
     return row.value as string;
   }
   return defaultTrainFolder;
-};
-
-const mergeSampleOnlyJobConfig = (existingConfig: any, incomingConfig: any) => {
-  const mergedConfig = cloneJson(existingConfig);
-  const existingProcess = mergedConfig.config.process[0];
-  const incomingProcess = incomingConfig.config.process[0];
-
-  // Whitelist: existingConfig.config.process[0].sample is replaced by incomingConfig.config.process[0].sample.
-  existingProcess.sample = cloneJson(incomingProcess.sample);
-
-  if (typeof incomingProcess.save?.sample_on_record_low === 'boolean') {
-    existingProcess.save = {
-      ...existingProcess.save,
-      sample_on_record_low: incomingProcess.save.sample_on_record_low,
-    };
-  }
-
-  if (incomingProcess.model && existingProcess.model) {
-    if (incomingProcess.model.inference_lora_path === undefined) {
-      delete existingProcess.model.inference_lora_path;
-    } else {
-      existingProcess.model.inference_lora_path = incomingProcess.model.inference_lora_path;
-    }
-  }
-
-  if (incomingProcess.train && existingProcess.train) {
-    for (const key of ['skip_first_sample', 'force_first_sample', 'disable_sampling']) {
-      if (key in incomingProcess.train) {
-        existingProcess.train[key] = incomingProcess.train[key];
-      }
-    }
-  }
-
-  return mergedConfig;
 };
 
 const writeRunningJobConfigSnapshot = async (jobName: string, jobConfig: any) => {
@@ -185,6 +154,10 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const { id, name, job_config, sample_only } = body;
+    if (!sample_only) {
+      const errors = [...validateTrainingCapabilities(job_config), ...validateSliderSpace(job_config)];
+      if (errors.length) return NextResponse.json({ error: [...new Set(errors)].join('\n') }, { status: 400 });
+    }
     let gpu_ids: string = body.gpu_ids;
 
     if (isMac()) {
@@ -216,7 +189,12 @@ export async function POST(request: Request) {
         }
 
         const existingConfig = JSON.parse(existingJob.job_config);
-        const mergedConfig = mergeSampleOnlyJobConfig(existingConfig, job_config);
+        let mergedConfig;
+        try {
+          mergedConfig = mergeSampleOnlyJobConfig(existingConfig, job_config);
+        } catch (error) {
+          return NextResponse.json({ error: error instanceof Error ? error.message : 'Invalid sample settings' }, { status: 400 });
+        }
         await writeRunningJobConfigSnapshot(existingJob.name, mergedConfig);
 
         const training = await prisma.job.update({

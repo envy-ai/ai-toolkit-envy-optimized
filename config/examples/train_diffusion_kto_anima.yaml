@@ -1,0 +1,89 @@
+---
+# Experimental flow-velocity KTO adaptation; actual-model quality/VRAM fit is unverified.
+# Replace all component/dataset paths. Liked and disliked images are NOT paired.
+job: extension
+config:
+  name: anima_diffusion_kto
+  process:
+    - type: diffusion_kto
+      training_folder: output
+      device: cuda:0
+      model:
+        arch: anima
+        name_or_path: /path/to/anima/base
+        quantize: true
+        quantize_te: true
+        qtype: convrotint4
+        qtype_te: qfloat8
+        low_vram: true
+        model_kwargs:
+          train_text_conditioner: false
+      network:
+        type: lora
+        linear: 16
+        linear_alpha: 16
+      diffusion_kto:
+        beta: 1 # Unweighted flow-MSE surrogate: do not copy SD 1.5 beta.
+        liked_weight: 1
+        disliked_weight: 1
+        reference_estimator: score_window # batch_mean is the published default.
+        score_window_size: 4 # Requires gradient_accumulation >= 4.
+      datasets:
+        - folder_path: /path/to/liked/images
+          kto_label: liked
+          caption_ext: txt
+          caption_dropout_rate: 0
+          cache_latents_to_disk: true
+          resolution: [768, 1024]
+          buckets: true
+          shuffle_tokens: false
+          num_repeats: 1
+          loss_multiplier: 1
+        - folder_path: /path/to/disliked/images
+          kto_label: disliked
+          caption_ext: txt
+          caption_dropout_rate: 0
+          cache_latents_to_disk: true
+          resolution: [768, 1024]
+          buckets: true
+          shuffle_tokens: false
+          num_repeats: 1
+          loss_multiplier: 1
+      train:
+        batch_size: 1
+        gradient_accumulation: 4
+        steps: 1000
+        train_unet: true
+        train_text_encoder: false
+        cache_text_embeddings: true
+        unload_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        timestep_type: shift
+        min_denoising_steps: 0
+        max_denoising_steps: 999
+        optimizer: adamw8bit
+        lr: 0.0001
+        dtype: bf16
+        loss_type: mse
+      save:
+        save_format: safetensors
+        dtype: bf16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      sample:
+        sampler: flowmatch
+        sample_every: 250
+        sample_steps: 25
+        width: 768
+        height: 768
+        guidance_scale: 4
+        neg: ""
+        seed: 42
+        walk_seed: false
+        samples:
+          - prompt: A cat sitting beside a sunny window, detailed illustration
+            network_multiplier: 1
+meta:
+  name: "[name]"
+  version: "1.0"

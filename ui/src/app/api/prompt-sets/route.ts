@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import YAML from 'yaml';
 import { TOOLKIT_ROOT } from '@/paths';
+import { validateMultipointConfig } from '@/app/jobs/new/fizgigMultipoint';
+import type { FizgigMultipointConfig } from '@/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -32,6 +35,9 @@ type PromptSet = {
   cfg_negative_prefix: string;
   cfg_negative_prefix_positive: string;
   cfg_negative_prefix_negative: string;
+  anchor_prompts?: { prompt: string; negative_prompt?: string }[];
+  multipoint?: boolean;
+  multipoint_config?: FizgigMultipointConfig;
 };
 
 const errorResponse = (message: string, status: number) => NextResponse.json({ error: message }, { status });
@@ -73,6 +79,21 @@ function validatePromptSet(value: unknown): PromptSet | null {
       return null;
     }
   }
+  let anchors: PromptSet['anchor_prompts'];
+  if (data.anchor_prompts !== undefined) {
+    if (!Array.isArray(data.anchor_prompts) || data.anchor_prompts.length > 128) return null;
+    anchors = [];
+    for (const raw of data.anchor_prompts) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+      const anchor = raw as Record<string, unknown>;
+      if (!validText(anchor.prompt) ||
+          (anchor.negative_prompt !== undefined && !validText(anchor.negative_prompt))) return null;
+      anchors.push({ prompt: anchor.prompt, ...(anchor.negative_prompt === undefined ? {} : { negative_prompt: anchor.negative_prompt as string }) });
+    }
+  }
+  if (data.multipoint !== undefined && typeof data.multipoint !== 'boolean') return null;
+  const multipoint = data.multipoint_config === undefined ? undefined : validateMultipointConfig(data.multipoint_config);
+  if (multipoint === null || (data.multipoint === true && multipoint === undefined)) return null;
   return {
     version: 1,
     prompt_entries: entries,
@@ -81,6 +102,9 @@ function validatePromptSet(value: unknown): PromptSet | null {
     cfg_negative_prefix: data.cfg_negative_prefix as string,
     cfg_negative_prefix_positive: data.cfg_negative_prefix_positive as string,
     cfg_negative_prefix_negative: data.cfg_negative_prefix_negative as string,
+    ...(anchors === undefined ? {} : { anchor_prompts: anchors }),
+    ...(data.multipoint === undefined ? {} : { multipoint: data.multipoint as boolean }),
+    ...(multipoint === undefined ? {} : { multipoint_config: multipoint }),
   };
 }
 
@@ -138,6 +162,24 @@ export async function POST(request: NextRequest) {
     const yaml = YAML.stringify(promptSet, { lineWidth: 0 });
     if (Buffer.byteLength(yaml, 'utf8') > MAX_FILE_SIZE) return errorResponse('Prompt set is too large.', 400);
     await fs.mkdir(PROMPT_SETS_DIR, { recursive: true });
+    if (body?.overwrite === true) {
+      let stat;
+      try {
+        stat = await fs.lstat(filePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return errorResponse('Prompt set not found.', 404);
+        throw error;
+      }
+      if (!stat.isFile()) return errorResponse('Invalid prompt set file.', 400);
+      const temporaryPath = path.join(PROMPT_SETS_DIR, `.${body.name}.${randomUUID()}.tmp`);
+      try {
+        await fs.writeFile(temporaryPath, yaml, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+        await fs.rename(temporaryPath, filePath);
+      } finally {
+        await fs.rm(temporaryPath, { force: true });
+      }
+      return NextResponse.json({ name: body.name });
+    }
     try {
       await fs.writeFile(filePath, yaml, { encoding: 'utf8', flag: 'wx' });
     } catch (error) {
@@ -149,5 +191,28 @@ export async function POST(request: NextRequest) {
     if (error instanceof SyntaxError) return errorResponse('Invalid JSON request.', 400);
     console.error('Failed to save prompt set:', error);
     return errorResponse('Could not save prompt set.', 500);
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const name = request.nextUrl.searchParams.get('name');
+    const filePath = filePathForName(name);
+    if (!filePath) return errorResponse('Invalid prompt set name.', 400);
+    await fs.mkdir(PROMPT_SETS_DIR, { recursive: true });
+    let stat;
+    try {
+      stat = await fs.lstat(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return errorResponse('Prompt set not found.', 404);
+      throw error;
+    }
+    if (!stat.isFile()) return errorResponse('Invalid prompt set file.', 400);
+    await fs.unlink(filePath);
+    return NextResponse.json({ name });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return errorResponse('Prompt set not found.', 404);
+    console.error('Failed to delete prompt set:', error);
+    return errorResponse('Could not delete prompt set.', 500);
   }
 }

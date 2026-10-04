@@ -695,3 +695,4 @@ class QwenImage2Model(BaseModel):
         return QwenImage21Transformer2DModel.get_quantization_exclude_modules()
 
     lora_keys_use_comfy_prefix = True
+    lora_accept_bare_transformer_keys = True

@@ -1,0 +1,70 @@
+---
+job: extension
+config:
+  name: qwen21_spaceships_sliderspace
+  process:
+    - type: sliderspace
+      training_folder: output
+      device: cuda:0
+      model:
+        name_or_path: Qwen/Qwen-Image-2.1
+        arch: qwen_image_2
+        quantize: true
+        qtype: convrotint4
+        quantize_te: true
+        qtype_te: qfloat8
+        low_vram: true
+      network:
+        type: lora
+        linear: 4
+        linear_alpha: 4
+      sliderspace:
+        discovery_mode: generated # generated | provided | both
+        discovery_buckets: true # Aspect-ratio buckets for supplied images only.
+        discovery_datasets: [] # Repeat {folder_path: /path/to/images, default_caption: "..."}; recursive.
+        concept_prompts:
+          - A spaceship exploring deep space
+        num_directions: 4
+        discovery_samples: 128
+        resolution: 512
+        discovery_steps: 20
+        cfg_scale: 4
+        negative_prompt: ""
+        seed: 42
+        feature_encoder: openai/clip-vit-base-patch32
+        feature_device: cpu
+        loss_weight: 1
+        preview_direction: 1
+        preview_strength: 1
+      train:
+        batch_size: 1
+        gradient_accumulation: 1
+        steps: 1000 # Total across all directions, not per direction.
+        lr: 0.0001
+        optimizer: adamw8bit
+        dtype: bf16
+        noise_scheduler: flowmatch
+        timestep_type: shift
+        gradient_checkpointing: true
+        cache_text_embeddings: false
+        unload_text_encoder: true
+      save:
+        save_format: safetensors
+        dtype: float16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      sample:
+        sampler: flowmatch
+        sample_every: 250
+        width: 512
+        height: 512
+        seed: 42
+        walk_seed: false
+        guidance_scale: 4
+        sample_steps: 20
+        samples:
+          - prompt: A spaceship exploring deep space
+            neg: ""
+meta:
+  name: "[name]"
+  version: '1.0'

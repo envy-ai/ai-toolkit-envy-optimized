@@ -97,6 +97,8 @@ from toolkit.comfy_sample import (
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH,
     DEFAULT_COMFY_WORKFLOW_PATH,
+    DEFAULT_COMFY_ANIMA_WORKFLOW_PATH,
+    DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
     get_workflow_for_samples,
     get_workflow_for_sample,
     load_workflow,
@@ -920,6 +922,15 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # at render time so already-saved jobs do not feed Qwen's VAE through
         # the incompatible Krea custom VAE loader.
         model_arch = getattr(getattr(self, 'model_config', None), 'arch', None)
+        new_templates = {'anima': DEFAULT_COMFY_ANIMA_WORKFLOW_PATH,
+                         'ideogram4': DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH}
+        known_templates = {DEFAULT_COMFY_WORKFLOW_PATH: 'krea2', DEFAULT_COMFY_BATCH_WORKFLOW_PATH: 'krea2',
+                           DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH: 'qwen_image_2',
+                           DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH: 'qwen_image_2',
+                           **{path: arch for arch, path in new_templates.items()}}
+        if model_arch in new_templates and workflow_path in known_templates and known_templates[workflow_path] != model_arch:
+            raise ValueError(f'Comfy preview workflow is for {known_templates[workflow_path]}, not {model_arch}. '
+                             f'Select {new_templates[model_arch]} and compatible model/VAE/text encoder files.')
         if model_arch == "qwen_image_2" and workflow_path in (
                 DEFAULT_COMFY_WORKFLOW_PATH,
                 DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
@@ -1003,11 +1014,32 @@ class BaseSDTrainProcess(BaseTrainProcess):
             progress_bar.update(progress_bar.total - progress_bar.n)
         progress_bar.close()
 
+    def _get_krea_preview_control_settings(self):
+        if not (getattr(self, 'flow_profile', None) is not None
+                and self.model_config.arch == 'krea2' and self.model_config.model_kwargs.get('edit', False)):
+            return {}
+        background = self.model_config.model_kwargs.get('preview_control_transparent_color')
+        if background is None:
+            colors = {tuple(getattr(ds, 'control_transparent_color', [0, 0, 0]))
+                for ds in getattr(self, 'dataset_configs', [])}
+            if len(colors) > 1:
+                raise ValueError('Krea preview datasets use different alpha backgrounds. Set model_kwargs.preview_control_transparent_color explicitly for the sample references.')
+            background = list(next(iter(colors), (0, 0, 0)))
+        if not isinstance(background, (list, tuple)) or len(background) != 3 or any(type(v) is not int or not 0 <= v <= 255 for v in background):
+            raise ValueError('Krea preview alpha background must be three RGB integers from 0 to 255')
+        sd = getattr(self, 'sd', None)
+        if sd is not None:
+            sd._specialized_preview_background = tuple(background)
+        dtype = str(getattr(sd, 'torch_dtype', get_torch_dtype(self.train_config.dtype))).replace('torch.', '')
+        return {'control_background': list(background), 'model_dtype': dtype}
+
     def _render_comfy_samples(self, gen_img_config_list: List[GenerateImageConfig], sample_config: SampleConfig, step=None):
         if len(gen_img_config_list) == 0:
             return
 
         comfy_config = sample_config.comfy
+        is_krea_edit = (getattr(self, 'flow_profile', None) is not None
+            and self.model_config.arch == 'krea2' and self.model_config.model_kwargs.get('edit', False))
         workflow_path = self._get_comfy_workflow_path(comfy_config)
         is_qwen_image_2_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH
         is_qwen_image_edit_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH
@@ -1032,6 +1064,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
             timeout=comfy_config.timeout,
         )
 
+        def upload_control(path):
+            if is_krea_edit:
+                from toolkit.control_image import load_control_rgb
+                settings = self._get_krea_preview_control_settings()
+                return client.upload_image(path, prepared_image=load_control_rgb(path, settings['control_background']))
+            return client.upload_image(path)
+
         def render(offload_models=True, unload_models=True):
             sample_generation_start = time.perf_counter()
             completed_samples = 0
@@ -1046,7 +1085,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     control_image_path = gen_config.ctrl_img_1 or gen_config.ctrl_img
                     control_image_path_2 = gen_config.ctrl_img_2
                     control_image_path_3 = gen_config.ctrl_img_3
-                    if is_qwen_image_2_workflow:
+                    if is_qwen_image_2_workflow or is_krea_edit:
                         if control_image_path_2 is not None and control_image_path is None:
                             raise ValueError(
                                 f"Qwen Image 2.1 ComfyUI sample {i + 1} has "
@@ -1086,33 +1125,40 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         )
 
                     uploaded_control_image = (
-                        client.upload_image(control_image_path)
+                        upload_control(control_image_path)
                         if control_image_path and (
                             is_qwen_image_2_workflow
                             or is_qwen_image_edit_workflow
                             or is_qwen_image_edit_plus_workflow
                             or is_minimax_h3_fl2v_workflow
+                            or is_krea_edit
                         )
                         else None
                     )
                     uploaded_control_image_2 = (
-                        client.upload_image(control_image_path_2)
+                        upload_control(control_image_path_2)
                         if control_image_path_2 and (
                             is_qwen_image_2_workflow
                             or is_qwen_image_edit_plus_workflow
                             or is_minimax_h3_fl2v_workflow
+                            or is_krea_edit
                         )
                         else None
                     )
                     uploaded_control_image_3 = (
-                        client.upload_image(control_image_path_3)
+                        upload_control(control_image_path_3)
                         if control_image_path_3 and (
                             is_qwen_image_2_workflow
                             or is_qwen_image_edit_plus_workflow
+                            or is_krea_edit
                         )
                         else None
                     )
                     request = ComfySampleRequest(
+                        model_arch=getattr(self.model_config, 'arch', ''),
+                        model_kwargs=getattr(self.model_config, 'model_kwargs', {}),
+                        specialized_flow=getattr(self, 'flow_profile', None) is not None,
+                        **self._get_krea_preview_control_settings(),
                         prompt=gen_config.prompt,
                         negative_prompt=comfy_config.negative_prompt,
                         width=gen_config.width,
@@ -1143,6 +1189,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     )
                     patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)
                     client.begin_live_progress()
+                    if request.specialized_flow and workflow_path in (
+                        DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
+                        DEFAULT_COMFY_ANIMA_WORKFLOW_PATH, DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
+                    ):
+                        client.validate_workflow_schema(patched_workflow)
                     prompt_id = client.post_prompt(patched_workflow)
                     self._log_comfy_prompt_submitted(
                         prompt_id,
@@ -1205,6 +1256,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
         return self._run_with_models_offloaded_for_comfy(render)
 
     def _render_comfy_sample_batch(self, gen_img_config_list: List[GenerateImageConfig], sample_config: SampleConfig, step=None):
+        if (getattr(self, 'flow_profile', None) is not None and self.model_config.arch == 'krea2'
+                and self.model_config.model_kwargs.get('edit', False)):
+            return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
+        if getattr(self.model_config, 'arch', None) in ('anima', 'ideogram4'):
+            print_acc('Anima/Ideogram previews use individual prompts to retain per-image conditioning and CFG.')
+            return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
         if len(gen_img_config_list) == 0:
             return
 
@@ -1350,6 +1407,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     is_batch_group = len(group_configs) > 1
                     if is_batch_group:
                         request = ComfyBatchSampleRequest(
+                            model_arch=getattr(self.model_config, 'arch', ''),
+                            model_kwargs=getattr(self.model_config, 'model_kwargs', {}),
+                            specialized_flow=getattr(self, 'flow_profile', None) is not None,
                             prompts=[gen_config.prompt for gen_config in group_configs],
                             negative_prompt=comfy_config.negative_prompt,
                             width=first_config.width,
@@ -1381,6 +1441,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         patched_workflow = get_workflow_for_samples(workflow_path, request)
                     else:
                         request = ComfySampleRequest(
+                            model_arch=getattr(self.model_config, 'arch', ''),
+                            model_kwargs=getattr(self.model_config, 'model_kwargs', {}),
+                            specialized_flow=getattr(self, 'flow_profile', None) is not None,
                             prompt=first_config.prompt,
                             negative_prompt=comfy_config.negative_prompt,
                             width=first_config.width,
@@ -1420,6 +1483,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         )
 
                     client.begin_live_progress()
+                    if request.specialized_flow and workflow_path in (
+                        DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
+                        DEFAULT_COMFY_ANIMA_WORKFLOW_PATH, DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
+                    ):
+                        client.validate_workflow_schema(patched_workflow)
                     prompt_id = client.post_prompt(patched_workflow)
                     self._log_comfy_prompt_submitted(
                         prompt_id,
@@ -1497,6 +1565,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         gen_img_config_list = []
 
         sample_config = self.first_sample_config if is_first else self.sample_config
+        self._get_krea_preview_control_settings()
         start_seed = sample_config.seed
         current_seed = start_seed
 
@@ -1896,7 +1965,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 # layer_offloading still cannot merge.
                 from toolkit.util.quantize import get_torchao_config
                 can_force_quantized_merge = (
-                    self.model_config.quantize and not self.model_config.layer_offloading
+                    self.network.network_type.lower() != 'loha'
+                    and self.model_config.quantize and not self.model_config.layer_offloading
                     and get_torchao_config(self.model_config.qtype) is not None
                 )
                 if not self.network.can_merge_in and not can_force_quantized_merge:
@@ -1995,6 +2065,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def hook_after_model_load(self):
         # override in subclass
         pass
+
+    def get_network_class(self):
+        # Specialized trainers can supply an adapter bank while retaining the
+        # normal quantization, optimizer, and memory-management setup.
+        return LoRASpecialNetwork
+
+    def get_optimizer_state_path(self):
+        return os.path.join(self.save_root, 'optimizer.pt')
 
     def hook_add_extra_train_params(self, params):
         # override in subclass
@@ -3047,6 +3125,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.hook_after_sd_init_before_load()
         # run base sd process run
         self.sd.load_model()
+        profile = getattr(self, 'flow_profile', None)
+        kto_cache = self.get_conf('type') == 'diffusion_kto'
+        if profile is not None and (profile.arch in ('krea2', 'anima', 'ideogram4') or kto_cache):
+            from toolkit.flow_cache_identity import specialized_text_cache_identity, prepare_specialized_conditioning
+            prepare_specialized_conditioning(self.sd)
+            self.sd._specialized_text_cache_identity = specialized_text_cache_identity(self.sd, include_qwen=kto_cache)
         
         self.sd.add_after_sample_image_hook(self.sample_step_hook)
 
@@ -3174,7 +3258,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 is_lycoris = False
                 is_lorm = self.network_config.type.lower() == 'lorm'
                 # default to LoCON if there are any conv layers or if it is named
-                NetworkClass = LoRASpecialNetwork
+                NetworkClass = self.get_network_class()
                 if self.network_config.type.lower() == 'locon' or self.network_config.type.lower() == 'lycoris':
                     NetworkClass = LycorisSpecialNetwork
                     is_lycoris = True
@@ -3432,8 +3516,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             self.optimizer.enable_paramiter_swapping(self.train_config.paramiter_swapping_factor)
 
         # check if it exists
-        optimizer_state_filename = f'optimizer.pt'
-        optimizer_state_file_path = os.path.join(self.save_root, optimizer_state_filename)
+        optimizer_state_file_path = self.get_optimizer_state_path()
         if os.path.exists(optimizer_state_file_path):
             # try to load
             # previous param groups
@@ -3459,6 +3542,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 except Exception as e:
                     print_acc(f"Failed to load optimizer state from {optimizer_state_file_path}")
                     print_acc(e)
+                    if getattr(self, 'require_optimizer_state', False):
+                        raise RuntimeError('This trainer requires its paired optimizer state to resume safely') from e
 
             # update the optimizer LR from the params
             print_acc(f"Updating optimizer LR from params")

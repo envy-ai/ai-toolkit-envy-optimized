@@ -1195,7 +1195,8 @@ class ComfyApiClientTests(unittest.TestCase):
             image_file.write(b"png bytes")
             image_file.flush()
             with mock.patch("toolkit.comfy_sample.urllib.request.urlopen", return_value=response) as urlopen:
-                remote_name = ComfyApiClient().upload_image(image_file.name)
+                client = ComfyApiClient()
+                remote_name = client.upload_image(image_file.name)
 
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "http://127.0.0.1:8188/api/upload/image")
@@ -1206,6 +1207,7 @@ class ComfyApiClientTests(unittest.TestCase):
         self.assertIn(b'name="image"', request.data)
         self.assertIn(b"png bytes", request.data)
         self.assertEqual(remote_name, "ai-toolkit/uploaded.png")
+        self.assertEqual(client._uploaded_images, {remote_name})
 
 
 class ComfySampleTrainProcessTests(unittest.TestCase):
@@ -1403,9 +1405,10 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         self.assertIn("DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH", single_source)
         self.assertIn("DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH", single_source)
         self.assertIn("is_qwen_image_2_workflow", single_source)
-        self.assertIn("client.upload_image(control_image_path)", single_source)
-        self.assertIn("client.upload_image(control_image_path_2)", single_source)
-        self.assertIn("client.upload_image(control_image_path_3)", single_source)
+        self.assertIn("return client.upload_image(path)", single_source)
+        self.assertIn("upload_control(control_image_path)", single_source)
+        self.assertIn("upload_control(control_image_path_2)", single_source)
+        self.assertIn("upload_control(control_image_path_3)", single_source)
         self.assertIn("control_image=uploaded_control_image", single_source)
         self.assertIn("control_image_2=uploaded_control_image_2", single_source)
         self.assertIn("control_image_3=uploaded_control_image_3", single_source)

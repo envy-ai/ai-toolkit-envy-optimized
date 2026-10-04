@@ -17,6 +17,7 @@ from .network_mixins import ToolkitNetworkMixin, ToolkitModuleMixin, Extractable
 
 from toolkit.kohya_lora import LoRANetwork
 from toolkit.models.DoRA import DoRAModule
+from toolkit.models.loha import LoHaModule
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -406,13 +407,17 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                 kwargs.get("lr_multipliers", kwargs.get("block_lr_multipliers", None)),
             )
         )
-        if self.network_type.lower() == "dora":
+        self.network_config: NetworkConfig = kwargs.get("network_config", None)
+        if self.network_type.lower() == "loha":
+            self.module_class = LoHaModule
+            module_class = LoHaModule
+            self.can_merge_in = False
+        elif self.network_type.lower() == "dora":
             self.module_class = DoRAModule
             module_class = DoRAModule
         elif self.network_type.lower() == "lokr":
             self.module_class = LokrModule
             module_class = LokrModule
-        self.network_config: NetworkConfig = kwargs.get("network_config", None)
 
         self.peft_format = peft_format
         self.is_transformer = is_transformer
@@ -612,6 +617,9 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                             
                             if self.network_type.lower() == "lokr":
                                 module_kwargs["factor"] = self.network_config.lokr_factor
+                            elif self.network_type.lower() == "loha":
+                                module_kwargs["use_dora"] = getattr(self.network_config, "loha_dora", False)
+                                module_kwargs["loha_chunk_size"] = kwargs.get("loha_chunk_size", 128)
                             
                             if self.is_ara:
                                 module_kwargs["is_ara"] = True
@@ -632,7 +640,10 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                             )
                             lora.ai_toolkit_clean_name = clean_name
                             loras.append(lora)
-                            if self.network_type.lower() == "lokr":
+                            if self.network_type.lower() == "loha":
+                                lora_shape_dict[lora_name] = [list(p.shape) for p in (
+                                    lora.hada_w1_a, lora.hada_w1_b, lora.hada_w2_a, lora.hada_w2_b)]
+                            elif self.network_type.lower() == "lokr":
                                 try:
                                     lora_shape_dict[lora_name] = [list(lora.lokr_w1.weight.shape), list(lora.lokr_w2.weight.shape)]
                                 except:

@@ -15,11 +15,13 @@ target = noise - clean), so ``get_noise_prediction`` does no time flip / negatio
 
 import math
 import os
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from toolkit.control_image import KREA_EDIT_CONTROL_PRESENTATION, load_control_rgb
 from torchvision.transforms.functional import to_tensor
 from safetensors.torch import load_file, save_file
 
@@ -104,7 +106,7 @@ QWEN_IMAGE_VAE_PATH = "Qwen/Qwen-Image"
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 
 
-def _load_mmdit_state_dict(name_or_path: str, filename: Optional[str]) -> dict:
+def _load_mmdit_state_dict(name_or_path: str, filename: Optional[str], *, source_files=None) -> dict:
     """Load the MMDiT weights from a local safetensors file/dir or the HF hub.
 
     ``name_or_path`` may be: a ``.safetensors`` file, a directory containing one
@@ -112,13 +114,19 @@ def _load_mmdit_state_dict(name_or_path: str, filename: Optional[str]) -> dict:
     file ``filename`` is downloaded, defaulting to ``model.safetensors``).
     """
     if name_or_path.endswith(".safetensors") and os.path.isfile(name_or_path):
+        if source_files is not None:
+            source_files.append(name_or_path)
         return load_file(name_or_path)
 
     if os.path.isdir(name_or_path):
         if filename is not None:
+            if source_files is not None:
+                source_files.append(os.path.join(name_or_path, filename))
             return load_file(os.path.join(name_or_path, filename))
         candidates = [f for f in os.listdir(name_or_path) if f.endswith(".safetensors")]
         if len(candidates) == 1:
+            if source_files is not None:
+                source_files.append(os.path.join(name_or_path, candidates[0]))
             return load_file(os.path.join(name_or_path, candidates[0]))
         raise FileNotFoundError(
             f"Could not pick an MMDiT checkpoint in {name_or_path}: found "
@@ -140,6 +148,8 @@ def _load_mmdit_state_dict(name_or_path: str, filename: Optional[str]) -> dict:
             f"Could not find {fname!r} in hub repo {name_or_path!r}. Set "
             "model.model_kwargs.checkpoint_filename to the weight file name."
         ) from e
+    if source_files is not None:
+        source_files.append(path)
     return load_file(path)
 
 
@@ -240,14 +250,17 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
         config = SingleMMDiTConfig(**self._get_mmdit_config_kwargs())
 
         self.print_and_status_update("  - fetching transformer weights")
+        source_files = []
         state_dict = _load_mmdit_state_dict(
             self.model_config.name_or_path,
             self.model_config.model_kwargs.get("checkpoint_filename", None),
+            source_files=source_files,
         )
         self.print_and_status_update("  - loading transformer state dict")
         transformer = SingleStreamDiT.load_from_state_dict(
             state_dict, dtype, config=config
         )
+        transformer.aitk_load_files = source_files
         del state_dict
         flush()
         return transformer
@@ -438,6 +451,10 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
                     )
                 flush()
 
+        if transformer_cache_path is not None and os.path.isfile(transformer_cache_path):
+            # Fresh and warm loads describe the same actual quantized artifact.
+            transformer.aitk_load_files = [transformer_cache_path]
+
         if (
             self.model_config.layer_offloading
             and self.model_config.layer_offloading_transformer_percent > 0
@@ -528,6 +545,17 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
     def get_generation_pipeline(self):
         return Krea2Pipeline(self)
 
+    def get_sample_control_image_paths(self, gen_config):
+        if getattr(self, '_specialized_control_presentation', None) != KREA_EDIT_CONTROL_PRESENTATION:
+            return super().get_sample_control_image_paths(gen_config)
+        return [path for path in (gen_config.ctrl_img_1 or gen_config.ctrl_img,
+            gen_config.ctrl_img_2, gen_config.ctrl_img_3) if path is not None]
+
+    def load_sample_control_image(self, path):
+        if getattr(self, '_specialized_control_presentation', None) != KREA_EDIT_CONTROL_PRESENTATION:
+            return super().load_sample_control_image(path)
+        return load_control_rgb(path, getattr(self, '_specialized_preview_background', (0, 0, 0)))
+
     def generate_single_image(
         self,
         pipeline: Krea2Pipeline,
@@ -548,7 +576,9 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
         # The Qwen3-VL side already saw them (baked into the prompt embeds).
         # ctrl_img_1 mirrors ctrl_img when unset, so use one or the other.
         ctrl_paths = []
-        if self.is_edit:
+        if self.is_edit and getattr(self, '_specialized_control_presentation', None) == KREA_EDIT_CONTROL_PRESENTATION:
+            ctrl_paths = self.get_sample_control_image_paths(gen_config)
+        elif self.is_edit:
             if gen_config.ctrl_img is not None:
                 ctrl_paths.append(gen_config.ctrl_img)
             elif gen_config.ctrl_img_1 is not None:
@@ -561,7 +591,7 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
         ref_latents = None
         if ctrl_paths:
             ctrl_tensors = [
-                to_tensor(Image.open(path).convert("RGB")) for path in ctrl_paths
+                to_tensor(self.load_sample_control_image(path)) for path in ctrl_paths
             ]
             target_pixels = gen_config.width * gen_config.height
             # one batch item (preview batch size is 1) -> List[List[(16, h, w)]]
@@ -657,7 +687,18 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
         batch_size: int,
         target_pixels: Optional[int] = None,
     ) -> Optional[List[List[torch.Tensor]]]:
-        """Build predict_velocity's ``ref_latents`` from a train batch."""
+        """Build clean reference inputs, shared within specialized loss replay.
+
+        Only detached VAE inputs are cached, never transformer activations/K/V.
+        The ordinary training/inference path outside the scope stays unchanged.
+        """
+        scope = getattr(self, "_training_reference_scope", None)
+        key = (batch_size, target_pixels)
+        if scope is not None:
+            if scope["batch"] is not batch:
+                raise ValueError("Krea reference replay must use the original training batch")
+            if key in scope["latents"]:
+                return scope["latents"][key]
         control_list = batch.control_tensor_list
         if control_list is None and batch.control_tensor is not None:
             control_list = [batch.control_tensor[b : b + 1] for b in range(batch_size)]
@@ -665,10 +706,39 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
             return None
         if len(control_list) != batch_size:
             raise ValueError("Control tensor list length does not match batch size")
-        return [
-            self._encode_ref_latents(controls, target_pixels=target_pixels)
-            for controls in control_list
-        ]
+        with torch.no_grad():
+            result = [
+                [latent.detach() for latent in self._encode_ref_latents(controls, target_pixels=target_pixels)]
+                for controls in control_list
+            ]
+        if scope is not None:
+            scope["latents"][key] = result
+        return result
+
+    @contextmanager
+    def training_reference_context(self, batch):
+        """Keep VAE samples identical through teacher/policy/backward passes.
+
+        Qwen's VAE samples its posterior. Encoding refs on every prediction would
+        invalidate DPO's exact replay and perturb distillation's teacher target.
+        The cache lives only for this accumulation, including checkpoint backward.
+        """
+        if not self.is_edit:
+            yield
+            return
+        previous = getattr(self, "_training_reference_scope", None)
+        if previous is not None and previous["batch"] is not batch:
+            raise ValueError("Cannot nest Krea reference replay for different batches")
+        scope = previous if previous is not None else {"batch": batch, "latents": {}}
+        self._training_reference_scope = scope
+        try:
+            yield
+        finally:
+            if previous is None:
+                scope["latents"].clear()
+                del self._training_reference_scope
+            else:
+                self._training_reference_scope = previous
 
     # ------------------------------------------------------------------
     # Training hooks
@@ -903,7 +973,7 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
 
             # Full-resolution decode spikes VRAM; tile it when low on VRAM (decode
             # only -- encode stays untiled).
-            tiled = self.model_config.low_vram
+            tiled = self.model_config.low_vram and not getattr(self, '_training_decode_depth', 0)
             if tiled:
                 self.vae.enable_tiling()
             try:
@@ -914,7 +984,7 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
             images = images.squeeze(2)  # drop frame dim
             return images.to(device, dtype=dtype)
         finally:
-            if self.model_config.low_vram:
+            if self.model_config.low_vram and not getattr(self, '_training_decode_depth', 0):
                 self.vae.to("cpu")
                 flush()
 

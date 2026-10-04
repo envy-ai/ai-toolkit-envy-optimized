@@ -1,0 +1,73 @@
+---
+# Experimental port: replace component/data paths; actual-checkpoint VRAM fit is unverified.
+job: extension
+config:
+  name: ideogram4_flow_dpo
+  process:
+    - type: flow_dpo
+      training_folder: output
+      device: cuda:0
+      model:
+        arch: ideogram4
+        name_or_path: /path/to/ideogram4/base
+        quantize: true
+        quantize_te: true
+        qtype: convrotint4
+        qtype_te: qfloat8
+        low_vram: true
+        model_kwargs:
+          ideogram_cfg_reference: image_only # negative_prompt is opt-in/experimental.
+      network:
+        type: lora
+        linear: 16
+        linear_alpha: 16
+      flow_dpo:
+        beta: 1
+        sft_weight: 0 # Optional preferred-image SFT contribution.
+      datasets:
+        - folder_path: /path/to/target/images
+          control_path_1: /path/to/rejected/images # Same filename stems, dimensions and framing.
+          caption_ext: txt
+          caption_dropout_rate: 0
+          cache_latents_to_disk: true
+          resolution: [1024]
+          buckets: true
+          shuffle_tokens: false
+      train:
+        batch_size: 1
+        gradient_accumulation: 1
+        steps: 1000
+        train_unet: true
+        train_text_encoder: false
+        cache_text_embeddings: true
+        unload_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        timestep_type: shift
+        min_denoising_steps: 0
+        max_denoising_steps: 999
+        optimizer: adamw8bit
+        lr: 0.0001
+        dtype: bf16
+        loss_type: mse
+      save:
+        save_format: safetensors
+        dtype: bf16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      sample:
+        sampler: flowmatch
+        sample_every: 250
+        sample_steps: 25
+        width: 768
+        height: 768
+        guidance_scale: 4
+        neg: ""
+        seed: 42
+        walk_seed: false
+        samples:
+          - prompt: A cat sitting beside a sunny window, detailed illustration
+            network_multiplier: 1
+meta:
+  name: "[name]"
+  version: "1.0"

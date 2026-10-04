@@ -108,6 +108,7 @@ class BaseModel:
     # rename LoRA keys transformer. <-> diffusion_model. (the ComfyUI-standard
     # prefix) on save/load
     lora_keys_use_comfy_prefix = False
+    lora_accept_bare_transformer_keys = False
     # text-generating models: the trainer runs train_llm_accumulation (model-owned
     # loss via get_llm_loss) instead of the diffusion step; no vae / text encoder
     is_llm = False
@@ -332,6 +333,9 @@ class BaseModel:
 
     def get_text_embedding_space_version(self) -> str:
         """Text embedding cache key. Override like get_latent_space_version."""
+        identity = getattr(self, '_specialized_text_cache_identity', None)
+        if identity:
+            return f'{self.text_embedding_space_version}_flow_components_v1_{identity}'
         return self.text_embedding_space_version
 
     def get_bucket_divisibility(self):
@@ -477,6 +481,15 @@ class BaseModel:
         from toolkit.sample_step_hook import install_sample_step_hooks
 
         return install_sample_step_hooks(self, pipeline)
+
+    def load_sample_control_image(self, path):
+        """Default presentation is unchanged; specialized models may override."""
+        return Image.open(path).convert('RGB')
+
+    def get_sample_control_image_paths(self, gen_config):
+        # Retain legacy order/alias behavior for ordinary models.
+        return [path for path in (gen_config.ctrl_img, gen_config.ctrl_img_1,
+            gen_config.ctrl_img_2, gen_config.ctrl_img_3) if path is not None]
 
     @torch.no_grad()
     def generate_images(
@@ -656,60 +669,13 @@ class BaseModel:
                         # load the control image if out model uses it in text encoding
                         if has_control_images and self.encode_control_in_text_embeddings:
                             ctrl_img_list = []
-                    
-                            if gen_config.ctrl_img is not None and os.path.splitext(str(gen_config.ctrl_img))[1].lower() in ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv']:
-                                # control VIDEO: pass the path through; models with
-                                # supports_video_control_images handle it in get_prompt_embeds
-                                ctrl_img_list.append(str(gen_config.ctrl_img))
-                            elif gen_config.ctrl_img is not None:
-                                ctrl_img = Image.open(gen_config.ctrl_img).convert("RGB")
-                                # convert to 0 to 1 tensor
-                                ctrl_img = (
-                                    TF.to_tensor(ctrl_img)
-                                    .unsqueeze(0)
-                                    .to(self.device_torch, dtype=self.torch_dtype)
-                                )
-                                ctrl_img_list.append(ctrl_img)
-                            
-                            if gen_config.ctrl_img_1 is not None and os.path.splitext(str(gen_config.ctrl_img_1))[1].lower() in ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv']:
-                                # control VIDEO: pass the path through; models with
-                                # supports_video_control_images handle it in get_prompt_embeds
-                                ctrl_img_list.append(str(gen_config.ctrl_img_1))
-                            elif gen_config.ctrl_img_1 is not None:
-                                ctrl_img_1 = Image.open(gen_config.ctrl_img_1).convert("RGB")
-                                # convert to 0 to 1 tensor
-                                ctrl_img_1 = (
-                                    TF.to_tensor(ctrl_img_1)
-                                    .unsqueeze(0)
-                                    .to(self.device_torch, dtype=self.torch_dtype)
-                                )
-                                ctrl_img_list.append(ctrl_img_1)
-                            if gen_config.ctrl_img_2 is not None and os.path.splitext(str(gen_config.ctrl_img_2))[1].lower() in ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv']:
-                                # control VIDEO: pass the path through; models with
-                                # supports_video_control_images handle it in get_prompt_embeds
-                                ctrl_img_list.append(str(gen_config.ctrl_img_2))
-                            elif gen_config.ctrl_img_2 is not None:
-                                ctrl_img_2 = Image.open(gen_config.ctrl_img_2).convert("RGB")
-                                # convert to 0 to 1 tensor
-                                ctrl_img_2 = (
-                                    TF.to_tensor(ctrl_img_2)
-                                    .unsqueeze(0)
-                                    .to(self.device_torch, dtype=self.torch_dtype)
-                                )
-                                ctrl_img_list.append(ctrl_img_2)
-                            if gen_config.ctrl_img_3 is not None and os.path.splitext(str(gen_config.ctrl_img_3))[1].lower() in ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv']:
-                                # control VIDEO: pass the path through; models with
-                                # supports_video_control_images handle it in get_prompt_embeds
-                                ctrl_img_list.append(str(gen_config.ctrl_img_3))
-                            elif gen_config.ctrl_img_3 is not None:
-                                ctrl_img_3 = Image.open(gen_config.ctrl_img_3).convert("RGB")
-                                # convert to 0 to 1 tensor
-                                ctrl_img_3 = (
-                                    TF.to_tensor(ctrl_img_3)
-                                    .unsqueeze(0)
-                                    .to(self.device_torch, dtype=self.torch_dtype)
-                                )
-                                ctrl_img_list.append(ctrl_img_3)
+                            for control_path in self.get_sample_control_image_paths(gen_config):
+                                if os.path.splitext(str(control_path))[1].lower() in ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv']:
+                                    ctrl_img_list.append(str(control_path))
+                                else:
+                                    control_image = self.load_sample_control_image(control_path)
+                                    ctrl_img_list.append(TF.to_tensor(control_image).unsqueeze(0)
+                                        .to(self.device_torch, dtype=self.torch_dtype))
                             
                             if self.has_multiple_control_images:
                                 ctrl_img = ctrl_img_list
@@ -1796,10 +1762,24 @@ class BaseModel:
     def convert_lora_weights_before_load(self, state_dict):
         # can be overridden in child classes to convert weights before loading
         if self.lora_keys_use_comfy_prefix:
-            return {
-                k.replace("diffusion_model.", "transformer."): v
-                for k, v in state_dict.items()
-            }
+            bare_roots = set()
+            if getattr(self, "lora_accept_bare_transformer_keys", False):
+                bare_roots.update(self.get_transformer_block_names() or [])
+                transformer = getattr(self, "model", None)
+                if transformer is not None:
+                    bare_roots.update(name for name, _ in transformer.named_children())
+
+            converted = {}
+            for key, value in state_dict.items():
+                if key.startswith("diffusion_model."):
+                    key = "transformer." + key[len("diffusion_model."):]
+                elif not key.startswith("transformer.") and key.partition(".")[0] in bare_roots:
+                    # Some external LoRAs omit the model prefix entirely.
+                    # Only accept names belonging to this transformer's modules;
+                    # do not accidentally remap text-encoder or adapter keys.
+                    key = "transformer." + key
+                converted[key] = value
+            return converted
         return state_dict
     
     def condition_noisy_latents(self, latents: torch.Tensor, batch:'DataLoaderBatchDTO'):

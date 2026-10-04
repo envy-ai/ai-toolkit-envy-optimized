@@ -23,4 +23,7 @@ source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate ai-toolkit
 
 cd "$SCRIPT_DIR/ui"
-npm run build_and_start
+npm run install_deps
+npm run update_db
+node scripts/build-if-needed.mjs
+npm run start

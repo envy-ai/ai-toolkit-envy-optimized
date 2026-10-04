@@ -696,6 +696,14 @@ class ToolkitNetworkMixin:
 
                 keymap = new_keymap
 
+        if self.network_type.lower() == 'loha' and keymap is not None:
+            new_keymap = {}
+            for ldm_key, diffusers_key in keymap.items():
+                if ldm_key.endswith('.alpha'):
+                    for suffix in ('alpha', 'hada_w1_a', 'hada_w1_b', 'hada_w2_a', 'hada_w2_b', 'magnitude'):
+                        new_keymap[ldm_key.removesuffix('alpha') + suffix] = diffusers_key.removesuffix('alpha') + suffix
+            keymap = new_keymap
+
         return keymap
     
     def get_state_dict(self: Network, extra_state_dict=None, dtype=torch.float16):
@@ -708,6 +716,10 @@ class ToolkitNetworkMixin:
                 save_keymap[diffusers_key] = ldm_key
 
         state_dict = self.state_dict()
+        if self.network_type.lower() == "loha":
+            for module in self.get_all_modules():
+                if getattr(module, "use_dora", False):
+                    state_dict[module.lora_name + ".magnitude"] = module.comfy_magnitude()
         save_dict = OrderedDict()
 
         for key in list(state_dict.keys()):
@@ -753,7 +765,7 @@ class ToolkitNetworkMixin:
         # ComfyUI's vanilla LoRA loaders look for ``<layer>.dora_scale``.
         # Keep ``magnitude`` as the module parameter name internally, but write
         # the interoperable suffix after all model-specific key conversion.
-        if self.network_type.lower() == "dora":
+        if self.network_type.lower() in ("dora", "loha"):
             save_dict = OrderedDict(
                 (
                     _dora_key_for_comfy(key),
@@ -823,13 +835,14 @@ class ToolkitNetworkMixin:
             weights_sd = self.base_model_ref().convert_lora_weights_before_load(weights_sd)
 
         load_sd = OrderedDict()
+        public_loha_magnitudes = set()
         for key, value in weights_sd.items():
             # New checkpoints use ComfyUI's public DoRA suffix.  Translate it
             # before consulting legacy keymaps so both new and old files can
             # still be resumed by ai-toolkit.
             input_key = (
                 _dora_key_for_internal_load(key)
-                if self.network_type.lower() == "dora"
+                if self.network_type.lower() in ("dora", "loha")
                 else key
             )
             load_key = keymap[input_key] if input_key in keymap else input_key
@@ -849,14 +862,38 @@ class ToolkitNetworkMixin:
                 # lora_transformer_transformer_blocks_7_attn_to_v.lokr_w1 to lycoris_transformer_blocks_7_attn_to_v.lokr_w1
                 load_key = load_key.replace('lycoris_', 'lora_transformer_')
 
+            if self.network_type.lower() == "loha" and key.endswith(".dora_scale"):
+                public_loha_magnitudes.add(load_key.removesuffix(".magnitude"))
+
             load_sd[load_key] = (
                 _dora_value_for_internal_load(key, value)
-                if self.network_type.lower() == "dora"
+                if self.network_type.lower() in ("dora", "loha")
                 else value
             )
 
         # extract extra items from state dict
         current_state_dict = self.state_dict()
+
+        if self.network_type.lower() == "loha":
+            matched = False
+            for module in self.get_all_modules():
+                if not hasattr(module, 'hada_w1_a'):
+                    continue
+                prefix = module.lora_name
+                factor_keys = [prefix + '.' + suffix for suffix in (
+                    'hada_w1_a', 'hada_w1_b', 'hada_w2_a', 'hada_w2_b')]
+                present = [key in load_sd for key in factor_keys]
+                if any(present) and not all(present):
+                    raise ValueError(f"Incomplete LoHa factors for {prefix}")
+                matched = matched or all(present)
+                if prefix + '.magnitude' in load_sd and not module.use_dora:
+                    raise ValueError("This is a DoHa checkpoint: enable network.loha_dora to preserve its magnitude")
+                if all(present) and prefix + '.alpha' not in load_sd:
+                    load_sd[prefix + '.alpha'] = module.alpha.new_tensor(load_sd[factor_keys[1]].shape[0])
+                if prefix + '.hada_t1' in load_sd or prefix + '.hada_t2' in load_sd:
+                    raise ValueError("Tucker-convolution LoHa checkpoints are not supported; use flattened LoHa factors")
+            if not matched:
+                raise ValueError("No matching LoHa factors found in the pretrained checkpoint")
 
         if self.peft_format and self.network_type.lower() in ("lora", "dora"):
             # Historical ai-toolkit PEFT checkpoints omitted alpha and were
@@ -934,6 +971,17 @@ class ToolkitNetworkMixin:
             ):
                 alpha = float(module.alpha.detach().float().item())
                 module._set_runtime_scale(alpha / module.lora_dim)
+            if module.lora_name in public_loha_magnitudes and getattr(module, "use_dora", False):
+                module.load_comfy_magnitude()
+            elif (
+                self.network_type.lower() == "loha"
+                and getattr(module, "use_dora", False)
+                and module.lora_name + '.magnitude' not in load_sd
+            ):
+                # Initializing DoHa from plain LoHa should preserve that LoHa,
+                # not unexpectedly normalize its adapted weights to base norms.
+                with torch.no_grad():
+                    module.magnitude.copy_(module._weight_norms(True))
         if len(extra_dict.keys()) == 0:
             extra_dict = None
         return extra_dict
@@ -954,6 +1002,11 @@ class ToolkitNetworkMixin:
             dtype = first_module.lora_down.weight.dtype
             if hasattr(first_module.lora_down, '_memory_management_device'):
                 device = first_module.lora_down._memory_management_device
+        elif hasattr(first_module, 'hada_w1_a'):
+            device = first_module.hada_w1_a.device
+            dtype = first_module.hada_w1_a.dtype
+            if hasattr(first_module.hada_w1_a, '_memory_management_device'):
+                device = first_module.hada_w1_a._memory_management_device
         elif hasattr(first_module, 'lokr_w1'):
             device = first_module.lokr_w1.device
             dtype = first_module.lokr_w1.dtype
@@ -1042,7 +1095,7 @@ class ToolkitNetworkMixin:
             module.reset_weights()
 
     def merge_in(self, merge_weight=1.0):
-        if self.network_type.lower() == 'dora':
+        if self.network_type.lower() in ('dora', 'loha'):
             return
         self.is_merged_in = True
         for module in self.get_all_modules():
