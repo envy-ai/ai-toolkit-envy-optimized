@@ -14,6 +14,60 @@ const defaultNameOrPath = "";
 const defaultLinearRank = 32;
 
 export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
+  ...([['instruct', 2.5], ['base', 5.0]] as const).map(([variant, guidance]): ModelArch => ({
+    name: `hunyuan_image_3_${variant}`,
+    label: `HunyuanImage 3.0 ${variant === 'instruct' ? 'Instruct' : 'Base'}`,
+    group: 'image',
+    defaults: {
+      'config.process[0].model.name_or_path': [`/path/to/hunyuan_image_3_${variant}_w4a8.safetensors`, defaultNameOrPath],
+      'config.process[0].model.extras_name_or_path': [variant === 'instruct' ? 'tencent/HunyuanImage-3.0-Instruct' : 'tencent/HunyuanImage-3.0', undefined],
+      'config.process[0].model.vae_path': ['/path/to/hunyuan_image_3_vae_fp16.safetensors', undefined],
+      'config.process[0].model.quantize': [true, false],
+      'config.process[0].model.quantize_te': [false, false],
+      'config.process[0].model.qtype': ['comfy_w4a8', 'qfloat8'],
+      'config.process[0].model.low_vram': [true, false],
+      'config.process[0].model.layer_offloading': [true, false],
+      'config.process[0].model.layer_offloading_transformer_percent': [1, 1],
+      'config.process[0].model.cache_quantized_models': [false, true],
+      'config.process[0].model.model_kwargs': [{lora_targets: 'attention', reference_max_pixels: 262144}, {}],
+      'config.process[0].train.cache_text_embeddings': [true, false],
+      'config.process[0].train.batch_size': [1, 1],
+      'config.process[0].train.noise_scheduler': ['flowmatch', 'flowmatch'],
+      'config.process[0].sample.sampler': ['flowmatch', 'flowmatch'],
+      'config.process[0].sample.guidance_scale': [guidance, 4],
+      'config.process[0].sample.sample_steps': [50, 25],
+      'config.process[0].sample.width': [512, 1024],
+      'config.process[0].sample.height': [512, 1024],
+      'config.process[0].network.linear': [16, defaultLinearRank],
+      'config.process[0].network.linear_alpha': [16, defaultLinearRank],
+      'config.process[0].datasets[x].num_workers': [0, 0],
+      'config.process[0].datasets[x].pin_memory': [false, false],
+    },
+    disableSections: ['network.conv', 'model.quantize_te'],
+    additionalSections: variant === 'instruct'
+      ? ['datasets.multi_control_paths', 'sample.multi_ctrl_imgs', 'model.low_vram', 'model.layer_offloading', 'model.vae_path', 'model.vision_path']
+      : ['model.low_vram', 'model.layer_offloading', 'model.vae_path'],
+    customModelSelectOptions: [
+      {
+        label: 'Checkpoint format',
+        options: [{label: 'Comfy W4A8', value: 'comfy_w4a8'}, {label: 'Int8 ConvRot', value: 'convrot8'}],
+        getValue: config => config.config.process[0].model.qtype,
+        onChange: (value, config, setJobConfig) => setJobConfig(value, 'config.process[0].model.qtype'),
+      },
+      {
+        label: 'LoRA targets',
+        options: [{label: 'Attention', value: 'attention'}, {label: 'Attention and shared MLP', value: 'attention_shared_mlp'}],
+        getValue: config => config.config.process[0].model.model_kwargs?.lora_targets ?? 'attention',
+        onChange: (value, config, setJobConfig) => setJobConfig(value, 'config.process[0].model.model_kwargs.lora_targets'),
+      },
+      ...(variant === 'instruct' ? [{
+        label: 'Reference pixel budget',
+        options: [{label: '512 × 512 area', value: '262144'}, {label: '768 × 768 area', value: '589824'}, {label: '1024 × 1024 area', value: '1048576'}],
+        getValue: (config: JobConfig) => String(config.config.process[0].model.model_kwargs?.reference_max_pixels ?? 262144),
+        onChange: (value: string, config: JobConfig, setJobConfig: (value: any, key: string) => void) => setJobConfig(Number(value), 'config.process[0].model.model_kwargs.reference_max_pixels'),
+      }] : []),
+    ],
+  })),
   {
     name: "anima",
     label: "Anima",

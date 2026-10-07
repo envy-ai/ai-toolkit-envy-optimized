@@ -82,4 +82,7 @@ def unload_text_encoder(model: "BaseModel"):
                 dtype=model.torch_dtype
             )
 
+    callback = getattr(model, 'on_text_encoder_unloaded', None)
+    if callable(callback):
+        callback()
     MemoryManager.release_cached_memory()

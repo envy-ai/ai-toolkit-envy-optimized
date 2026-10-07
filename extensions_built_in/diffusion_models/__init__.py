@@ -22,6 +22,7 @@ from .krea2 import Krea2Model
 from .boogu_image import BooguImageModel, BooguImageEditModel
 from .mageflow import MageFlowModel, MageFlowEditModel
 from .minimax_h3 import MinimaxH3Model, MinimaxH3Ref2VAModel, MinimaxH3FastModel
+from .hunyuan_image_3 import HunyuanImage3InstructModel, HunyuanImage3BaseModel
 
 AI_TOOLKIT_MODELS = [
     # put a list of models here
@@ -63,4 +64,6 @@ AI_TOOLKIT_MODELS = [
     MinimaxH3Model,
     MinimaxH3Ref2VAModel,
     MinimaxH3FastModel,
+    HunyuanImage3InstructModel,
+    HunyuanImage3BaseModel,
 ]

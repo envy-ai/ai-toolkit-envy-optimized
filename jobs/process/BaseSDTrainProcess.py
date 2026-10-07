@@ -1677,6 +1677,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         })
         o_dict['ss_base_model'] = self.model_config.name_or_path
         o_dict['ss_base_model_version'] = self.sd.get_base_model_version()
+        if hasattr(self.sd, 'get_adapter_metadata'):
+            o_dict['hunyuan_training'] = self.sd.get_adapter_metadata(self.network)
 
         # o_dict = add_base_model_info_to_meta(
         #     o_dict,
@@ -2236,6 +2238,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
             print_acc(f"Found step {self.step_num} in metadata, starting from there")
 
     def load_weights(self, path):
+        if self.sd is not None and hasattr(self.sd, 'validate_adapter_metadata'):
+            self.sd.validate_adapter_metadata(load_metadata_from_safetensors(path))
         if self.network is not None:
             extra_weights = self.network.load_weights(path)
             self.load_training_state_from_metadata(path)
@@ -3123,6 +3127,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         )
         
         self.hook_after_sd_init_before_load()
+        if hasattr(self.sd, 'training_preflight'):
+            self.sd.training_preflight(self)
         # run base sd process run
         self.sd.load_model()
         profile = getattr(self, 'flow_profile', None)

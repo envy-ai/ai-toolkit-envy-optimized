@@ -37,6 +37,8 @@ type AdditionalSections =
   | 'model.qie.match_target_res'
   | 'model.assistant_lora_path'
   | 'model.text_encoder_path'
+  | 'model.vae_path'
+  | 'model.vision_path'
   | 'model.unconditional_lora_path'
   | 'model.model_kwargs.kv_cache'
   | 'model.model_kwargs.instruction'

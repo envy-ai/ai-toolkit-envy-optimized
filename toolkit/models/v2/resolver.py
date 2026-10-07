@@ -40,6 +40,8 @@ def comfy_precision_rank(filename: str, qtype: Optional[str] = None) -> int:
     is_fp16 = "fp16" in name and not is_fp8
 
     qt = (qtype or "").lower()
+    if qt == "comfy_w4a8":
+        return 0 if "w4a8" in name else 6 + comfy_precision_rank(filename)
     if qt.startswith("convrot"):
         order = [is_convrot, is_fp8_mixed, is_fp8, is_bf16, is_fp16]
     elif "float8" in qt or qt == "qfloat8":

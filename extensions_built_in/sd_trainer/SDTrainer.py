@@ -1685,7 +1685,7 @@ class SDTrainer(BaseSDTrainProcess):
                 batch = self.adapter.edit_batch_processed(batch)
             dtype = get_torch_dtype(self.train_config.dtype)
             # sanity check
-            if self.sd.vae.dtype != self.sd.vae_torch_dtype:
+            if self.sd.vae is not None and self.sd.vae.dtype != self.sd.vae_torch_dtype:
                 self.sd.vae = self.sd.vae.to(self.sd.vae_torch_dtype)
             if isinstance(self.sd.text_encoder, list):
                 for encoder in self.sd.text_encoder:

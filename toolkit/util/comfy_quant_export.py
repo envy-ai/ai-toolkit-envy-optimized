@@ -66,6 +66,19 @@ def export_comfy_quantized_layers(
                 .contiguous()
             )
             entries[f"{name}.comfy_quant"] = comfy_quant_marker(conf)
+        elif getattr(module.ostris_quantizer, 'qtype', None) == 'comfy_w4a8':
+            entries[f'{name}.weight'] = module.cw4_packed.detach().cpu().view(torch.int8)
+            entries[f'{name}.weight_s_rel'] = module.cw4_relative.detach().cpu().view(
+                torch.float32 if module.cw4_relative_fp32 else torch.float8_e4m3fn)
+            entries[f'{name}.weight_s_channel'] = module.cw4_channel.detach().cpu().view(torch.float32)
+            if module.cw4_codebook is not None:
+                entries[f'{name}.weight_codebook'] = module.cw4_codebook.detach().cpu().view(torch.float32)
+            if module.cw4_correction is not None:
+                entries[f'{name}.weight_correction'] = module.cw4_correction.detach().cpu().view(torch.float32)
+            entries[f'{name}.comfy_quant'] = comfy_quant_marker({
+                'format': 'asym_w4a8_int8', 'group_size': module.cw4_group_size,
+                'convrot_groupsize': module.cw4_rotation,
+            })
         elif hasattr(module, "nv4_qdata"):
             entries[f"{name}.weight"] = swap_nvfp4_nibbles(
                 module.nv4_qdata.detach().cpu()

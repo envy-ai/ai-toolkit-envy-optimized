@@ -814,6 +814,23 @@ export default function SimpleJob({
                 placeholder="/absolute/path/to/qwen3vl_8b.safetensors"
               />
             )}
+            {modelArch?.additionalSections?.includes('model.vae_path') && (
+              <TextInput
+                label="Image VAE Checkpoint"
+                value={jobConfig.config.process[0].model.vae_path ?? ''}
+                onChange={(value: string | undefined) => setJobConfig(value?.trim() || undefined, 'config.process[0].model.vae_path')}
+                placeholder="/absolute/path/to/hunyuan_image_3_vae_fp16.safetensors"
+                required
+              />
+            )}
+            {modelArch?.additionalSections?.includes('model.vision_path') && (
+              <TextInput
+                label="Edit Vision Checkpoint (required for references)"
+                value={jobConfig.config.process[0].model.model_kwargs?.vision_path ?? ''}
+                onChange={(value: string | undefined) => setJobConfig(value?.trim() || undefined, 'config.process[0].model.model_kwargs.vision_path')}
+                placeholder="/absolute/path/to/hunyuan_image_3_instruct_siglip2_so400m_naflex.safetensors"
+              />
+            )}
             {!isSliderSpace && modelArch?.additionalSections?.includes('model.unconditional_lora_path') && (
               <TextInput
                 label="Unconditional Adapter Path"

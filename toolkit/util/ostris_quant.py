@@ -193,7 +193,11 @@ def get_ostris_quantizer(qtype: str) -> Optional[OstrisQuantizer]:
     from toolkit.util.uintx_quant import UINTX_QTYPES, UIntXQuantizer
 
     quantizer = None
-    if qtype in ORBIT_QTYPES:
+    if qtype == "comfy_w4a8":
+        from toolkit.util.comfy_w4a8_quant import ComfyW4A8Quantizer
+
+        quantizer = ComfyW4A8Quantizer()
+    elif qtype in ORBIT_QTYPES:
         quantizer = OrbitQuantizer(ORBIT_QTYPES[qtype])
     elif qtype in ORBIT_VQ_QTYPES:
         quantizer = OrbitVQQuantizer(**ORBIT_VQ_QTYPES[qtype])

@@ -303,6 +303,19 @@ def import_comfy_quantized_layers(
                 persistent=False,
             )
             module.cr8_rot_size = rot
+        elif fmt == "asym_w4a8_int8":
+            from toolkit.util.comfy_w4a8_quant import ComfyW4A8Quantizer
+
+            quantizer = get_ostris_quantizer("comfy_w4a8")
+            ComfyW4A8Quantizer.attach_(
+                module, weight,
+                state_dict.pop(f"{prefix}.weight_s_rel"),
+                state_dict.pop(f"{prefix}.weight_s_channel"),
+                codebook=state_dict.pop(f"{prefix}.weight_codebook", None),
+                correction=state_dict.pop(f"{prefix}.weight_correction", None),
+                group_size=int(conf.get("group_size", 16)),
+                rotation=int(conf.get("convrot_groupsize", 256)),
+            )
         elif fmt == "nvfp4":
             quantizer = get_ostris_quantizer("nvfp4")
             # normalize comfy_kitchen's storage to the toolkit's conventions:

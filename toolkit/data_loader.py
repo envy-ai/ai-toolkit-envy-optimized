@@ -47,10 +47,11 @@ def get_safe_dataloader_num_workers(dataset_config_list, sd) -> int:
     if (
         configured_workers > 0
         and sd is not None
-        and getattr(sd, "arch", None) == "minimax_h3"
+        and (getattr(sd, "arch", None) == "minimax_h3"
+             or getattr(sd, "disable_dataloader_workers", False))
     ):
         print_acc(
-            "MiniMax H3: disabling DataLoader workers to prevent forked workers "
+            f"{getattr(sd, 'arch', 'model')}: disabling DataLoader workers to prevent forked workers "
             "from retaining the large model in system RAM"
         )
         return 0

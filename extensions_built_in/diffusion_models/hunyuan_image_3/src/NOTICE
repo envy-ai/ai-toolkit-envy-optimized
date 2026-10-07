@@ -1,0 +1,25 @@
+ComfyUI-HunyuanImage3
+Copyright (C) 2026 PedroMarinhoDev
+Licensed under the GNU General Public License v3.0 (see LICENSE).
+
+This project contains code adapted from other works:
+
+1. HunyuanImage-3.0 by Tencent — https://github.com/Tencent-Hunyuan/HunyuanImage-3.0
+   Parts of the model, VAE, tokenizer and pipeline code in hunyuan_image_3/ are ported from Tencent's
+   reference implementation and remain subject to the Tencent Hunyuan Community License Agreement
+   (see LICENSE-TENCENT-HUNYUAN). That agreement does not apply in the European Union, the United Kingdom
+   or South Korea. The ported files were modified: rewritten for ComfyUI's model, sampler and memory
+   management APIs.
+
+   hunyuan_image_3/tencent/config.json and tokenizer.json are Tencent's own files, unmodified, from the
+   tencent/HunyuanImage-3.0-Instruct(-Distil) repositories, under the same agreement.
+
+   Tencent Hunyuan is licensed under the Tencent Hunyuan Community License Agreement, Copyright © 2025
+   Tencent. All Rights Reserved. The trademark rights of "Tencent Hunyuan" are owned by Tencent or its
+   affiliate.
+
+2. Spectrum — https://github.com/hanjq17/Spectrum (and https://github.com/judian17/ComfyUI-Spectrum)
+   hunyuan_image_3/spectrum.py adapts the Chebyshev forecaster. MIT License, Copyright (c) 2026 Jiaqi Han.
+
+The HunyuanImage-3.0 model weights are not part of this repository and are distributed under the Tencent
+Hunyuan Community License Agreement.

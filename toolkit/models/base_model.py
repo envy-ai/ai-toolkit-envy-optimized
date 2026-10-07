@@ -554,7 +554,8 @@ class BaseModel:
         if pipeline is None:
             pipeline = self.get_generation_pipeline()
             try:
-                pipeline.set_progress_bar_config(disable=True)
+                pipeline.set_progress_bar_config(
+                    disable=not getattr(pipeline, 'show_sample_step_progress', False))
             except:
                 pass
 
@@ -571,7 +572,11 @@ class BaseModel:
                 if network is not None:
                     assert network.is_active
 
-                for i in tqdm(range(len(image_configs)), desc=f"Generating Samples", leave=True, position=0):
+                sample_step_progress = getattr(pipeline, 'show_sample_step_progress', False)
+                for i in tqdm(range(len(image_configs)), desc=f"Generating Samples", leave=True,
+                              position=0, disable=sample_step_progress):
+                    if sample_step_progress:
+                        pipeline.set_progress_bar_config(desc=f"Sample {i + 1}/{len(image_configs)}")
                     gen_config = image_configs[i]
 
                     extra = {}

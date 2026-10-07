@@ -1,0 +1,71 @@
+# Int8 T2I shares the edit backend; its independent full-model run is unqualified.
+# Start at 512px; see docs/hunyuan_image_3_validation.md for measured qualification.
+job: extension
+config:
+  name: hunyuan_image_3_instruct_t2i_int8_convrot
+  process:
+  - type: sd_trainer
+    training_folder: output
+    device: cuda:0
+    network:
+      type: lora
+      linear: 16
+      linear_alpha: 16
+    model:
+      arch: hunyuan_image_3_instruct
+      name_or_path: /path/to/hunyuan_image_3_instruct_int8_convrot.safetensors
+      extras_name_or_path: tencent/HunyuanImage-3.0-Instruct
+      vae_path: /path/to/hunyuan_image_3_vae_fp16.safetensors
+      quantize: true
+      qtype: convrot8
+      quantize_te: false
+      low_vram: true
+      layer_offloading: true
+      # Instruct 512 px edit measured at 0.85: ~11.3 GiB frozen GPU storage,
+      # ~19.0 GiB driver peak and ~101 GiB whole-machine host use on RTX 4090.
+      layer_offloading_transformer_percent: 0.85
+      cache_quantized_models: false
+      model_kwargs:
+        lora_targets: attention
+        reference_max_pixels: 262144
+    datasets:
+    - folder_path: /data/targets
+      caption_ext: txt
+      caption_dropout_rate: 0.05
+      cache_latents_to_disk: true
+      num_workers: 0
+      pin_memory: false
+      resolution:
+      - 512
+      flip_x: false
+      flip_y: false
+      random_crop: false
+    train:
+      batch_size: 1
+      gradient_accumulation: 1
+      steps: 1000
+      train_unet: true
+      train_text_encoder: false
+      gradient_checkpointing: true
+      cache_text_embeddings: true
+      noise_scheduler: flowmatch
+      optimizer: adamw8bit
+      lr: 0.0001
+      dtype: bf16
+    save:
+      dtype: bf16
+      save_every: 100
+      max_step_saves_to_keep: 3
+    sample:
+      sampler: flowmatch
+      width: 512
+      height: 512
+      sample_every: 100
+      guidance_scale: 2.5
+      sample_steps: 50
+      seed: 42
+      samples:
+      - prompt: A red circle on a white background.
+meta:
+  name: '[name]'
+  version: '1.0'
