@@ -1,0 +1,24 @@
+# Add these blocks to the existing Instruct int8 LoRA configuration for a NEW job.
+# Do not apply to an active job. Full GPU/runtime qualification is still pending.
+model:
+  shared_weights:
+    enabled: true
+    strict: true
+    socket: /run/user/1000/aitk-shared-models/broker.sock
+    device_uuid: GPU-REPLACE_WITH_EXACT_LOCAL_TORCH_UUID
+    store_identity: hunyuan-instruct-int8
+    reserve_gib: 12
+    # fallback_directory: /path/to/suitable/local/filesystem
+    # snapshot_directory: /run/user/1000/aitk-shared-models/snapshots
+sample:
+  comfy:
+    enabled: true
+    provider: aitk_shared_models
+    api_url: http://127.0.0.1:8188
+    vae: hunyuan_image_3_vae_fp16.safetensors
+    clip_vision: hunyuan_image_3_instruct_siglip2_so400m_naflex.safetensors
+    sampler: euler
+    scheduler: simple
+    run_in_background: false
+    send_prompts_as_batch: false
+    workflow_path: integrations/ComfyUI-AITK-SharedModels/workflows/hunyuan_instruct_shared_edit.json

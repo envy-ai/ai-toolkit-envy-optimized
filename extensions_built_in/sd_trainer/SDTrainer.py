@@ -2612,6 +2612,9 @@ class SDTrainer(BaseSDTrainProcess):
             if self.ema is not None:
                 with self.timer('ema_update'):
                     self.ema.update()
+            # Explicit evidence of a successful update + EMA + gradient clear.
+            # BaseSDTrainProcess consumes this only after graph/sample cleanup.
+            self._shared_optimizer_boundary_completed = True
         else:
             # gradient accumulation. Just a place for breakpoint
             pass

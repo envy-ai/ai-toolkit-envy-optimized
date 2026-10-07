@@ -78,7 +78,13 @@ def validate_training(holder, process):
     for config in (getattr(process, 'sample_config', None), getattr(process, 'first_sample_config', None)):
         comfy = getattr(config, 'comfy', None)
         if comfy is not None and getattr(comfy, 'enabled', False):
-            raise ValueError('Hunyuan currently requires native previews; Comfy preview host-memory handoff is not qualified')
+            if (not getattr(holder.model_config, 'shared_weights', {}).get('enabled')
+                    or getattr(comfy, 'provider', 'ordinary') != 'aitk_shared_models'):
+                raise ValueError('Hunyuan Comfy previews require the negotiated aitk_shared_models provider; ordinary two-backbone previews remain unsupported')
+            if comfy.run_in_background or comfy.send_prompts_as_batch or comfy.inference_lora:
+                raise ValueError('Shared Hunyuan previews require synchronous single-image snapshots without a second inference adapter')
+            from toolkit.comfy_sample import ComfyApiClient
+            ComfyApiClient(comfy.api_url, comfy.timeout).require_shared_provider(holder.model_config.shared_weights)
     preset = holder.model_config.model_kwargs.get('lora_targets', 'attention')
     if preset not in TARGETS:
         raise ValueError(f'Unsupported Hunyuan LoRA target preset {preset!r}')

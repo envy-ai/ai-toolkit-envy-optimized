@@ -217,6 +217,7 @@ def import_comfy_quantized_layers(
     state_dict: Dict[str, torch.Tensor],
     orig_dtype: torch.dtype = torch.bfloat16,
     key_map=None,
+    strict_shared=False,
 ) -> Tuple[Dict[str, torch.Tensor], int]:
     """Convert every module a ``comfy_quant`` marker points at and attach its
     quantized tensors. Consumes the quantized entries from ``state_dict`` and
@@ -239,6 +240,20 @@ def import_comfy_quantized_layers(
 
         weight = state_dict.pop(f"{prefix}.weight")
         weight_scale = state_dict.pop(f"{prefix}.weight_scale", None)
+
+        if strict_shared:
+            from toolkit.shared_models import shared_package
+            shared_tensors = shared_package('tensors')
+            if fmt != 'int8_tensorwise' or isinstance(module, torch.nn.Embedding):
+                raise ValueError('Shared import supports int8 linears only; quantized embeddings need separate qualification')
+            if (weight.dtype != torch.int8 or not weight.is_contiguous()
+                    or weight_scale is None or weight_scale.dtype != torch.float32
+                    or not weight_scale.is_contiguous()
+                    or tuple(weight.shape) != tuple(module.weight.shape)
+                    or weight_scale.numel() != module.out_features):
+                raise ValueError(f'{prefix}: shared codes/scales require int8/FP32 contiguous views')
+            if shared_tensors.owner_of(weight) is None or shared_tensors.owner_of(weight_scale) is None:
+                raise ValueError(f'{prefix}: missing shared tensor ownership')
 
         if isinstance(module, torch.nn.Embedding):
             if fmt != "int8_tensorwise":
@@ -343,13 +358,18 @@ def import_comfy_quantized_layers(
         state_dict.pop(f"{prefix}.input_scale", None)
 
         _to_ostris(module, quantizer, orig_dtype)
+        if strict_shared:
+            shared_tensors.require_alias(weight, module.cr8_qdata, prefix + '.weight')
+            shared_tensors.require_alias(weight_scale, module.cr8_scales, prefix + '.weight_scale')
         bias = state_dict.pop(f"{prefix}.bias", None)
         if bias is not None and module.bias is not None:
             # bias may still be a meta parameter when the model was built under
             # a meta device context
             module._parameters["bias"] = torch.nn.Parameter(
-                bias.detach().clone(), requires_grad=False
+                bias.detach() if strict_shared else bias.detach().clone(), requires_grad=False
             )
+            if strict_shared:
+                shared_tensors.require_alias(bias, module.bias, prefix + '.bias')
         converted += 1
 
     # legacy ComfyUI scaled-fp8 checkpoints (e.g. the wan *_fp8_scaled files):

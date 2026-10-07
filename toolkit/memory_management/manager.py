@@ -55,8 +55,76 @@ class MemoryManager:
         self.module: torch.nn.Module = module
         self.process_device: torch.device = process_device
         self.unmanaged_modules: list[torch.nn.Module] = []
+        self.external_gpu_state = 'ACTIVE'
+        self._parked_slots = []
+
+    def suspend_for_external_gpu(self):
+        """Called only after completed optimizer/EMA/gradient cleanup, never mid-graph."""
+        if self.external_gpu_state != 'ACTIVE':
+            raise RuntimeError(f'Cannot suspend memory manager in {self.external_gpu_state}')
+        self.external_gpu_state = 'SUSPENDING'
+        masters = getattr(self.module, '_shared_cpu_masters', {})
+        self._parked_slots = []
+        try:
+            if self.process_device.type == 'cuda':
+                torch.cuda.synchronize(self.process_device)
+                state = _DEVICE_STATE.get(self.process_device, {})
+                for key in ('transfer_stream', 'transfer_grad_stream'):
+                    if state.get(key) is not None:
+                        state[key].synchronize()
+                _DEVICE_STATE.pop(self.process_device, None)
+            for child in self.module.modules():
+                for kind, slots in (('parameter', child._parameters), ('buffer', child._buffers)):
+                    for name, value in list(slots.items()):
+                        if value is None or value.is_meta or value.device.type == 'cpu':
+                            continue
+                        if kind == 'parameter' and value.grad is not None:
+                            raise RuntimeError('Cannot yield GPU with unfinished gradients')
+                        master = masters.get((child, kind, name))
+                        cpu = master if master is not None else value.detach().to('cpu')
+                        self._parked_slots.append((child, kind, name, value.device))
+                        if kind == 'parameter':
+                            if master is not None:
+                                slots[name] = torch.nn.Parameter(cpu, requires_grad=False)
+                            else:
+                                value.data = cpu
+                        else:
+                            slots[name] = cpu
+            arena = getattr(self.module, '_shared_arena', None)
+            if arena is not None and arena._tensor_owner is not None:
+                stager = getattr(arena._tensor_owner, 'stager', None)
+                if stager is not None:
+                    stager.close()
+            self.external_gpu_state = 'SUSPENDED'
+        except BaseException:
+            self.external_gpu_state = 'FAILED'
+            raise
+
+    def resume_from_external_gpu(self):
+        if self.external_gpu_state != 'SUSPENDED':
+            raise RuntimeError(f'Cannot resume memory manager in {self.external_gpu_state}')
+        self.external_gpu_state = 'RESUMING'
+        try:
+            # Restore the exact selected resident slots; do not attach again or
+            # rerandomize the offload fraction.
+            for child, kind, name, device in self._parked_slots:
+                if kind == 'parameter':
+                    parameter = child._parameters[name]
+                    if (child, kind, name) in getattr(self.module, '_shared_cpu_masters', {}):
+                        child._parameters[name] = torch.nn.Parameter(parameter.to(device), requires_grad=False)
+                    else:
+                        parameter.data = parameter.data.to(device)
+                else:
+                    child._buffers[name] = child._buffers[name].to(device)
+            self._parked_slots.clear()
+            self.external_gpu_state = 'ACTIVE'
+        except BaseException:
+            self.external_gpu_state = 'FAILED'
+            raise
 
     def memory_managed_to(self, *args, **kwargs):
+        if self.external_gpu_state != 'ACTIVE':
+            raise RuntimeError('Model placement is suspended for an external GPU owner')
         # the manager owns placement: the resident (unmanaged/ignore) set must
         # live on the compute device for forwards to work. Legacy parking
         # gestures (.to("cpu") between phases) would strand it there — the
@@ -314,6 +382,13 @@ class MemoryManager:
         if not hasattr(module, "_memory_manager"):
             return
 
+        if hasattr(module, '_shared_cpu_masters'):
+            manager = module._memory_manager
+            if manager.external_gpu_state == 'ACTIVE':
+                manager.suspend_for_external_gpu()
+            elif manager.external_gpu_state != 'SUSPENDED':
+                raise RuntimeError('Cannot detach a failed shared memory manager')
+
         if getattr(module, "_mm_orig_class", None) is not None:
             module.__class__ = module._mm_orig_class
             del module._mm_orig_class
@@ -372,7 +447,7 @@ class MemoryManager:
                 if param is None or not isinstance(param, torch.nn.Parameter):
                     continue
                 try:
-                    if param.data.is_pinned():
+                    if not hasattr(param.data, '_shared_owner') and param.data.is_pinned():
                         object.__setattr__(
                             child,
                             param_name,
@@ -392,7 +467,7 @@ class MemoryManager:
                     try:
                         if buf.device.type != "cpu":
                             buf = buf.to("cpu")
-                        if buf.is_pinned():
+                        if not hasattr(buf, '_shared_owner') and buf.is_pinned():
                             buf = buf.clone()
                         child._buffers[buf_name] = buf
                     except Exception:

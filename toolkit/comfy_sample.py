@@ -658,6 +658,30 @@ class ComfyApiClient:
         self._object_info = None
         self._uploaded_images = set()
 
+    def require_shared_provider(self, shared_config):
+        from toolkit.shared_models import shared_package
+        normalize_uuid = shared_package('protocol').normalize_device_uuid
+        capability = self._request_json('GET', '/aitk-shared-models/capabilities')
+        capability['device_uuid'] = normalize_uuid(capability.get('device_uuid'))
+        expected = {'protocol_version': 1, 'provider': 'aitk_shared_models',
+                    'enabled': True, 'whole_prompt_lease': True, 'variant': 'instruct',
+                    'quantization': 'int8_tensorwise', 'device_uuid': normalize_uuid(shared_config['device_uuid'])}
+        for key, value in expected.items():
+            if capability.get(key) != value:
+                raise ValueError(f'Comfy shared provider compatibility mismatch: {key}')
+        socket_path = shared_config.get('socket') or shared_package('protocol').default_socket()
+        if capability.get('socket') != socket_path:
+            raise ValueError('Trainer and Comfy must use the same shared lease broker socket')
+        return capability
+
+    def cancel_shared_prompt(self, prompt_id):
+        # Cancel the requested queued prompt, then interrupt only if that prompt
+        # is the active one. The lease broker still proves actual quiescence.
+        self._request_json('POST', '/api/queue', {'delete': [prompt_id]})
+        queue = self._request_json('GET', '/api/queue') or {}
+        if any(item[1] == prompt_id for item in queue.get('queue_running', [])):
+            self._request_json('POST', '/api/interrupt', {'prompt_id': prompt_id})
+
     def _url(self, path: str) -> str:
         return self.api_url + path
 

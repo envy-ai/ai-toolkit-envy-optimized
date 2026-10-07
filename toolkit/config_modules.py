@@ -92,6 +92,8 @@ class SampleItem:
 class ComfySampleConfig:
     """Configuration for rendering training samples through ComfyUI."""
     def __init__(self, **kwargs):
+        self.provider = kwargs.get('provider', 'ordinary')
+        self.clip_vision = kwargs.get('clip_vision', '')
         self.enabled: bool = kwargs.get('enabled', False)
         self.api_url: str = kwargs.get('api_url', 'http://127.0.0.1:8188')
         self.negative_prompt: str = kwargs.get('negative_prompt', '')
@@ -685,6 +687,8 @@ ModelArch = Literal['sd1', 'sd2', 'sd3', 'sdxl', 'pixart', 'pixart_sigma', 'aura
 
 class ModelConfig:
     def __init__(self, **kwargs):
+        from toolkit.shared_models import normalize_config
+        self.shared_weights = normalize_config(kwargs.get('shared_weights'))
         self.name_or_path: str = kwargs.get('name_or_path', None)
         # name or path is updated on fine tuning. Keep a copy of the original
         self.name_or_path_original: str = self.name_or_path

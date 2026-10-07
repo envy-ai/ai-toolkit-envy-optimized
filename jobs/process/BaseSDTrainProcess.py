@@ -364,12 +364,25 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self._comfy_prompt_wait_cancel_event = threading.Event()
         # cached latents, prompt embeds, and fixed noise for validation
         self._validation_cache = None
+        self._shared_optimizer_boundary_completed = False
+        self._shared_in_training_loop = False
+        self._shared_sample_pending = None
 
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
         return generate_image_config_list
 
     def sample_with_optimizer_state_offload(self, step=None, is_first=False):
+        coordinator = getattr(getattr(self, 'sd', None), 'shared_coordinator', None)
+        config = (self.first_sample_config if is_first else self.sample_config) if coordinator is not None else None
+        if (coordinator is not None and config.comfy.enabled
+                and config.comfy.provider == 'aitk_shared_models'):
+            if self._shared_in_training_loop:
+                # Keep the scheduled request until a successful optimizer boundary.
+                # Existing native sampling is unchanged.
+                self._shared_sample_pending = (step, is_first)
+                return
+            return self.sample(step, is_first=is_first)
         move_optimizer_state_to_device(self.optimizer, 'cpu')
         try:
             self.sample(step, is_first=is_first)
@@ -848,6 +861,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         sd = getattr(self, 'sd', None)
         if sd is not None:
+            coordinator = getattr(sd, 'shared_coordinator', None)
+            if coordinator is not None:
+                # Explicitly park/release before generic presets (ordinary .to(cpu)
+                # is deliberately ignored by the layer memory manager).
+                if self.optimizer is not None:
+                    self.optimizer.zero_grad(set_to_none=True)
+                coordinator.close()
             try:
                 sd.set_device_state(copy.deepcopy(empty_preset))
             except Exception as e:
@@ -1656,7 +1676,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         
         # send to be generated
         if getattr(sample_config, 'comfy', None) is not None and sample_config.comfy.enabled:
-            if sample_config.comfy.send_prompts_as_batch and len(gen_img_config_list) > 1:
+            if sample_config.comfy.provider == 'aitk_shared_models':
+                from toolkit.shared_comfy_sample import render_shared_samples
+                render_shared_samples(self, gen_img_config_list, sample_config, step=step)
+            elif sample_config.comfy.send_prompts_as_batch and len(gen_img_config_list) > 1:
                 self._render_comfy_sample_batch(gen_img_config_list, sample_config, step=step)
             else:
                 self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
@@ -2060,6 +2083,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
     # Called before the model is loaded
     def hook_before_model_load(self):
         comfy_config = self._get_comfy_config_for_startup_release()
+        if (comfy_config is not None and getattr(comfy_config, 'provider', None) == 'aitk_shared_models'
+                and getattr(self.model_config, 'shared_weights', {}).get('enabled')):
+            # The coordinator acquires after Comfy's whole-prompt cleanup. An
+            # out-of-band unload here could disturb a prompt that owns the GPU.
+            return
         if self.accelerator.is_main_process and comfy_config is not None:
             print_acc("Releasing ComfyUI VRAM before training model load")
             ComfyApiClient(api_url=comfy_config.api_url, timeout=10).release_vram()
@@ -3883,6 +3911,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         did_first_flush = False
         flush_next = False
         for step in range(start_step_num, self.train_config.steps):
+            self._shared_in_training_loop = True
+            self._shared_optimizer_boundary_completed = False
             if self.train_config.do_paramiter_swapping:
                 self.optimizer.optimizer.swap_paramiters()
             self.timer.start('train_loop')
@@ -4191,12 +4221,30 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 self.step_num = step + 1
                 self.grad_accumulation_step += 1
                 self.end_step_hook()
+                coordinator = getattr(self.sd, 'shared_coordinator', None)
+                if (coordinator is not None and self._shared_optimizer_boundary_completed
+                        and not did_oom and not self.is_grad_accumulation_step):
+                    self._shared_optimizer_boundary_completed = False
+                    # The hook returned a scalar loss; release batch/graph references
+                    # before yielding and before consuming the next dataset item.
+                    batch_list.clear()
+                    batch = None
+                    if self._shared_sample_pending is not None:
+                        sample_step, sample_first = self._shared_sample_pending
+                        self._shared_sample_pending = None
+                        self._shared_in_training_loop = False
+                        try:
+                            self.sample_with_optimizer_state_offload(sample_step, is_first=sample_first)
+                        finally:
+                            self._shared_in_training_loop = True
+                    coordinator.safe_boundary(self.step_num)
 
 
         ###################################################################
         ##  END TRAIN LOOP
         ###################################################################
         self.accelerator.wait_for_everyone()
+        self._shared_in_training_loop = False
         if self.progress_bar is not None:
             self.progress_bar.close()
         if self.train_config.free_u:

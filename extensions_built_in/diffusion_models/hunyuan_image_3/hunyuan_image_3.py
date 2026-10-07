@@ -76,6 +76,17 @@ class HunyuanImage3Model(BaseModel):
 
     def training_preflight(self, process):
         validate_training(self, process)
+        self._shared_training_process = process
+        shared = getattr(self.model_config, 'shared_weights', {})
+        if shared.get('enabled'):
+            if self.variant != INSTRUCT or not self.model_config.quantize or self.model_config.qtype != 'convrot8':
+                raise ValueError('Shared Hunyuan training requires Instruct int8 convrot8')
+            if process.is_fine_tuning or process.train_config.merge_network_on_save:
+                raise ValueError('Immutable shared bases support frozen LoRA only, with no base merge')
+            if not self.model_config.layer_offloading:
+                raise ValueError('Shared Hunyuan requires the reversible layer memory manager')
+            if getattr(process.accelerator, 'num_processes', 1) != 1:
+                raise ValueError('Shared GPU handoff currently supports a single trainer process')
         self._release_vae_after_conditioning = (
             process.train_config.disable_sampling and bool(process.dataset_configs)
             and all(dataset.cache_latents or dataset.cache_latents_to_disk for dataset in process.dataset_configs))
@@ -154,6 +165,26 @@ class HunyuanImage3Model(BaseModel):
         from toolkit.models.v2.text_encoders.hunyuan_image_3 import HunyuanImage3Conditioning
         from .src.pipeline import HunyuanImage3Pipeline
         mc = self.model_config
+        shared = getattr(mc, 'shared_weights', {})
+        coordinator = None
+        tensor_source, shared_store = None, None
+        if shared.get('enabled'):
+            from toolkit.memory_management.shared_training import SharedTrainingCoordinator
+            from toolkit.shared_models import shared_package
+            coordinator = SharedTrainingCoordinator(self, shared, self._shared_training_process)
+            self.shared_coordinator = coordinator
+            coordinator.bind_process(self._shared_training_process)
+            identity, arena = coordinator.client.load_checkpoint(
+                mc.name_or_path, dict(pinned_config(self.variant), model_type=self.variant.name,
+                                      sequence_template=self.variant.sequence_template),
+                variant=self.variant.name, identity=shared.get('store_identity'),
+                reserve_bytes=int(float(shared['reserve_gib']) * 1024**3),
+                fallback_directory=shared.get('fallback_directory'),
+                cancel_check=self._shared_training_process._should_cancel_comfy_prompt_wait)
+            coordinator.store_identity = identity
+            shared_store = {'identity': identity, 'socket': shared.get('socket'),
+                            'content_digest': arena.manifest['content_digest']}
+            tensor_source = shared_package('client').SharedTensorSource(arena)
         assets, asset_revision = self._conditioning_source()
         source = mc.name_or_path
         qtype = mc.qtype if mc.quantize else None
@@ -161,15 +192,17 @@ class HunyuanImage3Model(BaseModel):
             'transformer', qtype or 'none', source_ref=source,
             extra_cache_key={'variant': self.variant.name, 'format': 1, 'mapping': 1,
                              'stat': None if not os.path.isfile(source) else [os.stat(source).st_size, os.stat(source).st_mtime_ns]})
-        transformer = self.load_quantized_module_cache(cache_path, 'transformer')
+        transformer = None if coordinator is not None else self.load_quantized_module_cache(cache_path, 'transformer')
         if transformer is None:
             self.print_and_status_update('Streaming HunyuanImage 3 weights')
             transformer = HunyuanImage3Transformer.load_model(
                 source, dtype=self.torch_dtype, qtype=qtype, variant=self.variant,
-                quantize_device=self.device_torch, config=pinned_config(self.variant))
-            self.save_quantized_module_cache(transformer, cache_path, 'transformer')
+                quantize_device=self.device_torch, config=pinned_config(self.variant),
+                tensor_source=tensor_source, shared_store=shared_store)
+            if coordinator is None:
+                self.save_quantized_module_cache(transformer, cache_path, 'transformer')
         transformer.aitk_post_load(**self.component_load_kwargs('transformer'))
-        if mc.layer_offloading:
+        if mc.layer_offloading and coordinator is None:
             # Large embedding gathers stay on CPU and deliberately are not pinned.
             # A safetensors view of this table otherwise retains the mapping of the
             # entire 44–76 GiB checkpoint even after packed buffers were pinned.

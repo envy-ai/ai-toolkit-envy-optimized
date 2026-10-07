@@ -1,0 +1,6 @@
+[project]
+name = "comfyui-aitk-shared-models"
+version = "0.1.0"
+description = "Experimental independent Hunyuan inference from ai-toolkit shared immutable CPU weights"
+requires-python = ">=3.11"
+dependencies = ["aitk-shared-models==0.1.0"]

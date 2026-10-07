@@ -20,6 +20,7 @@ SKIPPED_PREFIXES = ('vae.', 'vision_model.', 'lm_head.', 'model.ln_f.')
 class CheckpointReader:
     """Open each shard once, and slice expert banks before materializing tensors."""
     def __init__(self, path):
+        self.shared = False
         self.stack = contextlib.ExitStack()
         self.handles = {}
         if os.path.isdir(path):
@@ -127,7 +128,7 @@ class HunyuanImage3Transformer(HunyuanImage3, OstrisModelMixin):
     @classmethod
     def load_model(cls, name_or_path, dtype=torch.bfloat16, qtype=None, config=None,
                    config_path=None, quantize_device=None, variant=INSTRUCT,
-                   quantize_on_load=True, device=None, **kwargs):
+                   quantize_on_load=True, device=None, tensor_source=None, shared_store=None, **kwargs):
         validate_variant(variant, name_or_path)
         if config is None:
             config = cls.aitk_load_config(config_path or name_or_path) if os.path.isdir(config_path or name_or_path) else pinned_config(variant)
@@ -143,12 +144,13 @@ class HunyuanImage3Transformer(HunyuanImage3, OstrisModelMixin):
                 cls, name_or_path, dtype=dtype, qtype=qtype, variant=variant.name,
                 config=config, revision=kwargs.get('revision'),
                 fingerprint=None if source_stat is None else [source_stat.st_size, source_stat.st_mtime_ns],
-                mapping_version=1, backend_version=1)
+                mapping_version=1, backend_version=1,
+                shared_store=None if shared_store is None else shared_store['identity'])
             resident = pool.get(pool_key)
             if resident is not None:
                 return resident
         path = name_or_path
-        if not os.path.exists(path):
+        if tensor_source is None and not os.path.exists(path):
             if str(path).endswith('.safetensors'):
                 path = cls._resolve_single_file(path)
             else:
@@ -156,7 +158,9 @@ class HunyuanImage3Transformer(HunyuanImage3, OstrisModelMixin):
                 path = snapshot_download(path, revision=kwargs.get('revision'),
                                          allow_patterns=['config.json', '*.safetensors', '*.safetensors.index.json'])
         requested = (qtype or '').split('|')[0]
-        reader = CheckpointReader(path)
+        reader = tensor_source if tensor_source is not None else CheckpointReader(path)
+        if getattr(reader, 'shared', False) and (variant != INSTRUCT or requested != 'convrot8'):
+            raise ValueError('Shared Hunyuan attachment supports Instruct convrot8 only')
         try:
             validate_variant(variant, name_or_path, reader.metadata(), reader.keys)
             model = cls.aitk_from_config(config)
@@ -197,7 +201,8 @@ class HunyuanImage3Transformer(HunyuanImage3, OstrisModelMixin):
                         if expert is not None and suffix == 'weight_codebook' and shape == [16]:
                             slice_index = None
                         local[name + '.' + suffix] = reader.tensor(key, slice_index)
-                    remaining, _ = import_comfy_quantized_layers(model, local, orig_dtype=dtype)
+                    remaining, _ = import_comfy_quantized_layers(
+                        model, local, orig_dtype=dtype, strict_shared=getattr(reader, 'shared', False))
                     if remaining:
                         raise ValueError(f'Unconsumed quantization tensors: {list(remaining)}')
                     continue
@@ -242,6 +247,11 @@ class HunyuanImage3Transformer(HunyuanImage3, OstrisModelMixin):
                                       'fingerprint': None if stat is None else [stat.st_size, stat.st_mtime_ns],
                                       'mapping_version': 1, 'backend_version': 1}
             model.requires_grad_(False)
+            if getattr(reader, 'shared', False):
+                from toolkit.shared_models import capture_shared_masters
+                model._shared_store = shared_store
+                model._shared_arena = reader.arena
+                capture_shared_masters(model)
             if device is not None:
                 model.to(device)
             if pool is not None:

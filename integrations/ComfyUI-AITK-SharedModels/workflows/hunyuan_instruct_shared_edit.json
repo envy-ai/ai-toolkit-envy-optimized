@@ -1,0 +1,12 @@
+{
+  "1": {"class_type": "AITKSharedHunyuanImage3Loader", "inputs": {"store_identity": "REPLACE_STORE_ID", "socket": ""}},
+  "2": {"class_type": "AITKSharedLoRASnapshot", "inputs": {"model": ["1", 0], "snapshot_id": "latest", "strength": 1.0}},
+  "3": {"class_type": "HunyuanImage3VAELoader", "inputs": {"vae_name": "hunyuan_image_3_vae_fp16.safetensors"}},
+  "4": {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": "hunyuan_image_3_instruct_siglip2_so400m_naflex.safetensors"}},
+  "5": {"class_type": "LoadImage", "inputs": {"image": "reference.png"}},
+  "6": {"class_type": "HunyuanImage3ImageEncode", "inputs": {"model": ["2", 0], "vae": ["3", 0], "clip_vision": ["4", 0], "images.image_1": ["5", 0], "prompt": "Remove the lineart from this image.", "width": 1024, "height": 1024, "vit_strength": 1.0, "latent_strength": 1.0, "reference_vit_padding": true}},
+  "7": {"class_type": "HunyuanImage3EmptyLatent", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
+  "8": {"class_type": "KSampler", "inputs": {"model": ["2", 0], "positive": ["6", 0], "negative": ["6", 1], "latent_image": ["7", 0], "seed": 42, "steps": 20, "cfg": 5.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+  "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
+  "10": {"class_type": "SaveImage", "inputs": {"images": ["9", 0], "filename_prefix": "ai-toolkit/shared-hunyuan"}}
+}

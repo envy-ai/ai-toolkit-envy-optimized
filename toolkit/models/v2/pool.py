@@ -67,6 +67,9 @@ class PoolEntry:
         self.uses = 0
         self.touched_gen = generation
         self._bytes: Optional[int] = None
+        # Process-local reuse retains the descriptor/mapping owner; no cross-process
+        # Python model objects are exchanged by this pool.
+        self.shared_store = getattr(module, '_shared_store', None)
 
     @property
     def bytes(self) -> int:
@@ -99,6 +102,7 @@ class PoolEntry:
             "device": self.device(),
             "uses": self.uses,
             "last_used": self.last_used,
+            "shared_store": None if self.shared_store is None else self.shared_store.get('identity'),
         }
 
 

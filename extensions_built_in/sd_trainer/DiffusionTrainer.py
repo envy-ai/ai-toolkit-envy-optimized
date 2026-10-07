@@ -221,6 +221,15 @@ class DiffusionTrainer(SDTrainer):
             return
         if self.should_sample():
             self.update_db_key("sample_now", 0)
+            coordinator = getattr(getattr(self, 'sd', None), 'shared_coordinator', None)
+            if (coordinator is not None and self.sample_config.comfy.enabled
+                    and self.sample_config.comfy.provider == 'aitk_shared_models'):
+                # UI render-next-step requests arrive in end_step_hook, before
+                # batch graphs are released. Preserve accumulated gradients and
+                # defer through the same verified boundary as scheduled previews.
+                print_acc(f"\nShared ComfyUI sample queued at step {self.step_num}")
+                self.sample_with_optimizer_state_offload(self.step_num)
+                return
             if self.progress_bar is not None:
                 self.progress_bar.pause()
             print_acc(f"\nSampling at step {self.step_num}")

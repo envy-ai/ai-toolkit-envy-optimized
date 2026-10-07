@@ -230,6 +230,10 @@ def _pin_inner_tensors(t: torch.Tensor) -> None:
 def _ensure_cpu_pinned(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     if t is None:
         return None
+    if hasattr(t, '_shared_owner'):
+        # The transfer owner stages bounded chunks; pin_memory would duplicate
+        # the complete mapped projection or expert bank.
+        return t
     if t.device.type != "cpu":
         try:
             t = t.to("cpu", copy=True)
@@ -271,7 +275,7 @@ def _move_own_param(module: nn.Module, name: str, param: nn.Parameter, device) -
     inner storage behind (same reason _move_params_to_cpu_and_pin replaces them)."""
     with torch.no_grad():
         moved = param.data.to(device)
-        if _is_quantized_tensor(param.data):
+        if _is_quantized_tensor(param.data) or hasattr(param, '_shared_owner'):
             setattr(module, name, nn.Parameter(moved, requires_grad=param.requires_grad))
         else:
             param.data = moved
@@ -792,7 +796,7 @@ class OstrisLinearLayerMemoryManager(BaseLayerMemoryManager):
                     continue
                 if buf.device.type != "cpu":
                     buf = buf.to("cpu")
-                if torch.cuda.is_available() and not buf.is_pinned():
+                if not hasattr(buf, '_shared_owner') and torch.cuda.is_available() and not buf.is_pinned():
                     try:
                         buf = buf.pin_memory()
                     except RuntimeError:
