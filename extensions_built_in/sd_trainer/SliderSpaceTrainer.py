@@ -306,6 +306,9 @@ class SliderSpaceTrainer(DiffusionTrainer):
         direction = self.step_num % self.sliderspace.num_directions
         generator = torch.Generator(device='cpu').manual_seed((self.sliderspace.seed + self.step_num * 104729) % 2**63)
         index = torch.randint(len(self.discovery_entries), (1,), generator=generator).item()
+        from toolkit.training_examples import remember_source, source_item
+        remember_source(self, source_item(self._bank_paths(index)[0], self.discovery_entries[index]['caption'],
+                                        role=f'discovery_direction_{direction + 1}'))
         clean = load_file(str(self._bank_paths(index)[1]))['latent'].to(self.device_torch, dtype=self.sd.torch_dtype)
         t = torch.sigmoid(torch.randn(1, generator=generator) + trainer_flow_profile(self).shift(*clean.shape[-2:]))
         low, high = self.train_config.min_denoising_steps / 1000, self.train_config.max_denoising_steps / 1000

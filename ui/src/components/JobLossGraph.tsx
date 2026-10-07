@@ -9,6 +9,7 @@ import { openConfirm } from '@/components/ConfirmModal';
 
 interface Props {
   job: Job;
+  focusStep?: number;
 }
 
 function formatNum(v: number) {
@@ -138,7 +139,7 @@ function dulledColor(rgba: string): string {
   return `rgba(${r},${g},${b},1)`;
 }
 
-export default function JobLossGraph({ job }: Props) {
+export default function JobLossGraph({ job, focusStep }: Props) {
   const { series, lossKeys, status, refreshLoss, deleteRange } = useJobLossLog(job.id, 2000);
 
   // Controls
@@ -406,6 +407,8 @@ export default function JobLossGraph({ job }: Props) {
   const chartHostRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const uplotRef = useRef<uPlot | null>(null);
+  const focusStepRef = useRef(focusStep);
+  focusStepRef.current = focusStep;
 
   // Latest per-scale yClip read by the y-scale range fns — kept current via effect.
   const yClipRef = useRef<Record<string, { min: number; max: number }> | null>(null);
@@ -454,6 +457,23 @@ export default function JobLossGraph({ job }: Props) {
       },
       legend: { show: true },
       hooks: {
+        draw: [
+          u => {
+            const step = focusStepRef.current;
+            if (step === undefined || step < (u.scales.x.min ?? Infinity) || step > (u.scales.x.max ?? -Infinity)) return;
+            const x = u.valToPos(step, 'x', true);
+            const { ctx, bbox } = u;
+            ctx.save();
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.moveTo(x, bbox.top);
+            ctx.lineTo(x, bbox.top + bbox.height);
+            ctx.stroke();
+            ctx.restore();
+          },
+        ],
         setScale: [
           (u, key) => {
             if (key !== 'x') return;
@@ -504,6 +524,22 @@ export default function JobLossGraph({ job }: Props) {
       u.setData(built.data, true);
     }
   }, [built]);
+
+  const appliedFocus = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const u = uplotRef.current;
+    const xs = built.data[0];
+    if (!u || focusStep === undefined || appliedFocus.current === focusStep || !xs?.length) return;
+    if (focusStep < xs[0] || focusStep > xs[xs.length - 1]) return;
+    const min = Math.max(xs[0], focusStep - 50);
+    const max = Math.min(xs[xs.length - 1], focusStep + 50);
+    if (min >= max) return;
+    u.setScale('x', { min, max });
+    u.setCursor({ left: u.valToPos(focusStep, 'x'), top: 0 });
+    isZoomedRef.current = true;
+    setIsZoomed(true);
+    appliedFocus.current = focusStep;
+  }, [focusStep, built]);
 
   // Resize observer — fit canvas to the wrapper's available space minus the
   // HTML legend uPlot renders below it. Observe the layout wrapper, not the
@@ -579,6 +615,7 @@ export default function JobLossGraph({ job }: Props) {
         <div className="flex items-center gap-2">
           <div className="h-2 w-2 rounded-full bg-blue-400" />
           <h2 className="text-gray-100 text-sm font-medium">Loss graph</h2>
+          {focusStep !== undefined && <span className="text-xs text-blue-300">Report step {focusStep}</span>}
           <span className="text-xs text-gray-400">
             {status === 'loading' && 'Loading...'}
             {status === 'refreshing' && 'Refreshing...'}

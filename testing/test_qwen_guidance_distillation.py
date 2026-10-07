@@ -64,6 +64,43 @@ class CacheItem(TextEmbeddingFileItemDTOMixin):
 
 
 class GuidanceDistillationTests(unittest.TestCase):
+    def test_example_logging_leaves_loss_gradients_rng_and_predictions_unchanged(self):
+        from toolkit.training_examples import capture_training_rng
+        from unittest.mock import Mock
+        for objective in ('full_guidance', 'negative_only'):
+            torch.manual_seed(73)
+            trainer, parameter, batch, seen = self.make_trainer(objective)
+            before = capture_training_rng('cpu')
+            loss = trainer.train_single_accumulation(batch, accum_scale=.5)
+            after = torch.get_rng_state().clone()
+            torch.manual_seed(73)
+            recorded, recorded_parameter, recorded_batch, recorded_seen = self.make_trainer(objective)
+            recorded.record_training_examples = recorded.record_training_rng = True
+            recorded.accelerator.is_main_process = True
+            recorded.teacher_negative_prompt = 'blur'
+            recorded.logger = Mock()
+            recorded_batch.file_items = [SimpleNamespace(path='/datasets/a.jpg', caption='actual cached caption',
+                dataset_config=SimpleNamespace(folder_path='/datasets'), crop_width=64, crop_height=32,
+                crop_x=3, crop_y=5, flip_x=True, flip_y=False)]
+            recorded_loss = recorded.train_single_accumulation(recorded_batch, accum_scale=.5)
+            torch.testing.assert_close(recorded_loss, loss, rtol=0, atol=0)
+            torch.testing.assert_close(recorded_parameter.grad, parameter.grad, rtol=0, atol=0)
+            self.assertTrue(torch.equal(torch.get_rng_state(), after))
+            self.assertEqual(len(seen), len(recorded_seen))
+            for original, enabled in zip(seen, recorded_seen):
+                torch.testing.assert_close(original[3]['latents'], enabled[3]['latents'], rtol=0, atol=0)
+                torch.testing.assert_close(original[3]['timestep'], enabled[3]['timestep'], rtol=0, atol=0)
+            records, rng = recorded.logger.log_training_examples.call_args.args
+            self.assertEqual(rng, before)
+            self.assertAlmostEqual(records[0]['weighted_loss'], recorded_loss.item())
+            self.assertEqual(records[0]['loss_weight'], 2)
+            self.assertEqual(records[0]['metadata']['caption'], 'actual cached caption')
+            self.assertEqual(records[0]['metadata']['negative_prompt'], 'blur')
+            self.assertEqual(records[0]['presentation']['crop_x'], 3)
+            self.assertTrue(records[0]['presentation']['flip_x'])
+            self.assertEqual(records[0]['teacher_correction_rms'], 6 if objective == 'full_guidance' else 3)
+            self.assertGreater(records[0]['noise_std'], 0)
+
     def test_targets_and_cancellation(self):
         pos, neg, blank = torch.tensor([2., 3.]), torch.tensor([-1., 1.]), torch.tensor([0., 2.])
         torch.testing.assert_close(guidance_distillation_target(pos, neg, 4), torch.tensor([11., 9.]))

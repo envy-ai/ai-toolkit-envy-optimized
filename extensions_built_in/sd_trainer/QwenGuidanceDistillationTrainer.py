@@ -83,6 +83,15 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
             if self.cfg_reference != 'negative_prompt' or not self.teacher_negative_prompt.strip():
                 raise ValueError('Ideogram negative-only distillation requires text-negative CFG and a nonempty negative prompt')
 
+        logging = config.get('logging') or {}
+        self.record_training_examples = logging.get('record_training_examples', True)
+        self.record_training_rng = logging.get('record_training_rng', False)
+        for key in ('record_training_examples', 'record_training_rng'):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError(f'logging.{key} must be true or false')
+        if self.record_training_rng and not self.record_training_examples:
+            raise ValueError('Record training examples before enabling training RNG snapshots')
+
         datasets = config.get("datasets") or []
         validate_edit_references(config, datasets)
         if not datasets:
@@ -235,6 +244,11 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
         if batch is None or batch.latents is None or batch.prompt_embeds is None:
             raise ValueError("Guidance distillation requires cached latents and positive text embeddings")
         dtype = get_torch_dtype(self.train_config.dtype)
+        record_examples = getattr(self, 'record_training_examples', False) and self.accelerator.is_main_process
+        rng_state = None
+        if record_examples and getattr(self, 'record_training_rng', False):
+            from toolkit.training_examples import capture_training_rng
+            rng_state = capture_training_rng(self.device_torch)
         with torch.no_grad():
             clean = batch.latents.to(self.device_torch, dtype=dtype)
             n, _, height, width = clean.shape
@@ -245,6 +259,9 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
             t = t_min + (t_max - t_min) * t
             timesteps = t * 1000.0
             noise = torch.randn(clean.shape, device=self.device_torch, dtype=torch.float32)
+            if record_examples:
+                noise_mean = noise.flatten(1).mean(1)
+                noise_std = noise.flatten(1).std(1, correction=0)
             t_view = t.view(n, 1, 1, 1)
             noisy = ((1 - t_view) * clean.float() + t_view * noise).to(dtype)
             del clean, noise
@@ -265,6 +282,8 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
                     teacher_positive, teacher_negative, self.teacher_cfg_scale, blank=teacher_blank,
                 )
                 correction = (target - teacher_positive).square().mean().sqrt().item()
+                if record_examples:
+                    per_item_correction = (target - teacher_positive).square().flatten(1).mean(1).sqrt()
                 del teacher_positive, teacher_negative, teacher_blank, negative_embeds, blank_embeds
             network.multiplier = 1.0
             network.is_active = True
@@ -274,6 +293,11 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
             weights = torch.as_tensor(batch.loss_multiplier_list, device=per_item_loss.device, dtype=per_item_loss.dtype)
             loss = (per_item_loss * weights).mean()
             self.accelerator.backward(loss * accum_scale)
+            if record_examples:
+                from toolkit.training_examples import training_example_records
+                values = torch.stack((per_item_loss.detach(), weights, timesteps.float(),
+                                      per_item_correction, noise_mean, noise_std), dim=1).detach().cpu().tolist()
+                self.logger.log_training_examples(training_example_records(self, batch, values), rng_state)
             self.additional_logs.update({
                 "distill/teacher_correction_rms": correction,
                 "distill/prediction_mse": per_item_loss.mean().detach().item(),

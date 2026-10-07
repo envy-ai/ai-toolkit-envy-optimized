@@ -325,6 +325,8 @@ export interface SampleConfig {
 export interface LoggingConfig {
   log_every: number;
   use_ui_logger: boolean;
+  record_training_examples?: boolean;
+  record_training_rng?: boolean;
 }
 
 export interface SliderTargetConfig {

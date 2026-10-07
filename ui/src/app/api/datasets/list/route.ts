@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import { getDatasetsRoot } from '@/server/settings';
+import { getDatasetPreviews } from '@/server/datasetPreviews';
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     let datasetsPath = await getDatasetsRoot();
 
@@ -19,6 +20,9 @@ export async function GET() {
       .filter(dirent => !dirent.name.startsWith('.'))
       .map(dirent => dirent.name);
 
+    if (new URL(request.url).searchParams.get('previews') === '1') {
+      return NextResponse.json(await getDatasetPreviews(datasetsPath, folders));
+    }
     return NextResponse.json(folders);
   } catch (error) {
     return NextResponse.json({ error: 'Failed to fetch datasets' }, { status: 500 });

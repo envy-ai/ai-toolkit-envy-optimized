@@ -1258,6 +1258,8 @@ class SDTrainer(BaseSDTrainProcess):
             loss = loss.mean([1, 2, 3, 4])
         else:
             loss = loss.mean([1, 2, 3])
+        from toolkit.training_examples import recording_enabled
+        report_raw = loss.detach().clone() if recording_enabled(self) else None
         # apply loss multiplier before prior loss
         # multiply by our mask
         try:
@@ -1280,6 +1282,8 @@ class SDTrainer(BaseSDTrainProcess):
                 # add min_snr_gamma
                 loss = apply_snr_weight(loss, timesteps, self.sd.noise_scheduler, self.train_config.min_snr_gamma)
 
+        if report_raw is not None:
+            self._loss_report_components = (report_raw, loss.detach().clone(), timesteps.detach())
         loss = loss.mean()
         
         # check for audio loss
@@ -1674,6 +1678,7 @@ class SDTrainer(BaseSDTrainProcess):
         # accum_scale: 1 / number of micro-batches accumulated per optimizer step, so the
         # summed gradients equal the mean over the effective batch. Applied to the backward
         # only; the returned loss stays unscaled for logging.
+        self._loss_report_components = None
         if getattr(self.sd, 'is_llm', False):
             return self.train_llm_accumulation(batch, accum_scale=accum_scale)
         with torch.no_grad():
@@ -2552,6 +2557,14 @@ class SDTrainer(BaseSDTrainProcess):
                     # else:
                     self.accelerator.backward(loss * accum_scale if accum_scale != 1.0 else loss)
 
+        from toolkit.training_examples import log_image_losses, recording_enabled
+        if recording_enabled(self) and self._loss_report_components is not None:
+            raw, weighted, report_times = self._loss_report_components
+            weighted = weighted * loss_multiplier.mean()
+            # Shared auxiliary terms and clipping cannot be assigned independently.
+            scope = 'per_image' if torch.isclose(weighted.mean(), loss.detach(), rtol=1e-5, atol=1e-7).item() else 'primary_component'
+            log_image_losses(self, batch, raw, weighted, report_times, noise, scope, conditioned_prompts)
+        self._loss_report_components = None
         return loss.detach()
         # flush()
 
@@ -2581,7 +2594,12 @@ class SDTrainer(BaseSDTrainProcess):
                         if self.current_boundary_index in self.sd.trainable_multistage_boundaries:
                             # if this boundary is trainable, we can stop looking
                             break
+            from toolkit.training_examples import recording_enabled, record_batch_inputs
+            pending = self.logger.pending_training_examples() if recording_enabled(self) else None
             loss = self.train_single_accumulation(batch, accum_scale=accum_scale)
+            if pending is not None and self.logger.pending_training_examples() == pending:
+                record_batch_inputs(self, batch, sources=getattr(self, '_loss_report_sources', None) or None)
+                self._loss_report_sources = []
             self.steps_this_boundary += 1
             if total_loss is None:
                 total_loss = loss

@@ -436,6 +436,12 @@ class FizgigSliderTrainer(DiffusionTrainer):
                             latent = item.get_latent().detach().unsqueeze(0).cpu()
                             item.load_prompt_embedding()
                             self.slider_anchor_bank.append((latent, item.prompt_embeds.detach().to("cpu"), None))
+                            from toolkit.training_examples import recording_enabled, source_item
+                            if recording_enabled(self):
+                                if not hasattr(self, '_loss_report_bank_sources'):
+                                    self._loss_report_bank_sources = {}
+                                self._loss_report_bank_sources[id(latent)] = source_item(item.path, item.caption,
+                                    getattr(item.dataset_config, 'folder_path', None), role='preservation_anchor')
                         finally:
                             item.cleanup_latent()
                             item.cleanup_text_embedding()
@@ -469,6 +475,9 @@ class FizgigSliderTrainer(DiffusionTrainer):
                     pixels = to_tensor(image).mul(2).sub(1).to(self.device_torch, dtype=self.sd.vae_torch_dtype)
                     latent = self.sd.encode_images(pixels.unsqueeze(0)).detach().cpu()
                     self.slider_anchor_bank.append((latent, positive.to("cpu"), negative.to("cpu") if negative is not None else None))
+                    from toolkit.training_examples import save_practice_source, recording_enabled
+                    if recording_enabled(self):
+                        save_practice_source(self, latent, image, f'anchor_{index:06d}', self.slider_anchor_prompts[index][0])
         finally:
             # Embeds.to may mutate its container; do not retain bank embeds on GPU.
             for positive, negative in self.slider_anchor_embeds:
@@ -480,6 +489,8 @@ class FizgigSliderTrainer(DiffusionTrainer):
 
     def _train_anchor_preservation(self, accum_scale):
         latent, positive, negative = random.choice(self.slider_anchor_bank)
+        from toolkit.training_examples import remember_bank_source
+        remember_bank_source(self, latent)
         dtype = get_torch_dtype(self.train_config.dtype)
         with torch.no_grad():
             noisy, timestep, _ = self._noised_state(latent)
@@ -633,6 +644,8 @@ class FizgigSliderTrainer(DiffusionTrainer):
                     pixels = to_tensor(image).mul(2).sub(1).to(self.device_torch, dtype=self.sd.vae_torch_dtype)
                     latent = self.sd.encode_images(pixels.unsqueeze(0)).detach().cpu()
                     self.slider_bank.append((latent, triplet_index))
+                    from toolkit.training_examples import save_practice_source
+                    save_practice_source(self, latent, image, f'practice_{index:06d}', self.slider_prompt_triplets[triplet_index][0])
         finally:
             network.multiplier = previous_multiplier
             network.is_active = previous_active
@@ -690,6 +703,8 @@ class FizgigSliderTrainer(DiffusionTrainer):
 
     def _train_multipoint_prompt(self, accum_scale):
         latent, entry_index = random.choice(self.slider_bank)
+        from toolkit.training_examples import remember_bank_source
+        remember_bank_source(self, latent)
         noisy, timestep, _ = self._noised_state(latent)
         neutral = self.slider_embeds[entry_index][0].detach().to(self.device_torch, dtype=self.sd.torch_dtype)
         negative = self.slider_cfg_negative_embeds[entry_index][0].detach().to(self.device_torch, dtype=self.sd.torch_dtype) if self.slider_cfg_negative_embeds is not None else None
@@ -715,6 +730,14 @@ class FizgigSliderTrainer(DiffusionTrainer):
         if batch is None or batch.latents is None:
             raise ValueError("Multi-point image slider requires cached image batches")
         points = [p for p in self.slider_points if p["strength"] != 0]
+        from toolkit.training_examples import remember_source, source_item, recording_enabled
+        if recording_enabled(self):
+            for item in batch.file_items:
+                group = self.slider_image_groups[item.dataset_config.fizgig_multipoint_group]
+                stem = os.path.splitext(os.path.basename(item.path))[0]
+                for point in self.slider_points:
+                    remember_source(self, source_item(group['images'][point['id']][stem], item.caption,
+                        group['folders'][point['id']], role=f"slider_strength_{point['strength']}"))
         dtype = get_torch_dtype(self.train_config.dtype)
         def pixels(point):
             return torch.stack([self.slider_multipoint_latents[point["id"]][self._multipoint_key(item)] for item in batch.file_items])
@@ -779,6 +802,8 @@ class FizgigSliderTrainer(DiffusionTrainer):
                     total += 0.5 * loss.detach()
             else:
                 bank_latent, triplet_index = random.choice(self.slider_bank)
+                from toolkit.training_examples import remember_bank_source
+                remember_bank_source(self, bank_latent)
                 clean = bank_latent.to(self.device_torch)
                 noisy, timestep, _ = self._noised_state(clean)
                 neutral, positive, negative = [embed.to(self.device_torch, dtype=self.sd.torch_dtype)

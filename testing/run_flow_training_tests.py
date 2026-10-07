@@ -38,6 +38,7 @@ DEFAULT_TESTS = [
     'testing.test_sliderspace_components',
     'testing.test_cross_model_native_objectives',
     'testing.test_adapter_offload_restore',
+    'testing.test_training_examples',
 ]
 
 

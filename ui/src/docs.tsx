@@ -3,6 +3,14 @@ import { ConfigDoc } from '@/types';
 import { IoFlaskSharp } from 'react-icons/io5';
 
 const docs: { [key: string]: ConfigDoc } = {
+  'logging.record_training_examples': {
+    title: 'Per-image Loss Details',
+    description: <>On by default for every training mode. Records training inputs and available objective losses in the job&apos;s SQLite log for the Loss Report. Shared step/pair objectives are labeled rather than assigned independent image losses. Dataset images stay in place; prompt-slider practice images are saved as they are generated. No extra model passes or VAE decoding. Turn off to disable recording when starting or resuming training. Existing scalar losses cannot recover which inputs were used.</>,
+  },
+  'logging.record_training_rng': {
+    title: 'Noise RNG Snapshots',
+    description: <>Optional CPU and CUDA random-generator states saved once per microbatch. Adds storage and requires per-image logging. Allows replaying timestep and noise draws with the same Torch version, device, shape and schedule. Reproducing model predictions also requires the matching checkpoint, helper weights and cached conditioning/latents.</>,
+  },
   'fizgig_slider.multipoint': {
     title: 'Multi-point Sliders',
     description: <>Opt-in direct targets at arbitrary signed strengths, initially −1, +1 and +2. Add/remove points or use fractions. Zero defines a neutral base-model reference, never a trainable target or preservation anchor. Prompt teachers use each point&apos;s own prompts; image targets share neutral captions. Losses are averaged across nonzero targets. More points increase compute and CPU/disk cache storage, not resident model copies. A single adapter does not guarantee smooth interpolation or accurate extrapolation. Turning this off restores the original two-point settings without deleting either draft.</>,

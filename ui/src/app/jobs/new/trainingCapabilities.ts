@@ -27,10 +27,15 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
   const process = config?.config?.process?.[0];
   if (!process) return ['Job configuration must contain a training process.'];
   const mode = canonicalTrainingMode(process.type);
-  if (!isSpecializedTrainingMode(mode)) return [];
   const errors: string[] = [];
+  for (const key of ['record_training_examples', 'record_training_rng'] as const) {
+    const value = process.logging?.[key];
+    if (value !== undefined && typeof value !== 'boolean') errors.push(`Logging ${key} must be a boolean.`);
+  }
+  if (process.logging?.record_training_rng && process.logging?.record_training_examples === false) errors.push('Recording noise RNG state requires per-image loss logging.');
+  if (!isSpecializedTrainingMode(mode)) return errors;
   const model = process.model;
-  if (!model || !trainingModeSupported(model.arch, mode)) return [`${mode} supports Qwen Image 2.1, Krea 2, Anima and Ideogram 4.`];
+  if (!model || !trainingModeSupported(model.arch, mode)) return [...errors, `${mode} supports Qwen Image 2.1, Krea 2, Anima and Ideogram 4.`];
   const networks = mode.startsWith('fizgig_') ? ['lora', 'dora'] : ['lora'];
   if (!networks.includes(process.network?.type ?? '')) errors.push(`${mode} requires ${networks.length === 1 ? 'LoRA only' : 'LoRA or DoRA'}.`);
   const kwargs = model.model_kwargs ?? {};

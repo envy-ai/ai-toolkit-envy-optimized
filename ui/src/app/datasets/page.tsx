@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal } from '@/components/Modal';
 import Link from 'next/link';
 import { TextInput } from '@/components/formInputs';
@@ -12,12 +12,35 @@ import { TopBar, MainContent } from '@/components/layout';
 import UniversalTable, { TableColumn } from '@/components/UniversalTable';
 import { apiClient } from '@/utils/api';
 import { useRouter } from 'next/navigation';
+import DatasetGrid, { DatasetGridSize } from '@/components/DatasetGrid';
+import Loading from '@/components/Loading';
+
+type DatasetView = 'list' | DatasetGridSize;
 
 export default function Datasets() {
   const router = useRouter();
-  const { datasets, status, refreshDatasets } = useDatasetList();
+  const [view, setView] = useState<DatasetView>('list');
+  const { datasets, firstImages, status, refreshDatasets } = useDatasetList(view !== 'list');
   const [newDatasetName, setNewDatasetName] = useState('');
   const [isNewDatasetModalOpen, setIsNewDatasetModalOpen] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('datasets:view');
+      if (saved === 'list' || saved === 'small' || saved === 'medium' || saved === 'large') setView(saved);
+    } catch {
+      /* The view still works when storage is unavailable. */
+    }
+  }, []);
+
+  const changeView = (next: DatasetView) => {
+    setView(next);
+    try {
+      localStorage.setItem('datasets:view', next);
+    } catch {
+      /* Storage is optional. */
+    }
+  };
 
   // Transform datasets array into rows with objects
   const tableRows = datasets.map(dataset => ({
@@ -30,7 +53,7 @@ export default function Datasets() {
       title: 'Dataset Name',
       key: 'name',
       render: row => (
-        <Link href={`/datasets/${row.name}`} className="text-gray-200 hover:text-gray-100">
+        <Link href={`/datasets/${encodeURIComponent(row.name)}`} className="text-gray-200 hover:text-gray-100">
           {row.name}
         </Link>
       ),
@@ -41,6 +64,7 @@ export default function Datasets() {
       className: 'w-20 text-right',
       render: row => (
         <button
+          aria-label={`Delete dataset ${row.name}`}
           className="text-gray-200 hover:bg-red-600 p-2 rounded-full transition-colors"
           onClick={() => handleDeleteDataset(row.name)}
         >
@@ -129,12 +153,50 @@ export default function Datasets() {
       </TopBar>
 
       <MainContent>
-        <UniversalTable
-          columns={columns}
-          rows={tableRows}
-          isLoading={status === 'loading'}
-          onRefresh={refreshDatasets}
-        />
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <label className="flex items-center gap-2 text-sm text-gray-300">
+            View
+            <select
+              value={view}
+              onChange={event => changeView(event.target.value as DatasetView)}
+              className="rounded-md bg-gray-800 border border-gray-600 text-gray-200 px-3 py-2"
+            >
+              <option value="list">List</option>
+              <option value="small">Small grid</option>
+              <option value="medium">Medium grid</option>
+              <option value="large">Large grid</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={refreshDatasets}
+            disabled={status === 'loading'}
+            className="rounded-md bg-gray-800 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 disabled:opacity-50"
+          >
+            Refresh
+          </button>
+        </div>
+        {status === 'error' && (
+          <p role="alert" className="mb-4 text-red-300">
+            Could not load datasets. Try refreshing.
+          </p>
+        )}
+        {view === 'list' ? (
+          <UniversalTable
+            columns={columns}
+            rows={tableRows}
+            isLoading={status === 'loading'}
+            onRefresh={refreshDatasets}
+          />
+        ) : status === 'loading' ? (
+          <div className="p-4 flex justify-center">
+            <Loading />
+          </div>
+        ) : datasets.length === 0 ? (
+          <p className="p-6 text-center text-sm text-gray-400">No datasets yet. Create a new dataset to get started.</p>
+        ) : (
+          <DatasetGrid datasets={datasets} firstImages={firstImages} size={view} onDelete={handleDeleteDataset} />
+        )}
       </MainContent>
 
       <Modal

@@ -48,6 +48,13 @@ class LoggingConfig:
         self.verbose: bool = kwargs.get('verbose', False)
         self.use_wandb: bool = kwargs.get('use_wandb', False)
         self.use_ui_logger: bool = kwargs.get('use_ui_logger', False)
+        self.record_training_examples: bool = kwargs.get('record_training_examples', True)
+        self.record_training_rng: bool = kwargs.get('record_training_rng', False)
+        for key in ('record_training_examples', 'record_training_rng'):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError(f'logging.{key} must be true or false')
+        if self.record_training_rng and not self.record_training_examples:
+            raise ValueError('Record training examples before enabling training RNG snapshots')
         self.project_name: str = kwargs.get('project_name', 'ai-toolkit')
         self.run_name: str = kwargs.get('run_name', None)
 

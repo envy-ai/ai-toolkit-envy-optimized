@@ -258,6 +258,10 @@ class SliderTrainer(DiffusionTrainer):
             torch.randint(0, len(self.prompt_pairs), (1,)).item()
         ]
         prompt_pair.to(self.device_torch, dtype=dtype)
+        from toolkit.training_examples import remember_source, source_item
+        target = getattr(prompt_pair, 'target', None)
+        remember_source(self, source_item('prompt://slider-target', getattr(target, 'target_class', ''),
+            role='slider_target'))
 
         width, height = self.slider_config.resolutions[
             torch.randint(0, len(self.slider_config.resolutions), (1,)).item()

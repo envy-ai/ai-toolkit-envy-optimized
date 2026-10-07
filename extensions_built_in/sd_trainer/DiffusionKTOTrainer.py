@@ -162,6 +162,9 @@ class DiffusionKTOTrainer(DiffusionTrainer):
             weight = record['weights'].to(error.device)
             self.accelerator.backward((coefficient * weight * error).sum() * record['normalization'] * accum_scale)
         self._kto_replay_queue.popleft()
+        from toolkit.training_examples import log_image_losses
+        log_image_losses(self, batch, record['loss'], record['loss'] * record['weights'], record['timestep'],
+                         scope='per_image', extras={'kto_reference_estimator': self.kto_settings.reference_estimator})
         return (record['loss'] * record['weights']).mean().detach()
 
     def hook_train_loop(self, batch):

@@ -4001,9 +4001,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 self.torch_profiler.start()
             did_oom = False
             loss_dict = None
+            self.logger.discard_training_examples()
+            from toolkit.training_examples import recording_enabled, capture_training_rng, record_step_inputs
+            self._loss_report_sources = []
+            self._loss_report_step_rng = None
+            if recording_enabled(self) and self.logging_config.record_training_rng:
+                self._loss_report_step_rng = capture_training_rng(self.device_torch)
             try:
                 with self.accelerator.accumulate(self.modules_being_trained):
                     loss_dict = self.hook_train_loop(batch_list)
+                record_step_inputs(self, batch_list, loss_dict)
             except torch.cuda.OutOfMemoryError as e:
                 did_oom = True
                 _log_cuda_training_oom(e, self.step_num, self.device_torch)
@@ -4204,6 +4211,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         self.timer.print()
                         self.timer.reset()
                 
+                if did_oom:
+                    self.logger.discard_training_examples()
                 # commit log
                 if self.accelerator.is_main_process:
                     with self.timer('commit_logger'):

@@ -2,7 +2,7 @@
 
 import { useState, use } from 'react';
 import { FaChevronLeft } from 'react-icons/fa';
-import { MdDashboard, MdImage, MdShowChart, MdCode, MdExtension, MdNotes } from 'react-icons/md';
+import { MdDashboard, MdImage, MdShowChart, MdAssessment, MdCode, MdExtension, MdNotes } from 'react-icons/md';
 import { Button } from '@headlessui/react';
 import { TopBar, MainContent } from '@/components/layout';
 import useJob from '@/hooks/useJob';
@@ -13,12 +13,13 @@ import { redirect } from 'next/navigation';
 import JobActionBar from '@/components/JobActionBar';
 import JobConfigViewer from '@/components/JobConfigViewer';
 import JobLossGraph from '@/components/JobLossGraph';
+import JobLossReport from '@/components/JobLossReport';
 import JobPlugin from '@/components/JobPlugin';
 import JobNotes from '@/components/JobNotes';
 import { Job } from '@prisma/client';
 import { apiClient } from '@/utils/api';
 
-type PageKey = 'overview' | 'samples' | 'config' | 'loss_log' | 'notes' | 'plugin';
+type PageKey = 'overview' | 'samples' | 'config' | 'loss_log' | 'loss_report' | 'notes' | 'plugin';
 
 interface Page {
   name: string;
@@ -56,6 +57,14 @@ const pages: Page[] = [
     jobTypes: ['train'],
   },
   {
+    name: 'Loss Report',
+    value: 'loss_report',
+    icon: MdAssessment,
+    component: JobLossReport,
+    mainCss: 'pt-24 pb-4',
+    jobTypes: ['train'],
+  },
+  {
     name: 'Config File',
     value: 'config',
     icon: MdCode,
@@ -84,6 +93,7 @@ export default function JobPage({ params }: { params: Promise<{ jobID: string }>
   const { job, status, refreshJob } = useJob(jobID, 5000);
   const [pageKey, setPageKey] = useState<PageKey>('overview');
   const [hasPlugin, setHasPlugin] = useState(false);
+  const [graphFocusStep, setGraphFocusStep] = useState<number>();
 
   // poll for plugin.html in the job folder; show the Plugin tab if it exists
   usePollLoop(
@@ -141,6 +151,9 @@ export default function JobPage({ params }: { params: Promise<{ jobID: string }>
           <>
             {pages.map(page => {
               const Component = page.component;
+              if (page.value === 'loss_report' && pageKey === 'loss_report') return <JobLossReport key={page.value} job={job}
+                onShowStep={step => { setGraphFocusStep(step); setPageKey('loss_log'); }} />;
+              if (page.value === 'loss_log' && pageKey === 'loss_log') return <JobLossGraph key={page.value} job={job} focusStep={graphFocusStep} />;
               return page.value === pageKey ? <Component key={page.value} job={job} /> : null;
             })}
           </>

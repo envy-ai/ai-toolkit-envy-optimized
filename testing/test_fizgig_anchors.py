@@ -272,6 +272,12 @@ class AnchorTests(unittest.TestCase):
 
     def test_prompt_bank_uses_cfg_negatives_disabled_adapter_and_separate_seed(self):
         trainer = self.trainer()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        trainer.save_root = directory.name
+        trainer.logger = SimpleNamespace()
+        trainer.record_training_examples = True
+        trainer.slider_anchor_prompts = [('a preserved dog', 'blur')]
         trainer.slider_anchor_bank = []
         trainer.slider_anchor_embeds = [(embed(), embed(0))]
         trainer.slider_bank_resolution = 64
@@ -299,6 +305,10 @@ class AnchorTests(unittest.TestCase):
         self.assertEqual(calls[0][2]['generator'].initial_seed(), 100042)
         self.assertEqual(len(trainer.slider_anchor_bank), 1)
         self.assertEqual(trainer.slider_anchor_bank[0][0].device.type, 'cpu')
+        source = trainer._loss_report_bank_sources[id(trainer.slider_anchor_bank[0][0])]
+        self.assertEqual(source.caption, 'a preserved dog')
+        with Image.open(source.path) as image:
+            self.assertEqual(image.size, (64, 64))
 
     def test_anchor_image_latent_key_tracks_modification(self):
         with tempfile.TemporaryDirectory() as directory:

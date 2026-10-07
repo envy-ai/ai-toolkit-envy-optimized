@@ -207,6 +207,9 @@ class QwenFlowDPOTrainer(DiffusionTrainer):
             lose_error = error(rejected_noisy, rejected_target)
             self.accelerator.backward((-weights * coefficient * lose_error).mean() * accum_scale)
             del lose_error
+            from toolkit.training_examples import log_image_losses
+            log_image_losses(self, batch, loss, weights * loss, timesteps, noise, scope='pair_objective',
+                             extras={'dpo_beta': self.dpo_beta, 'dpo_sft_weight': self.dpo_sft_weight})
             self.additional_logs.update({
                 "dpo/margin": margin.mean().item(),
                 "dpo/preference_accuracy": (margin > 0).float().mean().item(),

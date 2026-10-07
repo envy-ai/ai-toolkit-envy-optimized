@@ -105,7 +105,7 @@ function run(db: sqlite3.Database, sql: string, params: any[] = []) {
 
 // Delete every logged step in [min_step, max_step] (inclusive) across all
 // metric keys. Used by the loss graph's "Delete Selected Range" action.
-export async function DELETE(request: NextRequest, { params }: { params: { jobID: string } }) {
+export async function DELETE(request: NextRequest, { params }: { params: Promise<{ jobID: string }> }) {
   const { jobID } = await params;
 
   const job = await prisma.job.findUnique({ where: { id: jobID } });
@@ -141,6 +141,15 @@ export async function DELETE(request: NextRequest, { params }: { params: { jobID
       // The FK cascade on metrics only fires with PRAGMA foreign_keys=ON, so
       // delete metrics explicitly rather than relying on it.
       await run(db, `DELETE FROM metrics WHERE step >= ? AND step <= ?;`, [minStep, maxStep]);
+      const reportTables = await all<{ name: string }>(db,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('training_examples', 'training_batches')");
+      for (const { name } of reportTables) {
+        await run(db, `DELETE FROM ${name} WHERE step >= ? AND step <= ?;`, [minStep, maxStep]);
+      }
+      if (reportTables.some(row => row.name === 'training_examples')) {
+        await run(db, `DELETE FROM training_example_metadata WHERE NOT EXISTS
+          (SELECT 1 FROM training_examples WHERE metadata_id=training_example_metadata.id);`);
+      }
       await run(db, `DELETE FROM steps WHERE step >= ? AND step <= ?;`, [minStep, maxStep]);
       await run(
         db,

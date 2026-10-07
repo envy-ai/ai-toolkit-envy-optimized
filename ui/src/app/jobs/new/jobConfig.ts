@@ -194,6 +194,8 @@ export const defaultJobConfig: JobConfig = {
         logging: {
           log_every: 1,
           use_ui_logger: true,
+          record_training_examples: true,
+          record_training_rng: false,
         },
         model: {
           name_or_path: 'ostris/Flex.1-alpha',
@@ -286,6 +288,8 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
       use_ui_logger: true,
     };
   }
+  jobConfig.config.process[0].logging.record_training_examples ??= true;
+  jobConfig.config.process[0].logging.record_training_rng ??= false;
   if (isMac()) {
     jobConfig.config.process[0].device = 'mps';
   }

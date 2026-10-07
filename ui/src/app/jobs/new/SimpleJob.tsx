@@ -1802,6 +1802,19 @@ export default function SimpleJob({
         )}
         <div className={sampleOnlyLockedClass}>
           <Card title="Training">
+            <div className="mb-4 space-y-3 text-sm">
+              <Checkbox label="Loss reporting" docKey="logging.record_training_examples"
+                checked={jobConfig.config.process[0].logging.record_training_examples ?? true}
+                onChange={checked => setJobConfig({ ...jobConfig.config.process[0].logging,
+                  record_training_examples: checked,
+                  record_training_rng: checked && (jobConfig.config.process[0].logging.record_training_rng ?? false),
+                }, 'config.process[0].logging')} />
+              <p className="text-gray-400">Records training inputs for the Loss Report in all training modes. Shared objectives are labeled; individual losses are recorded when available. Turn off to disable recording.</p>
+              <Checkbox label="Record noise RNG state (uses more storage)" docKey="logging.record_training_rng"
+                checked={jobConfig.config.process[0].logging.record_training_rng ?? false}
+                disabled={jobConfig.config.process[0].logging.record_training_examples === false}
+                onChange={checked => setJobConfig(checked, 'config.process[0].logging.record_training_rng')} />
+            </div>
             {isSliderSpace && <p className="text-sm text-gray-400">
               {jobConfig.config.process[0].train.steps.toLocaleString()} total training steps · approximately{' '}
               {Math.floor(jobConfig.config.process[0].train.steps / (jobConfig.config.process[0].sliderspace?.num_directions || 1)).toLocaleString()} per direction, after discovery.

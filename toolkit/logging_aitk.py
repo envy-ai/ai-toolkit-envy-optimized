@@ -5,6 +5,9 @@ from toolkit.config_modules import LoggingConfig
 import os
 import sqlite3
 import time
+import json
+import hashlib
+import math
 from typing import Any, Dict, Tuple, List
 
 
@@ -33,6 +36,52 @@ class EmptyLogger:
     # finish logging
     def finish(self):
         pass
+
+    def log_training_examples(self, records, rng_state=None):
+        pass
+
+    def discard_training_examples(self):
+        pass
+
+    def pending_training_examples(self):
+        return 0
+
+
+class MultiLogger(EmptyLogger):
+    """Keep local per-image diagnostics when scalar metrics also go to WandB."""
+    def __init__(self, loggers):
+        self.loggers = loggers
+
+    def start(self):
+        for logger in self.loggers:
+            logger.start()
+
+    def log(self, *args, **kwargs):
+        for logger in self.loggers:
+            logger.log(*args, **kwargs)
+
+    def commit(self, *args, **kwargs):
+        for logger in self.loggers:
+            logger.commit(*args, **kwargs)
+
+    def log_image(self, *args, **kwargs):
+        for logger in self.loggers:
+            logger.log_image(*args, **kwargs)
+
+    def log_training_examples(self, *args, **kwargs):
+        for logger in self.loggers:
+            logger.log_training_examples(*args, **kwargs)
+
+    def discard_training_examples(self):
+        for logger in self.loggers:
+            logger.discard_training_examples()
+
+    def finish(self):
+        for logger in self.loggers:
+            logger.finish()
+
+    def pending_training_examples(self):
+        return max((logger.pending_training_examples() for logger in self.loggers), default=0)
 
 
 # Wandb logger class
@@ -110,6 +159,11 @@ class UILogger:
         self._last_flush = time.time()
 
         self._first_commit_done = False
+        self._examples_to_commit = []
+        self._pending_example_steps = set()
+        self._pending_example_metadata = {}
+        self._pending_examples = []
+        self._pending_batches = []
 
     # start logging the training
     def start(self):
@@ -139,12 +193,23 @@ class UILogger:
             raise TypeError("log_dict must be a dict")
         self._log_to_commit.update(log_dict)
 
+    def log_training_examples(self, records, rng_state=None):
+        # Records are detached CPU scalars/text, never GPU tensors or images.
+        if records:
+            self._examples_to_commit.append((records, rng_state))
+
+    def discard_training_examples(self):
+        self._examples_to_commit.clear()
+
+    def pending_training_examples(self):
+        return len(self._examples_to_commit)
+
     # send the log
     def commit(self, step: Optional[int] = None):
         if not self._started:
             self.start()
 
-        if not self._log_to_commit:
+        if not self._log_to_commit and not self._examples_to_commit:
             return
 
         if step is None:
@@ -162,6 +227,36 @@ class UILogger:
             self._first_commit_done = True
 
         wall_time = time.time()
+
+        if self._examples_to_commit:
+            self._pending_example_steps.add(step)
+            self._pending_examples = [row for row in self._pending_examples if row[0] != step]
+            self._pending_batches = [row for row in self._pending_batches if row[0] != step]
+            batch_losses = []
+            for microbatch, (records, rng_state) in enumerate(self._examples_to_commit):
+                values = [record['weighted_loss'] for record in records]
+                if all(value is not None for value in values):
+                    batch_losses.append(sum(values) / len(values))
+                self._pending_batches.append((step, microbatch, json.dumps(rng_state) if rng_state else None))
+                for item_index, record in enumerate(records):
+                    metadata_json = json.dumps(record['metadata'], sort_keys=True, ensure_ascii=False, allow_nan=False)
+                    metadata_id = hashlib.sha256(metadata_json.encode()).hexdigest()
+                    metadata = record['metadata']
+                    self._pending_example_metadata[metadata_id] = (
+                        metadata_id, metadata['path'], metadata['dataset_path'], metadata['caption'], metadata_json)
+                    loss = record['loss']
+                    weighted = record['weighted_loss']
+                    kind = 'unattributed' if weighted is None else ('finite' if math.isfinite(weighted) else ('nan' if math.isnan(weighted) else ('+inf' if weighted > 0 else '-inf')))
+                    finite = lambda value: value if value is None or math.isfinite(value) else None
+                    self._pending_examples.append((
+                        step, microbatch, item_index, metadata_id, finite(loss), finite(weighted), kind,
+                        finite(record['loss_weight']), finite(record['timestep']), finite(record['teacher_correction_rms']),
+                        finite(record['noise_mean']), finite(record['noise_std']),
+                        json.dumps(record['presentation'], sort_keys=True, allow_nan=False)))
+            # Match the graph: average the microbatch means, including uneven batches.
+            if len(batch_losses) == len(self._examples_to_commit):
+                self._log_to_commit.setdefault('loss/loss', sum(batch_losses) / len(batch_losses))
+            self._examples_to_commit.clear()
 
         # buffer step row (upsert later)
         self._pending_steps.append((step, wall_time))
@@ -188,7 +283,7 @@ class UILogger:
         # flush conditions
         now = time.time()
         if (
-            len(self._pending_metrics) >= self._flush_every_n
+            len(self._pending_metrics) + len(self._pending_examples) >= self._flush_every_n
             or (now - self._last_flush) >= self._flush_every_secs
         ):
             self._flush()
@@ -247,6 +342,32 @@ class UILogger:
             "CREATE INDEX IF NOT EXISTS idx_metrics_key_step ON metrics (key, step);"
         )
 
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS training_example_metadata (
+                id TEXT PRIMARY KEY, path TEXT NOT NULL, dataset_path TEXT NOT NULL,
+                caption TEXT NOT NULL, metadata_json TEXT NOT NULL
+            );
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS training_batches (
+                step INTEGER NOT NULL, microbatch INTEGER NOT NULL, rng_state_json TEXT,
+                PRIMARY KEY(step, microbatch),
+                FOREIGN KEY(step) REFERENCES steps(step) ON DELETE CASCADE
+            );
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS training_examples (
+                step INTEGER NOT NULL, microbatch INTEGER NOT NULL, item_index INTEGER NOT NULL,
+                metadata_id TEXT NOT NULL, loss REAL, weighted_loss REAL, loss_kind TEXT NOT NULL,
+                loss_weight REAL, timestep REAL, teacher_correction_rms REAL,
+                noise_mean REAL, noise_std REAL, presentation_json TEXT NOT NULL,
+                PRIMARY KEY(step, microbatch, item_index),
+                FOREIGN KEY(step) REFERENCES steps(step) ON DELETE CASCADE,
+                FOREIGN KEY(metadata_id) REFERENCES training_example_metadata(id)
+            );
+        """)
+        con.execute('CREATE INDEX IF NOT EXISTS idx_training_examples_metadata ON training_examples(metadata_id, step);')
+
         con.execute("COMMIT;")
 
     def _coerce_value(self, v: Any) -> Tuple[Optional[float], Optional[str]]:
@@ -268,6 +389,11 @@ class UILogger:
         con.execute("BEGIN;")
         # metrics rows cascade via FK ON DELETE CASCADE
         con.execute("DELETE FROM steps WHERE step > ?;", (current_step,))
+        # The resumed step may have a different batch or logging may be disabled.
+        con.execute('DELETE FROM training_examples WHERE step >= ?;', (current_step,))
+        con.execute('DELETE FROM training_batches WHERE step >= ?;', (current_step,))
+        con.execute('DELETE FROM training_example_metadata WHERE NOT EXISTS '
+                    '(SELECT 1 FROM training_examples WHERE metadata_id = training_example_metadata.id);')
         # drop any keys that no longer have any metrics, and clamp last_seen_step
         con.execute(
             "DELETE FROM metric_keys "
@@ -317,11 +443,25 @@ class UILogger:
                 self._pending_metrics,
             )
 
+        if self._pending_example_steps:
+            for step in self._pending_example_steps:
+                con.execute('DELETE FROM training_examples WHERE step = ?;', (step,))
+                con.execute('DELETE FROM training_batches WHERE step = ?;', (step,))
+            con.executemany('INSERT OR IGNORE INTO training_example_metadata VALUES (?, ?, ?, ?, ?);',
+                            self._pending_example_metadata.values())
+            con.executemany('INSERT INTO training_batches VALUES (?, ?, ?);', self._pending_batches)
+            con.executemany('INSERT INTO training_examples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
+                            self._pending_examples)
+
         con.execute("COMMIT;")
 
         self._pending_steps.clear()
         self._pending_metrics.clear()
         self._pending_key_minmax.clear()
+        self._pending_example_steps.clear()
+        self._pending_example_metadata.clear()
+        self._pending_examples.clear()
+        self._pending_batches.clear()
         self._last_flush = time.time()
 
 
@@ -331,14 +471,14 @@ def create_logger(
     all_config: OrderedDict,
     save_root: Optional[str] = None,
 ):
+    loggers = []
     if logging_config.use_wandb:
         project_name = logging_config.project_name
         run_name = logging_config.run_name
-        return WandbLogger(project=project_name, run_name=run_name, config=all_config)
-    elif logging_config.use_ui_logger:
+        loggers.append(WandbLogger(project=project_name, run_name=run_name, config=all_config))
+    if (logging_config.use_ui_logger and not logging_config.use_wandb) or getattr(logging_config, 'record_training_examples', False):
         if save_root is None:
             raise ValueError("save_root must be provided when using UILogger")
         log_file = os.path.join(save_root, "loss_log.db")
-        return UILogger(log_file=log_file)
-    else:
-        return EmptyLogger()
+        loggers.append(UILogger(log_file=log_file))
+    return MultiLogger(loggers) if len(loggers) > 1 else (loggers[0] if loggers else EmptyLogger())
