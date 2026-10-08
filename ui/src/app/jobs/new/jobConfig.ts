@@ -142,6 +142,7 @@ export const defaultJobConfig: JobConfig = {
           dtype: 'bf16',
           save_every: 250,
           max_step_saves_to_keep: 4,
+          record_low_enabled: false,
           record_low_window_size: 3000,
           record_low_start_step: 50,
           sample_on_record_low: true,
@@ -290,6 +291,9 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
   }
   jobConfig.config.process[0].logging.record_training_examples ??= true;
   jobConfig.config.process[0].logging.record_training_rng ??= false;
+  if (jobConfig.config.process[0].save) {
+    jobConfig.config.process[0].save.record_low_enabled ??= false;
+  }
   if (isMac()) {
     jobConfig.config.process[0].device = 'mps';
   }

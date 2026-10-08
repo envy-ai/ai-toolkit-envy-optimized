@@ -35,6 +35,10 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'Distillation Objective',
     description: <>Full guidance matches the teacher&apos;s complete CFG prediction, including positive strengthening. Negative contribution only learns the difference between blank-negative CFG and the specified-negative CFG, added to the unguided positive prediction. The latter is a more targeted experiment, not full CFG distillation; an empty negative makes it a no-op.</>,
   },
+  'config.process[0].save.record_low_enabled': {
+    title: 'Enable Record Low Checking',
+    description: <>Save an extra checkpoint when the loss reaches a new low within the configured window. Sample on Record Low controls whether to render at that checkpoint. Off by default; scheduled saves and samples still run.</>,
+  },
   'config.process[0].save.sample_on_record_low': {
     title: 'Sample on Record Low',
     description: (

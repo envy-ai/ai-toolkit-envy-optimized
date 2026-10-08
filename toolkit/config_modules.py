@@ -23,6 +23,7 @@ else:
 class SaveConfig:
     def __init__(self, **kwargs):
         self.save_every: int = kwargs.get('save_every', 1000)
+        self.record_low_enabled: bool = kwargs.get('record_low_enabled', False)
         self.record_low_window_size: int = kwargs.get('record_low_window_size', 3000)
         self.record_low_start_step: int = kwargs.get('record_low_start_step', 50)
         self.sample_on_record_low: bool = kwargs.get('sample_on_record_low', True)

@@ -119,6 +119,7 @@ export interface SaveConfig {
   dtype: string;
   save_every: number;
   max_step_saves_to_keep: number;
+  record_low_enabled?: boolean;
   record_low_window_size?: number;
   record_low_start_step?: number;
   sample_on_record_low?: boolean;

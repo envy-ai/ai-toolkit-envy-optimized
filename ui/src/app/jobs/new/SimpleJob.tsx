@@ -1306,7 +1306,13 @@ export default function SimpleJob({
               min={1}
               required
             />
-            {!isSliderSpace && <><NumberInput
+            {!isSliderSpace && <><Checkbox
+              label="Enable Record Low Checking"
+              checked={jobConfig.config.process[0].save.record_low_enabled ?? false}
+              onChange={value => setJobConfig(value, 'config.process[0].save.record_low_enabled')}
+              docKey="config.process[0].save.record_low_enabled"
+            />
+            <NumberInput
               label="Record Low Window (Steps)"
               value={jobConfig.config.process[0].save.record_low_window_size ?? 3000}
               onChange={value => setJobConfig(value, 'config.process[0].save.record_low_window_size')}

@@ -429,6 +429,21 @@ class BaseSDTrainProcess(BaseTrainProcess):
         except Exception as e:
             print_acc(f"Failed to refresh live sample config from {config_path}: {e}")
 
+    def _is_record_low_save_due(self, loss_dict, did_oom=False):
+        if (
+            not self.save_config.record_low_enabled
+            or not self.accelerator.is_main_process
+            or did_oom
+            or loss_dict is None
+        ):
+            return False
+        return is_record_low_save_due(
+            load_record_low_checkpoints(self._record_low_index_path, self.save_root),
+            self.step_num, loss_dict.get('loss'),
+            self.save_config.record_low_window_size,
+            self.save_config.record_low_start_step,
+        )
+
     def _get_step_sample_reason(self, is_new_lowest_loss=False):
         if self.train_config.disable_sampling:
             return None
@@ -440,7 +455,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             and self.step_num % self.sample_config.sample_every == 0
         ):
             reasons.append('scheduled')
-        if is_new_lowest_loss and self.save_config.sample_on_record_low:
+        if is_new_lowest_loss and self.save_config.record_low_enabled and self.save_config.sample_on_record_low:
             reasons.append('record low')
         return ' and '.join(reasons) if reasons else None
 
@@ -4035,15 +4050,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 print_acc("")
             else:
                 self.num_consecutive_oom = 0
-            is_new_lowest_loss = False
-            if self.accelerator.is_main_process and not did_oom and loss_dict is not None:
-                is_new_lowest_loss = is_record_low_save_due(
-                    load_record_low_checkpoints(self._record_low_index_path, self.save_root),
-                    self.step_num, loss_dict.get('loss'),
-                    self.save_config.record_low_window_size,
-                    self.save_config.record_low_start_step,
-                )
-            if self.accelerator.num_processes > 1:
+            is_new_lowest_loss = self._is_record_low_save_due(loss_dict, did_oom=did_oom)
+            if self.save_config.record_low_enabled and self.accelerator.num_processes > 1:
                 flag = torch.tensor(int(is_new_lowest_loss), device=self.device_torch)
                 is_new_lowest_loss = bool(self.accelerator.reduce(flag, reduction='sum').item())
             if is_new_lowest_loss:

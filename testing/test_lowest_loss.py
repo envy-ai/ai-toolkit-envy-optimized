@@ -14,6 +14,42 @@ from toolkit.lowest_loss import (
 
 
 class RecordLowCheckpointTests(unittest.TestCase):
+    def test_disabled_check_skips_index_and_extra_sampling(self):
+        from jobs.process.BaseSDTrainProcess import BaseSDTrainProcess
+
+        process = object.__new__(BaseSDTrainProcess)
+        process.save_config = SaveConfig()
+        process.train_config = SimpleNamespace(disable_sampling=False)
+        process.sample_config = SampleConfig(sample_every=400)
+        process.step_num = 51
+        # Disabled checks must not touch the checkpoint index or trigger an extra render.
+        with patch('jobs.process.BaseSDTrainProcess.load_record_low_checkpoints') as load_index:
+            self.assertFalse(process._is_record_low_save_due({'loss': 0.1}))
+            load_index.assert_not_called()
+        self.assertIsNone(process._get_step_sample_reason(True))
+        process.step_num = 400
+        self.assertEqual(process._get_step_sample_reason(True), 'scheduled')
+
+    def test_enabled_check_respects_loss_history_and_failed_steps(self):
+        from jobs.process.BaseSDTrainProcess import BaseSDTrainProcess
+
+        process = object.__new__(BaseSDTrainProcess)
+        process.save_config = SaveConfig(record_low_enabled=True)
+        process.accelerator = SimpleNamespace(is_main_process=True)
+        process.step_num = 100
+        process.save_root = '/unused'
+        process._record_low_index_path = '/unused/.record_low_checkpoints.json'
+        with patch('jobs.process.BaseSDTrainProcess.load_record_low_checkpoints',
+                   return_value=[{'step': 99, 'loss': 0.2}]) as load_index:
+            self.assertTrue(process._is_record_low_save_due({'loss': 0.1}))
+            self.assertFalse(process._is_record_low_save_due({'loss': 0.3}))
+            load_index.reset_mock()
+            self.assertFalse(process._is_record_low_save_due({'loss': 0.1}, did_oom=True))
+            self.assertFalse(process._is_record_low_save_due(None))
+            process.accelerator.is_main_process = False
+            self.assertFalse(process._is_record_low_save_due({'loss': 0.1}))
+            load_index.assert_not_called()
+
     def test_sampling_toggle_and_scheduled_overlap(self):
         from jobs.process.BaseSDTrainProcess import BaseSDTrainProcess
 
@@ -37,7 +73,7 @@ class RecordLowCheckpointTests(unittest.TestCase):
                 process.step_num = step
                 process.train_config = SimpleNamespace(disable_sampling=disabled)
                 process.sample_config = SampleConfig(sample_every=interval, sample_start_step=start)
-                process.save_config = SaveConfig(sample_on_record_low=enabled)
+                process.save_config = SaveConfig(record_low_enabled=True, sample_on_record_low=enabled)
                 self.assertEqual(process._get_step_sample_reason(record_low), reason)
 
     def test_live_config_reloads_record_low_sampling_toggle(self):
@@ -59,7 +95,7 @@ class RecordLowCheckpointTests(unittest.TestCase):
             process.step_num = 125
             process._live_sample_config_mtime = None
             process.train_config = SimpleNamespace(disable_sampling=False)
-            process.save_config = SaveConfig(sample_on_record_low=True, save_every=100)
+            process.save_config = SaveConfig(record_low_enabled=True, sample_on_record_low=True, save_every=100)
 
             process._refresh_live_sample_config()
 
@@ -117,6 +153,8 @@ class RecordLowCheckpointTests(unittest.TestCase):
 
     def test_config_defaults_and_invalid_limits(self):
         config = SaveConfig()
+        self.assertFalse(config.record_low_enabled)
+        self.assertTrue(SaveConfig(record_low_enabled=True).record_low_enabled)
         self.assertEqual(config.record_low_window_size, 3000)
         self.assertEqual(config.record_low_start_step, 50)
         self.assertTrue(config.sample_on_record_low)
