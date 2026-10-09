@@ -20,6 +20,7 @@ import torch
 from einops import rearrange, repeat
 from PIL import Image
 from diffusers.utils.torch_utils import randn_tensor
+from toolkit.sample_progress import SampleProgressMixin
 
 from toolkit.basic import flush
 
@@ -274,7 +275,7 @@ def timesteps(
 # ---------------------------------------------------------------------------
 
 
-class Krea2Pipeline:
+class Krea2Pipeline(SampleProgressMixin):
     """Lightweight flow-matching sampler used by ai-toolkit's preview generation."""
 
     def __init__(self, model):
@@ -295,9 +296,6 @@ class Krea2Pipeline:
 
     def to(self, *args, **kwargs):
         return self
-
-    def set_progress_bar_config(self, **kwargs):
-        pass
 
     @torch.no_grad()
     def __call__(
@@ -368,7 +366,7 @@ class Krea2Pipeline:
 
         # Euler integration of the flow ODE (with optional CFG).
         num_steps = len(ts) - 1
-        for i, (tcurr, tprev) in enumerate(zip(ts[:-1], ts[1:])):
+        for i, (tcurr, tprev) in enumerate(self.progress_bar(zip(ts[:-1], ts[1:]), total=num_steps)):
             t = torch.full((latents.shape[0],), tcurr, dtype=dtype, device=device)
             v_cond = predict_velocity(
                 transformer,

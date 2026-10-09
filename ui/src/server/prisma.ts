@@ -7,7 +7,9 @@ import { PrismaClient } from '@prisma/client';
 // dev hot-reload from leaking a new client on every recompile.
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
-const prisma = globalForPrisma.prisma ?? new PrismaClient();
+const prisma = globalForPrisma.prisma ?? new PrismaClient(
+  process.env.AI_TOOLKIT_DATABASE_URL ? { datasourceUrl: process.env.AI_TOOLKIT_DATABASE_URL } : undefined,
+);
 
 if (process.env.NODE_ENV !== 'production') {
   globalForPrisma.prisma = prisma;

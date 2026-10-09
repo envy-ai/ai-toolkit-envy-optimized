@@ -18,6 +18,7 @@ from .z_image.z_image_l2p_model import ZImageL2PModel
 from .anima import AnimaModel
 from .ideogram4 import Ideogram4Model
 from .prx_pixel_t2i import PRXPixelT2IModel
+from .iris import IrisModel
 from .krea2 import Krea2Model
 from .boogu_image import BooguImageModel, BooguImageEditModel
 from .mageflow import MageFlowModel, MageFlowEditModel
@@ -56,6 +57,7 @@ AI_TOOLKIT_MODELS = [
     AnimaModel,
     Ideogram4Model,
     PRXPixelT2IModel,
+    IrisModel,
     Krea2Model,
     BooguImageModel,
     BooguImageEditModel,

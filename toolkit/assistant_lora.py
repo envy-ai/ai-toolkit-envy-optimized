@@ -126,7 +126,10 @@ def load_assistant_lora_from_path(
         linear_alpha = int(lora_state_dict[alpha_key].item())
     else:
         linear_alpha = linear_dim
-    transformer_only = _assistant_lora_is_transformer_only(layer_names)
+    # Strict imports select the exact layers named by the checkpoint. The
+    # legacy block-only heuristic can wrongly discard valid input/text/pixel
+    # projections on architectures other than Flux.
+    transformer_only = False if strict else _assistant_lora_is_transformer_only(layer_names)
     # get dim and scale
     network_config = NetworkConfig(
         linear=linear_dim,
@@ -161,6 +164,9 @@ def load_assistant_lora_from_path(
         alpha = lora_state_dict.get(layer_name + ".alpha")
         modules_alpha[module_name] = float(alpha.item()) if alpha is not None else int(value.shape[0])
     if strict:
+        # modules_dim uses the dotted PEFT names converted to '$$' internally;
+        # the network must use the same naming scheme for discovery and load.
+        network_kwargs["peft_format"] = True
         network_kwargs["modules_dim"] = modules_dim
         network_kwargs["modules_alpha"] = modules_alpha
     if getattr(sd, "is_transformer", False):
@@ -170,6 +176,13 @@ def load_assistant_lora_from_path(
     else:
         network_kwargs["is_flux"] = True
     network = LoRASpecialNetwork(**network_kwargs)
+    if not network.get_all_modules():
+        examples = ", ".join(layer_names[:3])
+        raise ValueError(
+            f"Adapter '{adapter_path}' has no matching LoRA layers for model arch "
+            f"'{getattr(sd, 'arch', 'unknown')}'. Check that the adapter was made for this model. "
+            f"Checkpoint layers include: {examples}"
+        )
     network.apply_to(
         text_encoder,
         transformer,

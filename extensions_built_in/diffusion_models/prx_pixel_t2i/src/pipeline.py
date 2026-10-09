@@ -23,6 +23,7 @@ from typing import List, Optional
 import torch
 from PIL import Image
 from diffusers.utils.torch_utils import randn_tensor
+from toolkit.sample_progress import SampleProgressMixin
 
 
 # Minimum normalized timestep used when converting an x0 prediction to a flow
@@ -31,7 +32,7 @@ from diffusers.utils.torch_utils import randn_tensor
 X_PRED_T_MIN = 0.05
 
 
-class PRXPixelPipeline:
+class PRXPixelPipeline(SampleProgressMixin):
     """Lightweight pixel-space flow-matching sampler used for training previews."""
 
     def __init__(self, model):
@@ -48,10 +49,6 @@ class PRXPixelPipeline:
         # BaseModel.generate_images may call pipeline.to(device); we manage
         # devices through the model itself, so this is a no-op.
         return self
-
-    def set_progress_bar_config(self, **kwargs):
-        # called by the sampler harness (inside a try/except, so optional)
-        pass
 
     def _embeds_and_mask(self, embeds, device, dtype):
         """Pull (features, attention_mask) out of a PromptEmbeds onto device/dtype.
@@ -113,7 +110,7 @@ class PRXPixelPipeline:
             )
 
         # 3. denoising loop
-        for t in timesteps:
+        for t in self.progress_bar(timesteps):
             # scheduler timesteps are 0-1000; the transformer wants [0, 1]
             t01 = (t / 1000.0).to(device).float().expand(latents.shape[0])
 

@@ -61,6 +61,29 @@ test('all Qwen modes and aliases allow frozen helpers; other model restrictions 
   }
 });
 
+test('specialized modes allow preview-only inference LoRAs and identify rejected training adapters', () => {
+  for (const arch of Object.keys(caps.flowTrainingModels)) {
+    for (const mode of [...modes, ...Object.keys(caps.trainingModeAliases)]) {
+      const job = config(arch, caps.canonicalTrainingMode(mode));
+      job.config.process[0].type = mode;
+      job.config.process[0].model.inference_lora_path = '/models/preview.safetensors';
+      assert.deepEqual(caps.validateTrainingCapabilities(job), [], `${arch}: ${mode}`);
+    }
+  }
+  for (const mode of [...modes, ...Object.keys(caps.trainingModeAliases)]) {
+    const job = config('krea2', caps.canonicalTrainingMode(mode));
+    const process = job.config.process[0];
+    process.type = mode;
+    process.model.inference_lora_path = '/models/raw_to_turbo.safetensors';
+    assert.deepEqual(caps.validateTrainingCapabilities(job), [], mode);
+    for (const key of ['assistant_lora_path', 'unconditional_lora_path']) {
+      process.model[key] = '/training-adapter.safetensors';
+      assert.match(caps.validateTrainingCapabilities(job).join('\n'), new RegExp(`model\\.${key}`));
+      delete process.model[key];
+    }
+  }
+});
+
 test('Ideogram default reference disables negatives without deleting drafts; negative-only validation is explicit', () => {
   const job = config('ideogram4', 'guidance_distillation');
   const process = job.config.process[0];
@@ -91,7 +114,7 @@ test('architecture switching preserves pairs, prompts and memory options but nev
   const job = config('qwen_image_2', 'fizgig_image_slider', 'dora');
   const process = job.config.process[0];
   process.model = { ...process.model, quantize: true, qtype: 'convrotint4', low_vram: true, layer_offloading: true,
-    text_encoder_path: '/qwen/te', vae_path: '/qwen/vae', model_kwargs: { kv_cache: true } };
+    text_encoder_path: '/qwen/te', vae_path: '/qwen/vae', inference_lora_path: '/preview.safetensors', model_kwargs: { kv_cache: true } };
   process.datasets = [{ folder_path: '/positive', control_path_1: '/negative', anchor_path: '/anchors', control_path_2: '/source' }];
   process.fizgig_slider = { positive_prefix: 'large', negative_prefix: 'small', anchor_prompts: [{ prompt: 'dog' }] };
   const before = structuredClone(job);
@@ -106,6 +129,7 @@ test('architecture switching preserves pairs, prompts and memory options but nev
   assert.equal(updated.datasets[0].anchor_path, '/anchors');
   assert.equal(updated.datasets[0].control_path_2, undefined);
   assert.equal(updated.model.text_encoder_path, undefined);
+  assert.equal(updated.model.inference_lora_path, '/preview.safetensors');
   assert.match(notice, /cleared/);
 });
 

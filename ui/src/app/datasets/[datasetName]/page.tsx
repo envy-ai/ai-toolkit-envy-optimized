@@ -64,6 +64,9 @@ export default function DatasetPage({ params }: { params: Promise<{ datasetName:
     if (datasetName) {
       refreshImageList(datasetName);
     }
+    const refresh = () => refreshImageList(datasetName);
+    window.addEventListener('toolkit:assistant:changed', refresh);
+    return () => window.removeEventListener('toolkit:assistant:changed', refresh);
   }, [datasetName]);
 
   const PageInfoContent = useMemo(() => {

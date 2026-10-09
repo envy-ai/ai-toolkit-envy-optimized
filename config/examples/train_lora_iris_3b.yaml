@@ -1,0 +1,73 @@
+---
+job: extension
+config:
+  name: iris-3b-lora
+  process:
+    - type: sd_trainer
+      training_folder: output
+      device: cuda:0
+      network:
+        type: lora
+        linear: 16
+        linear_alpha: 16
+      save:
+        dtype: bf16
+        save_format: diffusers
+        save_every: 100
+        max_step_saves_to_keep: 4
+        record_low_enabled: false
+      datasets:
+        - folder_path: /path/to/images
+          caption_ext: txt
+          caption_dropout_rate: 0.1
+          resolution: [512]
+          cache_latents_to_disk: true
+      train:
+        batch_size: 1
+        steps: 1000
+        gradient_accumulation: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        timestep_type: sigmoid
+        optimizer: adamw8bit
+        lr: 0.0001
+        dtype: bf16
+        cache_text_embeddings: true
+        unload_text_encoder: true
+        min_snr_gamma: 0
+        skip_first_sample: true
+      model:
+        arch: iris
+        # A local native/Comfy safetensors file, directory, or HF repository.
+        name_or_path: /d/comfy_models/diffusion_models/iris-3b/model_fp16.safetensors
+        quantize: true
+        qtype: convrot8
+        quantize_te: true
+        qtype_te: convrot8
+        low_vram: true
+        cache_quantized_models: true
+        model_kwargs:
+          # The original Qwen weights also load from the existing HF cache.
+          text_encoder_path: Qwen/Qwen3-VL-4B-Instruct
+          activation_checkpointing: full
+          activation_offload: false
+        # Enable these if needed after measuring your chosen resolution/rank:
+        layer_offloading: false
+        layer_offloading_transformer_percent: 0.5
+        layer_offloading_text_encoder_percent: 1.0
+      sample:
+        sampler: flowmatch
+        sample_every: 100
+        width: 512
+        height: 512
+        samples:
+          - prompt: A watercolor painting of a fox resting in a forest clearing.
+        neg: ""
+        seed: 42
+        guidance_scale: 3
+        sample_steps: 100
+meta:
+  name: Iris 3B LoRA
+  version: '1.0'

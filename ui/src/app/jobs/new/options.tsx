@@ -394,7 +394,7 @@ const MODEL_PREFIX = 'config.process[0].model.';
 const SAMPLE_PREFIX = 'config.process[0].sample';
 // training-only model settings: the training adapter (e.g. Z-Image Turbo's
 // de-distill LoRA) and the unconditional LoRA must not load for inference
-const TRAINING_ONLY_MODEL_KEYS = new Set(['assistant_lora_path', 'unconditional_lora_path', 'inference_lora_path']);
+const TRAINING_ONLY_MODEL_KEYS = new Set(['assistant_lora_path', 'unconditional_lora_path']);
 
 /** What the Generate page sends the inference engine for an arch: ModelConfig
  * kwargs + GenerateImageConfig kwargs, derived from the training defaults. */

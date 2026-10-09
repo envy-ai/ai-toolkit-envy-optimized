@@ -74,12 +74,15 @@ def validate_specialized_model(config, mode=None):
     # Do not introduce new restrictions on old Qwen jobs during the port.
     if arch != 'qwen_image_2' or mode == 'diffusion_kto':
         # A frozen Qwen helper is part of both the policy and its reference.
-        auxiliary_paths = ('inference_lora_path', 'unconditional_lora_path') if arch == 'qwen_image_2' else (
-            'assistant_lora_path', 'inference_lora_path', 'unconditional_lora_path')
+        # Preview-only inference adapters do not alter the training reference.
+        auxiliary_paths = ['unconditional_lora_path']
+        if arch != 'qwen_image_2':
+            auxiliary_paths.append('assistant_lora_path')
         if any(model.get(key) for key in auxiliary_paths):
             if arch == 'qwen_image_2':
-                raise ValueError(f'{mode} does not support inference or unconditional LoRA paths; frozen training helpers are supported')
-            raise ValueError(f'{mode} requires an unadapted base without auxiliary LoRA paths')
+                raise ValueError(f'{mode} does not support model.unconditional_lora_path; frozen training helpers are supported')
+            paths = ', '.join(f'model.{key}' for key in auxiliary_paths if model.get(key))
+            raise ValueError(f'{mode} does not support auxiliary LoRA paths: {paths}')
         name = str(model.get('name_or_path', ''))
         if kwargs.get('is_distilled') or re.search(r'(?i)(?:^|[\W_])(?:turbo|lightning|distilled)(?:$|[\W_])', name):
             raise ValueError(f'{mode} currently requires a base checkpoint, not a turbo/step-distilled variant')

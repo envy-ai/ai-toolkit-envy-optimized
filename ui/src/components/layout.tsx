@@ -3,6 +3,7 @@ import React from 'react';
 import classNames from 'classnames';
 import ThemeLogo from './ThemeLogo';
 import { mobileSidebarState } from './Sidebar';
+import { AssistantToggleButton } from './assistant/AssistantContext';
 
 interface Props {
   className?: string;
@@ -27,12 +28,15 @@ export const TopBar: React.FC<Props> = ({ children, className }) => {
   return (
     <div
       className={classNames(
-        'absolute top-0 left-0 w-full h-12 bg-gray-900 shadow-sm z-10 flex items-center px-2 overflow-x-auto whitespace-nowrap',
+        'absolute top-0 left-0 w-full h-12 bg-gray-900 shadow-sm z-10 flex items-center px-2 whitespace-nowrap',
         className,
       )}
     >
       <MobileMenuButton />
-      {children ? children : null}
+      <div className="flex min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap">
+        {children ? children : null}
+      </div>
+      <AssistantToggleButton />
     </div>
   );
 };

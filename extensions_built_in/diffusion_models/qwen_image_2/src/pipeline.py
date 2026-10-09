@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from diffusers.utils.torch_utils import randn_tensor
+from toolkit.sample_progress import SampleProgressMixin
 
 SYSTEM_PROMPT = "Comprehend and analyze the provided prompt."
 VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -325,7 +326,7 @@ def calculate_shift(
     return image_seq_len * slope + base_shift - slope * base_seq_len
 
 
-class QwenImage21Pipeline:
+class QwenImage21Pipeline(SampleProgressMixin):
     """Minimal flow-matching sampler for ai-toolkit's preview generation."""
 
     def __init__(self, model):
@@ -338,9 +339,6 @@ class QwenImage21Pipeline:
 
     def to(self, *args, **kwargs):
         return self
-
-    def set_progress_bar_config(self, **kwargs):
-        pass
 
     @torch.no_grad()
     def __call__(
@@ -395,7 +393,7 @@ class QwenImage21Pipeline:
         cond = model.pad_prompt_embeds(conditional_embeds)
         uncond = model.pad_prompt_embeds(unconditional_embeds) if do_cfg else None
 
-        for timestep in scheduler.timesteps:
+        for timestep in self.progress_bar(scheduler.timesteps):
             t = timestep.expand(latents.shape[0]).to(device, dtype=dtype) / 1000
             noise_pred = run_transformer(
                 transformer,

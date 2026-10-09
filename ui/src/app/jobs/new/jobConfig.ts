@@ -41,7 +41,6 @@ export const activateSliderSpace = (config: JobConfig): JobConfig => {
   delete process.network.pretrained_lora_path;
   delete process.network.network_kwargs.full_train_in_out;
   if (process.model.arch !== 'qwen_image_2') delete process.model.assistant_lora_path;
-  delete process.model.inference_lora_path;
   delete process.model.unconditional_lora_path;
   Object.assign(process.train, {
     batch_size: 1, gradient_accumulation: 1, steps: 1000,

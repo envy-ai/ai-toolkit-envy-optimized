@@ -37,12 +37,14 @@
     "react-select": "^5.10.1",
     "react-virtuoso": "^4.18.7",
     "react-zoom-pan-pinch": "^4.0.3",
+    "sharp": "^0.34.5",
     "sqlite3": "^6.0.1",
     "systeminformation": "^5.27.11",
     "uplot": "^1.6.32",
     "uuid": "^11.1.0",
     "yaml": "^2.7.0",
-    "yet-another-react-lightbox": "^3.32.0"
+    "yet-another-react-lightbox": "^3.32.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/archiver": "^6.0.3",

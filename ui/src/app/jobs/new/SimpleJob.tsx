@@ -89,6 +89,7 @@ const modelPathSourceOptions: SelectOption[] = [
 ];
 
 const comfyWorkflowOptions: SelectOption[] = [
+  { value: 'config/comfy_templates/iris_lora_sample.json.njk', label: 'Iris 3B LoRA image' },
   { value: 'config/comfy_templates/anima_lora_sample.json.njk', label: 'Anima LoRA image' },
   { value: 'config/comfy_templates/ideogram4_lora_sample.json.njk', label: 'Ideogram 4 LoRA image' },
   {
@@ -2913,7 +2914,7 @@ export default function SimpleJob({
                 </FormGroup>
               </div>
             </div>
-            {!isSliderSpace && <TextInput
+            <TextInput
               label="Inference LoRA Path"
               value={jobConfig.config.process[0].model.inference_lora_path ?? ''}
               docKey="config.process[0].model.inference_lora_path"
@@ -2926,7 +2927,7 @@ export default function SimpleJob({
               }}
               placeholder="output/krea2_raw_to_turbo_r256.safetensors"
               className="pt-2"
-            />}
+            />
             <div className="pt-4">
               <Checkbox
                 label="Use ComfyUI Renderer"

@@ -66,6 +66,23 @@ class CapabilityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_specialized_model(self.config('unknown'))
 
+    def test_preview_lora_is_not_blocked_by_specialized_mode_validation(self):
+        for arch in FLOW_TRAINING_MODELS:
+            for mode in SPECIALIZED_MODES:
+                config = self.config(arch, mode)
+                config['model']['inference_lora_path'] = '/models/preview.safetensors'
+                validate_specialized_model(config)
+        for mode in SPECIALIZED_MODES:
+            config = self.config('krea2', mode)
+            config['model']['name_or_path'] = '/models/raw.safetensors'
+            config['model']['inference_lora_path'] = '/models/raw_to_turbo.safetensors'
+            validate_specialized_model(config)
+            for key in ('assistant_lora_path', 'unconditional_lora_path'):
+                config['model'][key] = '/training_adapter.safetensors'
+                with self.subTest(mode=mode, key=key), self.assertRaisesRegex(ValueError, f'model.{key}'):
+                    validate_specialized_model(config)
+                del config['model'][key]
+
     def test_edit_controls_are_distinct_from_pair_targets(self):
         datasets = [{'control_path_1': '/rejected'}]
         for arch in FLOW_TRAINING_MODELS:

@@ -28,6 +28,7 @@ import torch
 from einops import rearrange
 from PIL import Image
 from diffusers.utils.torch_utils import randn_tensor
+from toolkit.sample_progress import SampleProgressMixin
 
 from .transformer import MageFlow
 
@@ -130,7 +131,7 @@ def build_shifted_sigmas(
     return sigmas.to(device=device, dtype=torch.float32)
 
 
-class MageFlowPipeline:
+class MageFlowPipeline(SampleProgressMixin):
     """Lightweight flow-matching sampler used by ai-toolkit's preview generation."""
 
     def __init__(self, model):
@@ -144,9 +145,6 @@ class MageFlowPipeline:
 
     def to(self, *args, **kwargs):
         return self
-
-    def set_progress_bar_config(self, **kwargs):
-        pass
 
     @torch.no_grad()
     def __call__(
@@ -195,7 +193,7 @@ class MageFlowPipeline:
 
         # Euler integration of the flow ODE, sigma 1 -> 0 (with optional CFG:
         # v = uncond + cfg * (cond - uncond), reference convention).
-        for i in range(num_inference_steps):
+        for i in self.progress_bar(range(num_inference_steps)):
             s_cur = sigmas[i].item()
             s_next = sigmas[i + 1].item()
             t = torch.full((latents.shape[0],), s_cur, dtype=dtype, device=device)

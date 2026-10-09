@@ -1,10 +1,9 @@
 import { NextResponse } from 'next/server';
-import { PrismaClient } from '@prisma/client';
+import prisma from '@/server/prisma';
 import fs from 'fs';
 import path from 'path';
 import { getDataRoot, getDatasetsRoot, getTrainingFolder } from '@/server/settings';
 
-const prisma = new PrismaClient();
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
 
 interface DatasetImage {

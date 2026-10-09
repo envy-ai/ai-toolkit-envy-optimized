@@ -25,23 +25,45 @@ export default function usePollLoop(
 
   useEffect(() => {
     let stopped = false;
+    let inFlight = false;
+    let refreshRequested = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
 
     const tick = async () => {
+      if (stopped) return;
+      if (inFlight) {
+        refreshRequested = true;
+        return;
+      }
+      inFlight = true;
       try {
         await fnRef.current();
       } catch (error) {
         console.error('Poll error:', error);
+      } finally {
+        inFlight = false;
+      }
+      if (stopped) return;
+      if (refreshRequested) {
+        refreshRequested = false;
+        void tick();
+        return;
       }
       if (stopped || !intervalMs) return;
       timeout = setTimeout(tick, intervalMs);
     };
 
     tick();
+    const refresh = () => {
+      if (timeout) clearTimeout(timeout);
+      tick();
+    };
+    window.addEventListener('toolkit:assistant:changed', refresh);
 
     return () => {
       stopped = true;
       if (timeout) clearTimeout(timeout);
+      window.removeEventListener('toolkit:assistant:changed', refresh);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs, ...deps]);

@@ -14,10 +14,10 @@ export function mergeSampleOnlyJobConfig(existingConfig: any, incomingConfig: an
     if (typeof incomingProcess.save?.sample_on_record_low === 'boolean') {
       existingProcess.save = { ...existingProcess.save, sample_on_record_low: incomingProcess.save.sample_on_record_low };
     }
-    if (incomingProcess.model && existingProcess.model) {
-      if (incomingProcess.model.inference_lora_path === undefined) delete existingProcess.model.inference_lora_path;
-      else existingProcess.model.inference_lora_path = incomingProcess.model.inference_lora_path;
-    }
+  }
+  if (incomingProcess.model && existingProcess.model) {
+    if (incomingProcess.model.inference_lora_path === undefined) delete existingProcess.model.inference_lora_path;
+    else existingProcess.model.inference_lora_path = incomingProcess.model.inference_lora_path;
   }
 
   if (incomingProcess.train && existingProcess.train) {

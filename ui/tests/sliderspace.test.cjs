@@ -120,9 +120,37 @@ test('activation clears unsupported imported objectives and auxiliary adapters w
   for (const key of ['adapter', 'embedding', 'decorator']) assert.equal(process[key], undefined);
   assert.equal(process.model.low_vram_layer_streaming, true);
   assert.equal(process.model.assistant_lora_path, '/helper.safetensors');
-  assert.equal(process.model.inference_lora_path, undefined);
+  assert.equal(process.model.inference_lora_path, '/preview.safetensors');
   assert.equal(process.model.unconditional_lora_path, undefined);
   assert.equal(process.train.gradient_checkpointing, true);
+});
+
+test('SliderSpace activation retains preview-only inference LoRAs on all supported models', () => {
+  for (const arch of Object.keys(capabilities.flowTrainingModels)) {
+    const config = validJob();
+    const process = config.config.process[0];
+    process.model.arch = arch;
+    process.model.name_or_path = '/models/base.safetensors';
+    process.model.inference_lora_path = '/models/preview.safetensors';
+    mode.onActivate(config);
+    process.sliderspace.concept_prompts = ['a spaceship'];
+    assert.equal(process.model.inference_lora_path, '/models/preview.safetensors');
+    assert.deepEqual(helpers.validateSliderSpace(config), [], arch);
+  }
+});
+
+test('Generate defaults retain inference adapters while excluding training adapters', () => {
+  const result = options.getGenerateDefaults({
+    name: 'krea2', label: 'Krea 2', group: 'image',
+    defaults: {
+      'config.process[0].model.inference_lora_path': ['/preview.safetensors'],
+      'config.process[0].model.assistant_lora_path': ['/training.safetensors'],
+      'config.process[0].model.unconditional_lora_path': ['/unconditional.safetensors'],
+    },
+  });
+  assert.equal(result.model.inference_lora_path, '/preview.safetensors');
+  assert.equal(result.model.assistant_lora_path, undefined);
+  assert.equal(result.model.unconditional_lora_path, undefined);
 });
 
 test('concept synchronization follows automatic preview only and does not mutate previous state', () => {
@@ -177,7 +205,7 @@ test('central save validation rejects malformed numbers, PCA limits, unsupported
     [p => p.train.train_text_encoder = true, /transformer only/],
     [p => p.train.do_cfg = true, /semantic objective/],
     [p => p.train.validation_config = {}, /dataset validation/],
-    [p => p.model.inference_lora_path = '/adapter', /auxiliary/],
+    [p => p.model.unconditional_lora_path = '/adapter', /auxiliary/],
     [p => p.datasets = [{}], /discovery image folders/],
     [p => p.datasets = {}, /discovery image folders/],
     [p => p.sliderspace.discovery_buckets = 'yes', /bucketing/],
@@ -271,7 +299,7 @@ test('running-job merge whitelists only supported SliderSpace previews while pre
   const incoming = structuredClone(existing);
   Object.assign(incoming.config.process[0].sliderspace, { concept_prompts: ['changed'], num_directions: 10, preview_direction: 3, preview_strength: -1 });
   Object.assign(incoming.config.process[0].train, { steps: 10, disable_sampling: true });
-  incoming.config.process[0].model.inference_lora_path = '/unsupported';
+  incoming.config.process[0].model.inference_lora_path = '/preview.safetensors';
   incoming.config.process[0].save.sample_on_record_low = false;
   incoming.config.process[0].sample.samples = [{ prompt: 'preview', guidance_scale: 3 }];
   incoming.config.process[0].sliderspace.preview_auto = true;
@@ -285,13 +313,13 @@ test('running-job merge whitelists only supported SliderSpace previews while pre
   assert.deepEqual(result.sliderspace.concept_prompts, ['a spaceship']);
   assert.equal(result.train.steps, 1000);
   assert.equal(result.train.disable_sampling, true);
-  assert.equal(result.model.inference_lora_path, undefined);
+  assert.equal(result.model.inference_lora_path, '/preview.safetensors');
   assert.equal(result.save.sample_on_record_low, existing.config.process[0].save.sample_on_record_low);
   assert.deepEqual(result.sample.samples, [{ prompt: 'preview', guidance_scale: 3 }]);
   assert.equal(existing.config.process[0].sliderspace.preview_direction, 1);
   existing.config.process[0].type = 'diffusion_trainer';
   const ordinary = mergeSampleOnlyJobConfig(existing, incoming).config.process[0];
-  assert.equal(ordinary.model.inference_lora_path, '/unsupported');
+  assert.equal(ordinary.model.inference_lora_path, '/preview.safetensors');
   assert.equal(ordinary.save.sample_on_record_low, false);
 });
 
@@ -524,9 +552,9 @@ test('whole training form exposes supported fields, mobile mode selection and fu
     gpuIDs: '0', setGpuIDs() {}, gpuList: [], datasetOptions: [] };
   const markup = renderToStaticMarkup(React.createElement(SimpleJob, props));
   for (const text of ['Training mode', 'Concept prompt', 'Directions to train', 'Total training steps', 'Learning Rate',
-    'Linear Alpha', 'Preview direction', 'Preview strength', 'Low VRAM', 'Text Encoder Safetensors Path', 'Helper LoRA Path']) assert.ok(markup.includes(text), text);
+    'Linear Alpha', 'Preview direction', 'Preview strength', 'Low VRAM', 'Text Encoder Safetensors Path', 'Helper LoRA Path', 'Inference LoRA Path']) assert.ok(markup.includes(text), text);
   for (const text of ['data-card="Datasets"', 'data-card="Validation"', 'data-card="Advanced"', 'Use EMA', 'Loss Type',
-    'Pixel Frequency Loss', 'Contrastive Guidance Loss', 'Trigger Word', 'Inference LoRA Path', 'LoRA Scale', 'Record Low Window']) {
+    'Pixel Frequency Loss', 'Contrastive Guidance Loss', 'Trigger Word', 'LoRA Scale', 'Record Low Window']) {
     assert.ok(!markup.includes(text), text);
   }
   assert.ok(markup.indexOf('Directions to train') > markup.indexOf('data-card="Save"'));

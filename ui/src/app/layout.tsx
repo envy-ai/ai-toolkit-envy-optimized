@@ -16,6 +16,8 @@ import MergeLoRAsModal from '@/components/MergeLoRAsModal';
 import UpsamplePromptsModal from '@/components/UpsamplePromptsModal';
 import PromptBoxEditorModal from '@/components/PromptBoxEditorModal';
 import TrainingProgressFavicon from '@/components/TrainingProgressFavicon';
+import AssistantPanel from '@/components/assistant/AssistantPanel';
+import { AssistantContextProvider } from '@/components/assistant/AssistantContext';
 
 export const dynamic = 'force-dynamic';
 
@@ -58,12 +60,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ThemeProvider>
           <AuthWrapper authRequired={authRequired}>
             <TrainingProgressFavicon />
-            <div className="flex h-screen bg-gray-950">
-              <Sidebar />
-              <main className="flex-1 overflow-auto bg-gray-950 text-gray-100 relative">
-                <Suspense>{children}</Suspense>
-              </main>
-            </div>
+            <AssistantContextProvider>
+              <div className="flex h-screen bg-gray-950">
+                <Sidebar />
+                <main className="flex-1 overflow-auto bg-gray-950 text-gray-100 relative">
+                  <Suspense>{children}</Suspense>
+                </main>
+                <Suspense>
+                  <AssistantPanel />
+                </Suspense>
+              </div>
+            </AssistantContextProvider>
           </AuthWrapper>
         </ThemeProvider>
         <ConfirmModal />

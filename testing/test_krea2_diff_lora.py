@@ -197,6 +197,46 @@ class Krea2InferenceLoraTests(unittest.TestCase):
         )
         self.assertFalse(model.inference_lora_network.is_active)
 
+    def test_native_preview_activates_then_offloads_inference_adapter(self):
+        from toolkit.models.base_model import BaseModel
+        from unittest.mock import Mock
+
+        model = object.__new__(BaseModel)
+        model.arch = 'krea2'
+        model.model_config = types.SimpleNamespace(assistant_lora_path=None, inference_lora_path='/preview.safetensors')
+        model.model = torch.nn.Linear(2, 2)
+        model.torch_dtype = torch.float32
+        model.device_torch = torch.device('cpu')
+        model.network = model.adapter = model.assistant_lora = None
+        adapter = types.SimpleNamespace(is_active=False, force_to=Mock())
+        model.inference_lora_network = adapter
+        model.save_device_state = Mock()
+        model.restore_device_state = Mock()
+        model._install_sample_step_hooks = Mock(return_value=Mock())
+        model.set_device_state_preset = Mock(side_effect=lambda preset: self.assertTrue(adapter.is_active))
+
+        model.generate_images([], pipeline=Mock())
+
+        self.assertFalse(adapter.is_active)
+        self.assertEqual(adapter.force_to.call_args_list, [
+            unittest.mock.call(torch.device('cpu'), torch.float32),
+            unittest.mock.call('cpu', torch.float32),
+        ])
+
+    def test_inference_fallback_does_not_substitute_a_training_helper(self):
+        from toolkit.models.base_model import BaseModel
+
+        model = object.__new__(BaseModel)
+        model.model_config = types.SimpleNamespace(assistant_lora_path='/training-helper.safetensors')
+        model.assistant_lora = object()
+        model.inference_lora_network = None
+        self.assertIsNone(model._get_inference_lora_network())
+        model.inference_lora_network = object()
+        self.assertIs(model._get_inference_lora_network(), model.inference_lora_network)
+        model.inference_lora_network = None
+        model.model_config.assistant_lora_path = None
+        self.assertIs(model._get_inference_lora_network(), model.assistant_lora)
+
 
 if __name__ == "__main__":
     unittest.main()

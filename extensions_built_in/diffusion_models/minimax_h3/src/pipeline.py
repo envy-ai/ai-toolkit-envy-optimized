@@ -24,6 +24,7 @@ import numpy as np
 import torch
 from PIL import Image
 from diffusers.utils.torch_utils import randn_tensor
+from toolkit.sample_progress import SampleProgressMixin
 
 from . import packing
 from .text_encoder import trim_caption_tokens
@@ -44,7 +45,7 @@ from .packing import (
 )
 
 
-class MiniMaxH3Pipeline:
+class MiniMaxH3Pipeline(SampleProgressMixin):
     """Lightweight sampler; receives the MinimaxH3Model (BaseModel subclass)
     and reuses its VAEs / transformer / device bookkeeping."""
 
@@ -57,9 +58,6 @@ class MiniMaxH3Pipeline:
 
     def to(self, *args, **kwargs):
         return self
-
-    def set_progress_bar_config(self, **kwargs):
-        pass
 
     @torch.no_grad()
     def __call__(
@@ -218,7 +216,7 @@ class MiniMaxH3Pipeline:
 
         # --- denoise loop --------------------------------------------------
         num_steps = sigmas_v.shape[0] - 1
-        for i in range(num_steps):
+        for i in self.progress_bar(range(num_steps)):
             sv, sv_next = sigmas_v[i], sigmas_v[i + 1]
             sa, sa_next = sigmas_a[i], sigmas_a[i + 1]
             t_v = 1.0 - float(sv)

@@ -1447,10 +1447,9 @@ class StableDiffusion:
                     **extra_args
                 )
             flush()
-            # disable progress bar
-            pipeline.set_progress_bar_config(disable=True)
 
         from toolkit.sample_step_hook import install_sample_step_hooks
+        from toolkit.sample_progress import configure_sample_progress
 
         unwrap_step_hooks = install_sample_step_hooks(self, pipeline)
 
@@ -1470,7 +1469,6 @@ class StableDiffusion:
             ).to(self.device_torch)
             # refiner_pipeline.register_to_config(requires_aesthetics_score=False)
             refiner_pipeline.watermark = None
-            refiner_pipeline.set_progress_bar_config(disable=True)
             flush()
 
         start_multiplier = 1.0
@@ -1484,7 +1482,10 @@ class StableDiffusion:
                 if network is not None:
                     assert network.is_active
 
-                for i in tqdm(range(len(image_configs)), desc=f"Generating Images", leave=False):
+                for i in range(len(image_configs)):
+                    configure_sample_progress(pipeline, i, len(image_configs))
+                    if refiner_pipeline is not None:
+                        configure_sample_progress(refiner_pipeline, i, len(image_configs), phase="refiner")
                     gen_config = image_configs[i]
 
                     extra = {}

@@ -48,6 +48,15 @@ class DiffusionKTOTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DatasetConfig(kto_label='negative')
 
+    def test_preview_lora_is_accepted_by_kto_validation_on_all_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Image.new('RGB', (16, 16)).save(Path(directory) / 'a.png')
+            for arch in ARCHES:
+                config = self.config(directory, arch)
+                config['model']['inference_lora_path'] = '/preview.safetensors'
+                _, counts = validate_kto_config(config)
+                self.assertEqual(counts, {'liked': 1, 'disliked': 0})
+
     def test_counts_recursive_disabled_files_and_validation_before_base_init(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -71,7 +80,7 @@ class DiffusionKTOTests(unittest.TestCase):
     def test_invalid_reference_replay_and_objective_settings(self):
         cases = [('network', 'type', 'dora'), ('network', 'dropout', .1),
             ('network', 'pretrained_lora_path', 'old.safetensors'),
-            ('model', 'inference_lora_path', 'teacher.safetensors'),
+            ('model', 'unconditional_lora_path', 'teacher.safetensors'),
             ('train', 'train_text_encoder', True), ('train', 'cache_text_embeddings', False),
             ('train', 'frequency_loss_type', 'lowpass'), ('train', 'min_snr_gamma', 5),
             ('train', 'gradient_accumulation_steps', 2), ('train', 'max_denoising_steps', 0)]

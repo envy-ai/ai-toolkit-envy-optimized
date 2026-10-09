@@ -36,7 +36,11 @@ export default function useDatasetList(includePreviews = false) {
   }, [includePreviews]);
   useEffect(() => {
     refreshDatasets();
-    return () => requestRef.current?.abort();
+    window.addEventListener('toolkit:assistant:changed', refreshDatasets);
+    return () => {
+      requestRef.current?.abort();
+      window.removeEventListener('toolkit:assistant:changed', refreshDatasets);
+    };
   }, [refreshDatasets]);
 
   return { datasets, setDatasets, firstImages, status, refreshDatasets };

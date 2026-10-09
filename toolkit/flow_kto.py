@@ -92,10 +92,11 @@ def validate_kto_config(config):
     settings = FlowKTOSettings.parse(config.get('diffusion_kto'))
     model, network = config['model'], config['network']
     kwargs = model.get('model_kwargs') or {}
-    auxiliary_paths = ('inference_lora_path', 'unconditional_lora_path') if model['arch'] == 'qwen_image_2' else (
-        'assistant_lora_path', 'inference_lora_path', 'unconditional_lora_path')
+    auxiliary_paths = ['unconditional_lora_path']
+    if model['arch'] != 'qwen_image_2':
+        auxiliary_paths.append('assistant_lora_path')
     if any(model.get(key) for key in auxiliary_paths):
-        raise ValueError('Diffusion-KTO supports frozen Qwen training helpers, but no other auxiliary adapters')
+        raise ValueError('Diffusion-KTO supports frozen Qwen training helpers and preview-only inference LoRAs, but no other training adapters')
     if kwargs.get('edit') or kwargs.get('kv_cache'):
         raise ValueError('Diffusion-KTO initially supports text-to-image only; disable edit/kv_cache')
     if network.get('pretrained_lora_path'):

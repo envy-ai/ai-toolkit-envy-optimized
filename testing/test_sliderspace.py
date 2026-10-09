@@ -408,11 +408,19 @@ class SliderSpaceTrainerTests(unittest.TestCase):
         self.assertEqual(original, self.config())
         for section, key, value in [('network', 'type', 'dora'), ('train', 'batch_size', 2),
                                     ('train', 'gradient_accumulation_steps', 2), ('train', 'steps', 1),
-                                    ('train', 'do_cfg', True), ('model', 'inference_lora_path', 'adapter')]:
+                                    ('train', 'do_cfg', True), ('model', 'unconditional_lora_path', 'adapter')]:
             config = self.config()
             config[section][key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
                 SliderSpaceTrainer(0, None, config)
+
+    def test_constructor_does_not_block_preview_loras(self):
+        for arch in ('qwen_image_2', 'krea2', 'anima', 'ideogram4'):
+            config = self.config()
+            config['model'] = {'arch': arch, 'inference_lora_path': '/preview.safetensors'}
+            with patch.object(DiffusionTrainer, '__init__', lambda obj, *args, **kwargs: setattr(obj, 'accelerator', SimpleNamespace(num_processes=1))):
+                trainer = SliderSpaceTrainer(0, None, config)
+            self.assertEqual(trainer.flow_profile.arch, arch)
 
     def make_trainer(self, directory):
         trainer = SliderSpaceTrainer.__new__(SliderSpaceTrainer)

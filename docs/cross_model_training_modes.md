@@ -96,8 +96,16 @@ Fizgig/SliderSpace are initially text-to-image and reject `edit`/`kv_cache`.
 Anima and Ideogram do not expose edit-reference conditioning here. Preservation
 images remain independent examples with their own captions.
 
-Specialized new-model jobs reject auxiliary/inference/unconditional LoRA paths
-and known turbo/lightning/step-distilled variants. Supporting a composite teacher
+Specialized modes do not block `model.inference_lora_path` or clear it when
+switching modes. Inference adapters are for previews, not training references.
+The selected model loader must actually support loading the adapter; an unloaded
+adapter produces an explicit generation error rather than substituting a training
+helper. Krea keeps its frozen inference network inactive on CPU during training,
+reference predictions, and practice/discovery generation; native previews enable
+it temporarily and return it to CPU afterward. Comfy previews use their separate
+`sample.comfy.inference_lora` setting, or an already distilled Comfy checkpoint.
+Other auxiliary/unconditional LoRA paths remain unsupported on new-model jobs,
+as do known turbo/lightning/step-distilled training checkpoints. Supporting a composite teacher
 or few-step teaching is separate work. Architecture changes retain prompt sets,
 paired targets, anchors, ranks and memory knobs, but clear incompatible component
 paths and model-specific overrides with a notice. Select the new base explicitly.

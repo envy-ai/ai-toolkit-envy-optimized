@@ -468,7 +468,13 @@ class BaseModel:
         The fallback preserves that behaviour while allowing models that need
         both adapters (such as Krea 2 Turbo) to retain each network.
         """
-        return self.inference_lora_network or self.assistant_lora
+        if self.inference_lora_network is not None:
+            return self.inference_lora_network
+        # A configured training helper is a different adapter; never silently
+        # use it as a missing inference LoRA.
+        if self.model_config.assistant_lora_path is None:
+            return self.assistant_lora
+        return None
 
     def _emit_sample_step(self, latents, step_index=None, num_steps=None):
         """For holders whose sampling loop bypasses scheduler.step: report one
@@ -553,11 +559,8 @@ class BaseModel:
 
         if pipeline is None:
             pipeline = self.get_generation_pipeline()
-            try:
-                pipeline.set_progress_bar_config(
-                    disable=not getattr(pipeline, 'show_sample_step_progress', False))
-            except:
-                pass
+
+        from toolkit.sample_progress import configure_sample_progress
 
         unwrap_step_hooks = self._install_sample_step_hooks(pipeline)
 
@@ -572,11 +575,8 @@ class BaseModel:
                 if network is not None:
                     assert network.is_active
 
-                sample_step_progress = getattr(pipeline, 'show_sample_step_progress', False)
-                for i in tqdm(range(len(image_configs)), desc=f"Generating Samples", leave=True,
-                              position=0, disable=sample_step_progress):
-                    if sample_step_progress:
-                        pipeline.set_progress_bar_config(desc=f"Sample {i + 1}/{len(image_configs)}")
+                for i in range(len(image_configs)):
+                    configure_sample_progress(pipeline, i, len(image_configs))
                     gen_config = image_configs[i]
 
                     extra = {}

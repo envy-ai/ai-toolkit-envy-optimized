@@ -1,0 +1,16 @@
+{
+  "1": {"class_type": "IrisModelLoader", "inputs": {"model_name": {{ model | json }}, "weight_dtype": "default"}},
+  "2": {"class_type": "IrisCLIPLoader", "inputs": {"clip_name": {{ text_encoder | json }}}},
+  "3": {"class_type": "load_lora_from_absolute_path", "inputs": {
+    "absolute_path": {{ training_lora_path | json }}, "lora_strength": {{ training_lora_strength }}, "model": ["1", 0], "clip": ["2", 0]}},
+  {% if inference_lora_enabled %}
+  "4": {"class_type": "LoraLoader", "inputs": {"lora_name": {{ inference_lora | json }}, "strength_model": {{ inference_lora_strength }}, "strength_clip": 0, "model": ["3", 0], "clip": ["3", 1]}},
+  {% endif %}
+  "5": {"class_type": "CLIPTextEncode", "inputs": {"text": {{ prompt | json }}, "clip": ["3", 1]}},
+  "6": {"class_type": "CLIPTextEncode", "inputs": {"text": {{ negative_prompt | json }}, "clip": ["3", 1]}},
+  "7": {"class_type": "IrisKSampler", "inputs": {
+    "model": [{% if inference_lora_enabled %}"4"{% else %}"3"{% endif %}, 0],
+    "positive": ["5", 0], "negative": ["6", 0], "seed": {{ seed }}, "steps": {{ steps }}, "cfg": {{ cfg }},
+    "sampler_name": {{ sampler | json }}, "scheduler": "iris", "width": {{ width }}, "height": {{ height }}, "batch_size": 1}},
+  "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0], "filename_prefix": {{ filename_prefix | json }}}}
+}

@@ -49,7 +49,10 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
   if (model.arch === 'anima' && kwargs.train_text_conditioner) errors.push('Specialized training requires a frozen Anima text conditioner. Disable train_text_conditioner.');
   if (model.arch === 'ideogram4' && !['image_only', 'negative_prompt'].includes(String(kwargs.ideogram_cfg_reference ?? 'image_only'))) errors.push('Choose image-only or text-negative Ideogram CFG reference.');
   if (model.arch !== 'qwen_image_2' || mode === 'diffusion_kto') {
-    if ((model.arch !== 'qwen_image_2' && model.assistant_lora_path) || model.inference_lora_path || model.unconditional_lora_path) errors.push('Specialized training supports a frozen Qwen training helper, but no other auxiliary LoRA paths.');
+    const unsupportedPaths = ['unconditional_lora_path',
+      ...(model.arch !== 'qwen_image_2' ? ['assistant_lora_path'] : [])] as const;
+    const configuredPaths = unsupportedPaths.filter(key => model[key as keyof typeof model]);
+    if (configuredPaths.length) errors.push(`Unsupported auxiliary LoRA paths: ${configuredPaths.map(key => `model.${key}`).join(', ')}. Frozen Qwen training helpers and preview-only inference LoRAs are supported.`);
     if (kwargs.is_distilled || /(?:^|[\W_])(?:turbo|lightning|distilled)(?:$|[\W_])/i.test(model.name_or_path ?? '')) errors.push('Specialized training currently requires a base checkpoint, not a turbo/step-distilled variant.');
     if (model.arch === 'krea2' && (mode.startsWith('fizgig_') || mode === 'sliderspace') && (kwargs.edit || kwargs.kv_cache)) errors.push('Fizgig and SliderSpace are text-to-image objectives. Disable Krea edit and kv_cache.');
   }
@@ -88,7 +91,7 @@ export function validateDiffusionKTO(config: JobConfig): string[] {
   if (settings.reference_estimator === 'score_window' && (settings.score_window_size < 2 || accumulation < settings.score_window_size)) errors.push(`KTO score windows require at least 2 batches and Gradient Accumulation >= ${settings.score_window_size}.`);
   if ((train.gradient_accumulation_steps ?? 1) !== 1) errors.push('KTO uses Gradient Accumulation within one optimizer step, not gradient_accumulation_steps.');
   const network = raw.network ?? {};
-  if (network.pretrained_lora_path || (process.model.arch !== 'qwen_image_2' && process.model.assistant_lora_path) || process.model.inference_lora_path || process.model.unconditional_lora_path) errors.push('KTO supports a frozen Qwen training helper, but no pretrained or other auxiliary LoRAs.');
+  if (network.pretrained_lora_path || (process.model.arch !== 'qwen_image_2' && process.model.assistant_lora_path) || process.model.unconditional_lora_path) errors.push('KTO supports frozen Qwen training helpers and preview-only inference LoRAs, but no pretrained or other auxiliary LoRAs.');
   const networkOptions = network.network_kwargs ?? {};
   if (typeof networkOptions !== 'object' || Array.isArray(networkOptions)) errors.push('KTO network_kwargs must be an object.');
   if ([network, networkOptions].some(values => ['dropout', 'rank_dropout', 'module_dropout'].some(key => values[key] != null && values[key] !== 0))) errors.push('KTO requires zero adapter dropout for exact replay.');
@@ -159,7 +162,6 @@ export function switchSpecializedArchitecture(config: JobConfig, arch: string): 
   delete process.model.text_encoder_path;
   delete process.model.vae_path;
   delete process.model.assistant_lora_path;
-  delete process.model.inference_lora_path;
   delete process.model.unconditional_lora_path;
   process.model.model_kwargs = {};
   if (process.network) delete process.network.pretrained_lora_path;

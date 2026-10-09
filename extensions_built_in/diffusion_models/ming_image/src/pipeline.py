@@ -12,6 +12,7 @@ from typing import List, Optional
 import numpy as np
 import torch
 from diffusers.utils.torch_utils import randn_tensor
+from toolkit.sample_progress import SampleProgressMixin
 from PIL import Image
 
 from toolkit.samplers.custom_flowmatch_sampler import calculate_shift
@@ -76,7 +77,7 @@ def run_transformer(
     return -torch.stack([o[:, 0] for o in out], dim=0)
 
 
-class MingImagePipeline:
+class MingImagePipeline(SampleProgressMixin):
     """Minimal flow-matching sampler for ai-toolkit's preview generation."""
 
     def __init__(self, model):
@@ -89,9 +90,6 @@ class MingImagePipeline:
 
     def to(self, *args, **kwargs):
         return self
-
-    def set_progress_bar_config(self, **kwargs):
-        pass
 
     @torch.no_grad()
     def __call__(
@@ -143,7 +141,7 @@ class MingImagePipeline:
         query_neg = [torch.zeros_like(q) for q in query]
         direct_neg = [torch.zeros_like(d) for d in direct]
 
-        for timestep in scheduler.timesteps:
+        for timestep in self.progress_bar(scheduler.timesteps):
             t = timestep.expand(latents.shape[0]).to(device)
             noise_pred = run_transformer(
                 transformer, latents, t, query, direct, ref_latents=reference_latents

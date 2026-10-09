@@ -96,7 +96,7 @@ export function validateSliderSpaceSettings(config: JobConfig): string[] {
     errors.push('SliderSpace uses its own semantic objective. Disable generic loss, preservation, and training guidance options.');
   }
   if (process.train.validation_config) errors.push('Disable dataset validation for SliderSpace; use direction previews instead.');
-  if ((process.model.arch !== 'qwen_image_2' && process.model.assistant_lora_path) || process.model.inference_lora_path || process.model.unconditional_lora_path) {
+  if ((process.model.arch !== 'qwen_image_2' && process.model.assistant_lora_path) || process.model.unconditional_lora_path) {
     errors.push('Clear auxiliary model LoRA paths before running SliderSpace.');
   }
   const extra = process as unknown as Record<string, unknown>;

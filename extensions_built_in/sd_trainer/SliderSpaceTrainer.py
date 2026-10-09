@@ -66,9 +66,9 @@ class SliderSpaceTrainer(DiffusionTrainer):
                 or train.get('frequency_loss_type', 'none') != 'none'
                 or (train.get('ema_config') or {}).get('use_ema')):
             raise ValueError('SliderSpace cannot combine its semantic objective with other objectives, EMA, or merging')
-        if any(config.get(key) for key in ('adapter', 'decorator', 'embedding')) or any(
-                model.get(key) for key in ('inference_lora_path', 'unconditional_lora_path')):
-            raise ValueError('SliderSpace does not support additional trainable, inference or unconditional adapters')
+        if (any(config.get(key) for key in ('adapter', 'decorator', 'embedding'))
+                or model.get('unconditional_lora_path')):
+            raise ValueError('SliderSpace does not support additional trainable or unconditional adapters')
         if config.get('trigger_word'):
             raise ValueError('SliderSpace uses exact concept prompts; remove trigger_word')
         minimum, maximum = train.get('min_denoising_steps', 0), train.get('max_denoising_steps', 999)

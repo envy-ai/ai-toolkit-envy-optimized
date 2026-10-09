@@ -25,6 +25,7 @@ from typing import List, Optional
 import torch
 from PIL import Image
 from diffusers.utils.torch_utils import randn_tensor
+from toolkit.sample_progress import SampleProgressMixin
 
 
 def pad_prompt_embeds(
@@ -58,7 +59,7 @@ def pad_prompt_embeds(
     return features, mask
 
 
-class ExamplePipeline:
+class ExamplePipeline(SampleProgressMixin):
     """Lightweight flow-matching sampler used for training previews."""
 
     def __init__(self, model):
@@ -74,11 +75,6 @@ class ExamplePipeline:
         # BaseModel.generate_images may call pipeline.to(device); we manage
         # devices through the model itself, so this is a no-op.
         return self
-
-    def set_progress_bar_config(self, **kwargs):
-        # called by the sampler harness (inside a try/except, so optional);
-        # diffusers pipelines use it to silence tqdm. Nothing to do here.
-        pass
 
     @torch.no_grad()
     def __call__(
@@ -124,7 +120,7 @@ class ExamplePipeline:
             uncond_feats, uncond_mask = pad_prompt_embeds(unconditional_embeds.text_embeds, device, dtype)
 
         # 3. denoising loop
-        for t in timesteps:
+        for t in self.progress_bar(timesteps):
             # scheduler timesteps are on a 0-1000 scale; the transformer wants
             # flow time in [0, 1] with 1 = pure noise
             t01 = (t / 1000.0).to(device).expand(latents.shape[0])

@@ -104,6 +104,8 @@ export async function GET(request: Request) {
   const job_ref = searchParams.get('job_ref');
   const job_type = searchParams.get('job_type');
   const only_active = searchParams.get('only_active');
+  const name = searchParams.get('name')?.trim() || '';
+  const matchesName = (job: { name: string }) => job.name.toLowerCase().includes(name.toLowerCase());
 
   try {
     if (id) {
@@ -124,6 +126,9 @@ export async function GET(request: Request) {
     if (job_type) {
       where.job_type = job_type;
     }
+    if (name) {
+      where.name = { contains: name };
+    }
     if (only_active === 'true') {
       where.status = { in: ['running', 'queued', 'stopping'] };
       const jobs = await cached(
@@ -134,16 +139,18 @@ export async function GET(request: Request) {
             orderBy: { created_at: 'desc' },
           }),
         5000,
-        { job_type },
+        { job_type, name },
       );
-      return NextResponse.json({ jobs: jobs.map(attachDatasetThumbnail) });
+      // SQLite LIKE treats underscores and percent signs as wildcards. Keep
+      // name searches literal, since those characters are common in job names.
+      return NextResponse.json({ jobs: jobs.filter(matchesName).map(attachDatasetThumbnail) });
     }
 
     const jobs = await prisma.job.findMany({
       where,
       orderBy: { created_at: 'desc' },
     });
-    return NextResponse.json({ jobs: jobs.map(attachDatasetThumbnail) });
+    return NextResponse.json({ jobs: jobs.filter(matchesName).map(attachDatasetThumbnail) });
   } catch (error) {
     console.error(error);
     return NextResponse.json({ error: 'Failed to fetch training data' }, { status: 500 });

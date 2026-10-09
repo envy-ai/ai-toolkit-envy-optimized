@@ -13,6 +13,7 @@ from typing import List, Optional
 import torch
 from PIL import Image
 from diffusers.utils.torch_utils import randn_tensor
+from toolkit.sample_progress import SampleProgressMixin
 
 from transformers.masking_utils import create_causal_mask
 
@@ -278,7 +279,7 @@ def predict_velocity(
 # ---------------------------------------------------------------------------
 
 
-class Ideogram4Pipeline:
+class Ideogram4Pipeline(SampleProgressMixin):
     """Lightweight flow-matching sampler used by ai-toolkit's preview generation."""
 
     def __init__(self, model):
@@ -369,7 +370,7 @@ class Ideogram4Pipeline:
         # outer sampling context (``with network:``) may switch it on globally.
         uncond_lora = getattr(model, "unconditional_lora", None)
 
-        for sigma, sigma_next in zip(sigmas[:-1], sigmas[1:]):
+        for sigma, sigma_next in self.progress_bar(zip(sigmas[:-1], sigmas[1:]), total=len(sigmas) - 1):
             t01 = sigma.expand(latents.shape[0])
             if uncond_lora is not None:
                 uncond_lora.is_active = False
