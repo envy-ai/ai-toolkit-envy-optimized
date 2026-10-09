@@ -73,7 +73,7 @@ def validate_training(holder, process):
         raise ValueError('Train only Hunyuan attention/shared-MLP LoRA; text/vision/VAE training is unsupported')
     if train.batch_size != 1:
         raise ValueError('HunyuanImage 3 requires batch_size: 1; use gradient_accumulation for larger effective batches')
-    if getattr(train, 'frequency_loss_enabled', False) or getattr(train, 'pixel_grid_loss_active', False):
+    if getattr(train, 'frequency_loss_enabled', False):
         raise ValueError('Hunyuan differentiable VAE/image-space losses require separate validation')
     for config in (getattr(process, 'sample_config', None), getattr(process, 'first_sample_config', None)):
         comfy = getattr(config, 'comfy', None)
