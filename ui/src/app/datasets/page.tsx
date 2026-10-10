@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Modal } from '@/components/Modal';
 import Link from 'next/link';
 import { TextInput } from '@/components/formInputs';
@@ -14,12 +14,14 @@ import { apiClient } from '@/utils/api';
 import { useRouter } from 'next/navigation';
 import DatasetGrid, { DatasetGridSize } from '@/components/DatasetGrid';
 import Loading from '@/components/Loading';
+import { useDatasetsSearch } from '@/components/DatasetsSearchContext';
 
 type DatasetView = 'list' | DatasetGridSize;
 
 export default function Datasets() {
   const router = useRouter();
   const [view, setView] = useState<DatasetView>('list');
+  const { search, setSearch } = useDatasetsSearch();
   const { datasets, firstImages, status, refreshDatasets } = useDatasetList(view !== 'list');
   const [newDatasetName, setNewDatasetName] = useState('');
   const [isNewDatasetModalOpen, setIsNewDatasetModalOpen] = useState(false);
@@ -42,8 +44,17 @@ export default function Datasets() {
     }
   };
 
-  // Transform datasets array into rows with objects
-  const tableRows = datasets.map(dataset => ({
+  const filteredDatasets = useMemo(() => {
+    const terms = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return datasets;
+    return datasets.filter(dataset => {
+      const name = dataset.toLowerCase();
+      return terms.every(term => name.includes(term));
+    });
+  }, [datasets, search]);
+
+  // Apply the same filter to list and grid views.
+  const tableRows = filteredDatasets.map(dataset => ({
     name: dataset,
     actions: dataset, // Pass full dataset name for actions
   }));
@@ -152,36 +163,49 @@ export default function Datasets() {
         </div>
       </TopBar>
 
-      <MainContent>
-        <div className="flex items-center justify-between gap-3 mb-4">
-          <label className="flex items-center gap-2 text-sm text-gray-300">
-            View
-            <select
-              value={view}
-              onChange={event => changeView(event.target.value as DatasetView)}
-              className="rounded-md bg-gray-800 border border-gray-600 text-gray-200 px-3 py-2"
-            >
-              <option value="list">List</option>
-              <option value="small">Small grid</option>
-              <option value="medium">Medium grid</option>
-              <option value="large">Large grid</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            onClick={refreshDatasets}
-            disabled={status === 'loading'}
-            className="rounded-md bg-gray-800 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 disabled:opacity-50"
+      <div className="absolute top-12 left-0 w-full h-16 z-10 bg-gray-950 border-b border-gray-800 px-2 sm:px-4 flex items-center gap-2 sm:gap-3">
+        <label className="flex shrink-0 items-center gap-2 text-sm text-gray-300">
+          View
+          <select
+            value={view}
+            onChange={event => changeView(event.target.value as DatasetView)}
+            className="w-24 sm:w-auto rounded-md bg-gray-800 border border-gray-600 text-gray-200 px-2 sm:px-3 py-2"
           >
-            Refresh
-          </button>
-        </div>
+            <option value="list">List</option>
+            <option value="small">Small grid</option>
+            <option value="medium">Medium grid</option>
+            <option value="large">Large grid</option>
+          </select>
+        </label>
+        <input
+          type="search"
+          aria-label="Search datasets"
+          placeholder="Search datasets…"
+          title="Match all space-separated substrings in dataset names (case-insensitive)"
+          value={search}
+          onChange={event => setSearch(event.target.value)}
+          className="min-w-0 flex-1 rounded-md bg-gray-800 border border-gray-600 text-sm text-gray-200 placeholder-gray-500 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <button
+          type="button"
+          onClick={refreshDatasets}
+          disabled={status === 'loading'}
+          className="shrink-0 rounded-md bg-gray-800 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 disabled:opacity-50"
+        >
+          Refresh
+        </button>
+      </div>
+      <MainContent belowTopBar style={{ top: '7rem' }}>
         {status === 'error' && (
           <p role="alert" className="mb-4 text-red-300">
             Could not load datasets. Try refreshing.
           </p>
         )}
-        {view === 'list' ? (
+        {status === 'success' && datasets.length > 0 && filteredDatasets.length === 0 ? (
+          <p role="status" className="p-6 text-center text-sm text-gray-400">
+            No datasets match your search.
+          </p>
+        ) : view === 'list' ? (
           <UniversalTable
             columns={columns}
             rows={tableRows}
@@ -195,7 +219,12 @@ export default function Datasets() {
         ) : datasets.length === 0 ? (
           <p className="p-6 text-center text-sm text-gray-400">No datasets yet. Create a new dataset to get started.</p>
         ) : (
-          <DatasetGrid datasets={datasets} firstImages={firstImages} size={view} onDelete={handleDeleteDataset} />
+          <DatasetGrid
+            datasets={filteredDatasets}
+            firstImages={firstImages}
+            size={view}
+            onDelete={handleDeleteDataset}
+          />
         )}
       </MainContent>
 
