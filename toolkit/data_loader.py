@@ -23,6 +23,7 @@ from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
 from toolkit.dataloader_mixins import CaptionMixin, BucketsMixin, LatentCachingMixin, Augments, CLIPCachingMixin, ControlCachingMixin, TextEmbeddingCachingMixin
 from toolkit.data_transfer_object.data_loader import FileItemDTO, DataLoaderBatchDTO
 from toolkit.print import print_acc
+from toolkit.safetensors_cache import CachedTensorError
 from toolkit.accelerator import get_accelerator
 
 import platform
@@ -722,7 +723,10 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         try:
             file_item.load_and_process_image(self.transform)
         except Exception as e:
-            print(f"Error loading image, skipping and loading a different one: {file_item.path} ({e})")
+            if isinstance(e, CachedTensorError):
+                print(f"Error loading training cache for image {file_item.path}, skipping and loading a different one: {e}")
+            else:
+                print(f"Error loading image, skipping and loading a different one: {file_item.path} ({e})")
             if _attempts >= 10:
                 # avoid infinite recursion if many files are corrupt
                 raise

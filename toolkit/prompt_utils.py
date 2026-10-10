@@ -2,13 +2,14 @@ import os
 from typing import Optional, TYPE_CHECKING, List, Union, Tuple
 
 import torch
-from safetensors.torch import load_file, save_file
+from toolkit.safetensors_cache import (
+    load_cached_file as load_file, atomic_save_file as save_file, cache_metadata,
+)
 from tqdm import tqdm
 import random
 
 from toolkit.train_tools import get_torch_dtype
 import itertools
-from safetensors import safe_open
 from toolkit.advanced_prompt_embeds import AdvancedPromptEmbeds
 
 if TYPE_CHECKING:
@@ -164,8 +165,7 @@ class PromptEmbeds:
         :return: An instance of PromptEmbeds.
         """
         # first check if it is advanced prompt embed file
-        f = safe_open(path, framework='pt')
-        metadata = f.metadata()
+        metadata = cache_metadata(path)
         if metadata is not None and metadata.get("class_name", "") == "AdvancedPromptEmbeds":
             return AdvancedPromptEmbeds.load(path=path)
         if metadata is not None and metadata.get("class_name", "") == "AnimaPromptEmbeds":

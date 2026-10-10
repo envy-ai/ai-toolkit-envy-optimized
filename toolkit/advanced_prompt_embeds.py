@@ -1,7 +1,7 @@
 import os
 import torch
 from safetensors import safe_open
-from safetensors.torch import load_file, save_file
+from toolkit.safetensors_cache import load_cached_file as load_file, atomic_save_file as save_file
 
 
 class AdvancedPromptEmbeds:

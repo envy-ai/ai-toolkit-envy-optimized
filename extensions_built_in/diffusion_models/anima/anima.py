@@ -3,7 +3,7 @@ from typing import List, Optional
 
 import torch
 import yaml
-from safetensors.torch import load_file, save_file
+from toolkit.safetensors_cache import load_cached_file as load_file, atomic_save_file as save_file
 
 from toolkit.accelerator import unwrap_model
 from toolkit.basic import flush

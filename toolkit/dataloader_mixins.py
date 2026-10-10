@@ -14,7 +14,9 @@ import traceback
 import cv2
 import numpy as np
 import torch
-from safetensors.torch import load_file, save_file
+from toolkit.safetensors_cache import (
+    load_cached_file as load_file, atomic_save_file as save_file, is_valid_cache,
+)
 from tqdm import tqdm
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, SiglipImageProcessor
 
@@ -2031,7 +2033,7 @@ class LatentCachingMixin:
 
                 prep_latent_path = prep_item.get_latent_path(recalculate=True)
                 try:
-                    if os.path.exists(prep_latent_path):
+                    if is_valid_cache(prep_latent_path, required_keys=('latent',)):
                         cached_state_dict = load_file(prep_latent_path, device='cpu') if to_memory else None
                         return prep_item, prep_latent_path, cached_state_dict, False
                     # not saved to disk, load the image/video/audio
@@ -2535,7 +2537,7 @@ class TextEmbeddingCachingMixin:
                             encode_targets.append((dop_blank_path, file_item.get_dop_dropout_caption()))
                             dropout_target_paths.add(dop_blank_path)
                 # only process if not saved to disk
-                encode_targets = [t for t in encode_targets if not os.path.exists(t[0])]
+                encode_targets = [t for t in encode_targets if not is_valid_cache(t[0])]
                 if len(encode_targets) > 0:
                     # load if not loaded
                     if not did_move:
@@ -2701,7 +2703,7 @@ class TextEmbeddingCachingMixin:
                         dopsd_blank_path = file_item.get_dopsd_blank_text_embedding_path(recalculate=True)
                         if dopsd_blank_path != dopsd_targets[0][0]:
                             dopsd_targets.append((dopsd_blank_path, file_item.get_dopsd_dropout_caption()))
-                    dopsd_targets = [t for t in dopsd_targets if not os.path.exists(t[0])]
+                    dopsd_targets = [t for t in dopsd_targets if not is_valid_cache(t[0])]
                     if len(dopsd_targets) > 0:
                         if not did_move:
                             self.sd.set_device_state_preset('cache_text_encoder')
@@ -2806,7 +2808,7 @@ class CLIPCachingMixin:
                 hash_str = hash_str.replace('=', '')
 
                 uncond_path = os.path.join(clip_vision_cache_path, f'uncond_{hash_str}_{i}.safetensors')
-                if os.path.exists(uncond_path):
+                if is_valid_cache(uncond_path):
                     # skip it
                     unconditional_paths.append(uncond_path)
                     continue
@@ -2861,7 +2863,7 @@ class CLIPCachingMixin:
 
                 embedding_path = file_item.get_clip_vision_embeddings_path(recalculate=True)
                 # check if it is saved to disk already
-                if not os.path.exists(embedding_path):
+                if not is_valid_cache(embedding_path):
                     # load the image first
                     file_item.load_clip_image()
                     # add batch dimension
