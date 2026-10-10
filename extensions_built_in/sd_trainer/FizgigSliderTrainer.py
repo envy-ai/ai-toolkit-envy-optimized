@@ -22,6 +22,7 @@ from toolkit.training_capabilities import validate_specialized_model
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 from toolkit.data_loader import get_dataloader_datasets, get_dataloader_from_datasets
 from toolkit.train_tools import get_torch_dtype
+from toolkit.fizgig_practice_cache import FizgigPracticeCache, remember_cached_practice_source
 from .fizgig_multipoint import parse_points, parse_multipoint_prompts, validate_multipoint_images
 
 
@@ -454,6 +455,23 @@ class FizgigSliderTrainer(DiffusionTrainer):
     def _build_anchor_prompt_bank(self):
         from torchvision.transforms.functional import to_tensor
 
+        cache = FizgigPracticeCache(self)
+        entries = [
+            (index, self.slider_anchor_prompts[index][0],
+             self.slider_anchor_prompts[index][1] if negative is not None else None,
+             int(self.sample_config.seed) + 100_000 + index, positive, negative)
+            for index, (positive, negative) in enumerate(self.slider_anchor_embeds)
+        ]
+        cached = [cache.load("anchor", index, prompt, negative_prompt, seed)
+                  for index, prompt, negative_prompt, seed, _, _ in entries]
+        if all(latent is not None for latent in cached):
+            for (index, prompt, _, _, positive, negative), latent in zip(entries, cached):
+                self.slider_anchor_bank.append((latent, positive, negative))
+                remember_cached_practice_source(
+                    self, "anchor", index, latent, prompt, cache.source_identities.get(("anchor", index)))
+            self.print(f"Reused {len(cached)} slider anchor practice latents")
+            return
+
         self.sd.save_device_state()
         network = self.network
         previous_active = network.is_active
@@ -465,19 +483,27 @@ class FizgigSliderTrainer(DiffusionTrainer):
             # Keep the frozen helper active, as in the training reference passes.
             with torch.no_grad():
                 pipeline = self.sd.get_generation_pipeline()
-                for index, (positive, negative) in enumerate(tqdm(self.slider_anchor_embeds, desc="Rendering slider anchor practice images")):
+                for (index, prompt, negative_prompt, seed, positive, negative), latent in tqdm(
+                    zip(entries, cached), total=len(entries), desc="Loading/rendering slider anchor practice images"
+                ):
+                    if latent is not None:
+                        self.slider_anchor_bank.append((latent, positive, negative))
+                        remember_cached_practice_source(
+                            self, "anchor", index, latent, prompt, cache.source_identities.get(("anchor", index)))
+                        continue
                     image = render_flow_bank_image(
                         self.sd, pipeline, positive.to(self.device_torch, dtype=self.sd.torch_dtype),
                         negative.to(self.device_torch, dtype=self.sd.torch_dtype) if negative is not None else None,
                         height=self.slider_bank_resolution, width=self.slider_bank_resolution,
                         steps=self.slider_bank_steps, cfg=self.slider_cfg,
-                        seed=int(self.sample_config.seed) + 100_000 + index)
+                        seed=seed)
                     pixels = to_tensor(image).mul(2).sub(1).to(self.device_torch, dtype=self.sd.vae_torch_dtype)
                     latent = self.sd.encode_images(pixels.unsqueeze(0)).detach().cpu()
                     self.slider_anchor_bank.append((latent, positive.to("cpu"), negative.to("cpu") if negative is not None else None))
                     from toolkit.training_examples import save_practice_source, recording_enabled
                     if recording_enabled(self):
                         save_practice_source(self, latent, image, f'anchor_{index:06d}', self.slider_anchor_prompts[index][0])
+                    cache.save("anchor", index, prompt, negative_prompt, seed, latent)
         finally:
             # Embeds.to may mutate its container; do not retain bank embeds on GPU.
             for positive, negative in self.slider_anchor_embeds:
@@ -609,6 +635,26 @@ class FizgigSliderTrainer(DiffusionTrainer):
     def _build_prompt_bank(self):
         from torchvision.transforms.functional import to_tensor
 
+        cache = FizgigPracticeCache(self)
+        entries = [
+            (index, index % len(self.slider_prompt_triplets),
+             self.slider_prompt_triplets[index % len(self.slider_prompt_triplets)][0],
+             getattr(self, "slider_cfg_negative_prompts", None)[index % len(self.slider_prompt_triplets)][0]
+             if self.slider_cfg_negative_embeds is not None
+             and getattr(self, "slider_cfg_negative_prompts", None) is not None else None,
+             int(self.sample_config.seed) + 1000 + index)
+            for index in range(self.slider_bank_size)
+        ]
+        cached = [cache.load("prompt", index, prompt, negative, seed)
+                  for index, _, prompt, negative, seed in entries]
+        if all(latent is not None for latent in cached):
+            for (index, triplet_index, prompt, _, _), latent in zip(entries, cached):
+                self.slider_bank.append((latent, triplet_index))
+                remember_cached_practice_source(
+                    self, "prompt", index, latent, prompt, cache.source_identities.get(("prompt", index)))
+            self.print(f"Reused {len(cached)} slider practice latents")
+            return
+
         self.sd.save_device_state()
         network = self.network
         previous_multiplier, previous_active = network.multiplier, network.is_active
@@ -623,8 +669,14 @@ class FizgigSliderTrainer(DiffusionTrainer):
             # Practice states come from the same assisted base used for training.
             with torch.no_grad():
                 pipeline = self.sd.get_generation_pipeline()
-                for index in tqdm(range(self.slider_bank_size), desc="Rendering slider practice images"):
-                    triplet_index = index % len(self.slider_prompt_triplets)
+                for (index, triplet_index, prompt, negative_prompt, seed), latent in tqdm(
+                    zip(entries, cached), total=len(entries), desc="Loading/rendering slider practice images"
+                ):
+                    if latent is not None:
+                        self.slider_bank.append((latent, triplet_index))
+                        remember_cached_practice_source(
+                            self, "prompt", index, latent, prompt, cache.source_identities.get(("prompt", index)))
+                        continue
                     neutral_cpu = self.slider_embeds[triplet_index][0]
                     neutral = (neutral_cpu.detach() if getattr(self, "slider_multipoint", False) else neutral_cpu).to(
                         self.device_torch, dtype=self.sd.torch_dtype
@@ -635,7 +687,6 @@ class FizgigSliderTrainer(DiffusionTrainer):
                             self.device_torch, dtype=self.sd.torch_dtype
                         ) if self.slider_cfg_negative_embeds is not None else None
                     )
-                    seed = int(self.sample_config.seed) + 1000 + index
                     image = render_flow_bank_image(
                         self.sd, pipeline, neutral, unconditional,
                         height=self.slider_bank_resolution,
@@ -646,6 +697,7 @@ class FizgigSliderTrainer(DiffusionTrainer):
                     self.slider_bank.append((latent, triplet_index))
                     from toolkit.training_examples import save_practice_source
                     save_practice_source(self, latent, image, f'practice_{index:06d}', self.slider_prompt_triplets[triplet_index][0])
+                    cache.save("prompt", index, prompt, negative_prompt, seed, latent)
         finally:
             network.multiplier = previous_multiplier
             network.is_active = previous_active
