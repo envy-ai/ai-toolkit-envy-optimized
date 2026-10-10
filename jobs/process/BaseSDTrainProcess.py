@@ -1366,6 +1366,24 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 groups_by_reference_count.setdefault(group_key, []).append((i, gen_config))
             indexed_batch_groups = list(groups_by_reference_count.values())
 
+        # Every batch request has one LoRA strength and one set of sampling
+        # settings. Split all workflows, not just Qwen edit, before taking the
+        # first sample's values below. Otherwise a Krea slider's -1/0/+1
+        # comparison silently renders every image at -1.
+        compatible_batch_groups = []
+        for indexed_group in indexed_batch_groups:
+            groups_by_settings = OrderedDict()
+            for i, gen_config in indexed_group:
+                settings = (
+                    gen_config.width, gen_config.height,
+                    gen_config.num_inference_steps, gen_config.guidance_scale,
+                    gen_config.network_multiplier,
+                    gen_config.num_frames, gen_config.fps,
+                )
+                groups_by_settings.setdefault(settings, []).append((i, gen_config))
+            compatible_batch_groups.extend(groups_by_settings.values())
+        indexed_batch_groups = compatible_batch_groups
+
         sample_folder = os.path.join(self.save_root, 'samples')
         self._cleanup_legacy_comfy_sample_loras(sample_folder)
         training_lora_path = self._save_current_network_for_comfy(step=step)

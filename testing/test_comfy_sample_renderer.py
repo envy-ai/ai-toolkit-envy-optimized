@@ -685,6 +685,7 @@ class ComfySampleWorkflowTests(unittest.TestCase):
             training_lora_path="/tmp/current_lora.safetensors",
             training_lora_filename="current_lora.safetensors",
             filename_prefix="ai-toolkit/qwen_edit_batch",
+            training_lora_strength=-0.5,
             control_images=[
                 "ai-toolkit/first.png",
                 "ai-toolkit/second.png",
@@ -697,6 +698,7 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(rendered["4"]["inputs"]["unet_name"], "qwen_image_edit_fp8_e4m3fn.safetensors")
+        self.assertEqual(rendered["36"]["inputs"]["lora_strength"], -0.5)
         self.assertEqual(rendered["5"]["inputs"]["type"], "qwen_image")
         self.assertEqual(rendered["6"]["inputs"]["vae_name"], "qwen_image_vae.safetensors")
         self.assertEqual(rendered["1400"]["class_type"], "LoadImage")
@@ -729,6 +731,7 @@ class ComfySampleWorkflowTests(unittest.TestCase):
             self.request,
             model="qwen_image_edit_fp8_e4m3fn.safetensors",
             control_image="ai-toolkit/reference.png",
+            training_lora_strength=-0.5,
         )
         rendered = comfy_sample.render_nunjucks_workflow(
             comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
@@ -736,6 +739,7 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(rendered["17"]["inputs"]["seed"], 123)
+        self.assertEqual(rendered["36"]["inputs"]["lora_strength"], -0.5)
         self.assertEqual(rendered["71"]["inputs"]["prompt"], "new prompt")
         self.assertEqual(rendered["80"]["inputs"]["image"], "ai-toolkit/reference.png")
         self.assertEqual(rendered["83"]["class_type"], "VAEEncode")
@@ -764,6 +768,7 @@ class ComfySampleWorkflowTests(unittest.TestCase):
             training_lora_path="/tmp/current_lora.safetensors",
             training_lora_filename="current_lora.safetensors",
             filename_prefix="ai-toolkit/qwen_edit_plus_batch",
+            training_lora_strength=-0.5,
             control_images=["ai-toolkit/first-a.png", "ai-toolkit/first-b.png"],
             control_images_2=["ai-toolkit/second-a.png", "ai-toolkit/second-b.png"],
             control_images_3=["ai-toolkit/third-a.png", "ai-toolkit/third-b.png"],
@@ -775,6 +780,7 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(rendered["5"]["inputs"]["type"], "qwen_image")
+        self.assertEqual(rendered["36"]["inputs"]["lora_strength"], -0.5)
         self.assertEqual(rendered["1600"]["class_type"], "LoadImage")
         self.assertEqual(rendered["1600"]["inputs"]["image"], "ai-toolkit/second-a.png")
         self.assertEqual(rendered["1801"]["inputs"]["image"], "ai-toolkit/third-b.png")
@@ -811,6 +817,7 @@ class ComfySampleWorkflowTests(unittest.TestCase):
             model="qwen_image_edit_2511_bf16.safetensors",
             control_image="ai-toolkit/character.png",
             control_image_2="ai-toolkit/pose.png",
+            training_lora_strength=-0.5,
         )
         rendered = comfy_sample.render_nunjucks_workflow(
             comfy_sample.DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH,
@@ -818,6 +825,7 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(rendered["17"]["inputs"]["seed"], 123)
+        self.assertEqual(rendered["36"]["inputs"]["lora_strength"], -0.5)
         self.assertEqual(rendered["71"]["inputs"]["prompt"], "new prompt")
         self.assertEqual(rendered["71"]["inputs"]["image1"], ["80", 0])
         self.assertEqual(rendered["71"]["inputs"]["image2"], ["86", 0])
