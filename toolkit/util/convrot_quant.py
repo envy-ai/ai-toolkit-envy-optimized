@@ -1448,6 +1448,15 @@ class ConvRotInt8Quantizer(OstrisQuantizer):
         in_f, out_f = module.in_features, module.out_features
         m = x.numel() // in_f
 
+        if x.device.type == "xla":
+            if type(self) is not ConvRotInt8Quantizer:
+                raise NotImplementedError("XLA supports frozen ConvRot8 only, not packed ConvRot variants")
+            from toolkit.util.convrot_xla import convrot8_linear_xla
+
+            return convrot8_linear_xla(
+                module, x, rot, self.act_qmax, rotate, quantize_int8_rows
+            )
+
         if x.requires_grad:
             # training: gated on requires_grad alone so both gradient-checkpoint
             # passes take the same branch
