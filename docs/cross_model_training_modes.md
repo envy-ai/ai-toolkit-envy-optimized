@@ -125,7 +125,7 @@ Select a compatible workflow and component files explicitly:
   `ManualSigmas` / `SamplerCustomAdvanced`, including schedule overrides. At CFG
   above 1 an empty negative is actually encoded, not zeroed; at CFG 1 no negative
   encoding is requested. Choose Euler for the closest match to native practice
-  generation. Ordinary jobs keep their existing sampler and blank-negative
+  generation. Ordinary text-to-image jobs keep their existing sampler and blank-negative
   behavior. Signed/fractional preview strengths are respected in both templates.
   Specialized batch previews accept full unsigned 64-bit seeds without the
   Easy Use integer widget limit or JavaScript numeric rounding.
@@ -142,6 +142,15 @@ Select a compatible workflow and component files explicitly:
   it aliases `ctrl_img_1`. Ordinary presentation remains unchanged. A common
   Dataset Control Transparency Color is inferred for previews; mixed colors
   require explicit `model_kwargs.preview_control_transparent_color: [r, g, b]`.
+  Ordinary experimental Krea Edit Training models (`krea2:o_edit` and
+  `krea2:o_edit_turbo`, normalized to `krea2` plus `model_kwargs.edit=true`)
+  use `config/comfy_templates/krea2_ostris_edit_lora_sample.json.njk` instead:
+  the same reference conditioner/patch and preprocessing, with ordinary
+  `KSampler` settings from the form. This template requires one to three
+  consecutive references and retains per-image settings through individual
+  requests. It does not use the source graph's boost/grounding knobs or prove
+  compatibility with external inference helper weights. See
+  [Krea edit samples](krea2_edit_comfy_samples.md) for the two distinct edit paths.
   CPU preprocessing checks pass and the helper is installed on this machine.
   The first live execution exposed a missing `format_encoded` initializer in
   the installed VAE Utils loader; full edit-render verification is still pending

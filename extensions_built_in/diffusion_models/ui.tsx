@@ -2043,6 +2043,10 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
       "config.process[0].network.conv_alpha": [undefined, 16],
       "config.process[0].model.low_vram": [true, false],
       "config.process[0].train.unload_text_encoder": [false, false],
+      "config.process[0].sample.comfy.workflow_path": [
+        "config/comfy_templates/krea2_ostris_edit_lora_sample.json.njk",
+        defaultComfySampleConfig.workflow_path,
+      ],
       "config.process[0].model.model_kwargs": [
         {
           edit: true,
@@ -2058,6 +2062,7 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
       "sample.multi_ctrl_imgs",
       "model.low_vram",
       "model.layer_offloading",
+      "model.assistant_lora_path",
       "model.qie.match_target_res",
       "model.model_kwargs.kv_cache",
     ],
@@ -2086,6 +2091,10 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
       "config.process[0].sample.guidance_scale": [1, 4],
       "config.process[0].sample.sample_steps": [8, 25],
       "config.process[0].train.unload_text_encoder": [false, false],
+      "config.process[0].sample.comfy.workflow_path": [
+        "config/comfy_templates/krea2_ostris_edit_lora_sample.json.njk",
+        defaultComfySampleConfig.workflow_path,
+      ],
       "config.process[0].model.model_kwargs": [
         {
           edit: true,

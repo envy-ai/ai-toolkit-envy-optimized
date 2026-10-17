@@ -24,6 +24,7 @@ COMFY_LEGACY_FREE_PATH = "/api/free"
 DEFAULT_COMFY_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample.json.njk"
 DEFAULT_COMFY_BATCH_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample_batch_easy_use.json.njk"
 DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH = "config/comfy_templates/krea2_edit_lora_sample.json.njk"
+DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH = "config/comfy_templates/krea2_ostris_edit_lora_sample.json.njk"
 DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH = (
     "config/comfy_templates/qwen_image_2_lora_sample.json.njk"
 )
@@ -198,6 +199,9 @@ def build_template_context(request: Any) -> Dict[str, Any]:
     kwargs = request.model_kwargs or {}
     krea_native_preview = request.specialized_flow and request.model_arch == 'krea2'
     krea_context = {'krea_native_preview': krea_native_preview, 'krea_native_sigmas': ''}
+    if request.model_arch == 'krea2' and kwargs.get('edit') and isinstance(request, ComfySampleRequest):
+        krea_context.update(krea_edit_preview_values=_krea_edit_preview_values(request),
+                            krea_edit_kv_cache=bool(kwargs.get('kv_cache', False)))
     if krea_native_preview:
         import math
         import torch
@@ -467,6 +471,14 @@ def get_workflow_for_sample(
     request: ComfySampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if workflow_path == DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH:
+        if request.model_arch != 'krea2' or not (request.model_kwargs or {}).get('edit'):
+            raise ValueError('The experimental Krea 2 edit workflow requires a Krea 2 edit-training model.')
+        if request.specialized_flow:
+            raise ValueError('The experimental Krea 2 edit KSampler workflow is for diffusion_trainer. '
+                             'Specialized Krea training requires the native Krea 2 preview workflow.')
+        if not request.control_image:
+            raise ValueError('The experimental Krea 2 edit workflow requires at least one control image.')
     if workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
         if request.model_arch != 'krea2':
             raise ValueError('The Krea 2 edit workflow requires a Krea 2 model.')
@@ -606,6 +618,8 @@ def get_workflow_for_samples(
     request: ComfyBatchSampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if workflow_path == DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH:
+        raise ValueError('Experimental Krea 2 edit previews require individual requests with one to three references each.')
     if workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
         raise ValueError('The Krea 2 edit workflow requires individual requests with one reference each.')
     if request.specialized_flow and request.model_arch == 'krea2' and (request.model_kwargs or {}).get('edit'):

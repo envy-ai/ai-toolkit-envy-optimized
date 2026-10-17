@@ -90,6 +90,7 @@ from toolkit.comfy_sample import (
     ComfySampleRequest,
     DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
     DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH,
+    DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH,
     DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
@@ -962,6 +963,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                          'ideogram4': DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH}
         known_templates = {DEFAULT_COMFY_WORKFLOW_PATH: 'krea2', DEFAULT_COMFY_BATCH_WORKFLOW_PATH: 'krea2',
                            DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH: 'krea2',
+                           DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH: 'krea2',
                            DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH: 'qwen_image_2',
                            DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH: 'qwen_image_2',
                            **{path: arch for arch, path in new_templates.items()}}
@@ -1051,8 +1053,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
             progress_bar.update(progress_bar.total - progress_bar.n)
         progress_bar.close()
 
-    def _get_krea_preview_control_settings(self):
-        if not (getattr(self, 'flow_profile', None) is not None
+    def _get_krea_preview_control_settings(self, include_ordinary_edit=False):
+        if not ((getattr(self, 'flow_profile', None) is not None or include_ordinary_edit)
                 and self.model_config.arch == 'krea2' and self.model_config.model_kwargs.get('edit', False)):
             return {}
         background = self.model_config.model_kwargs.get('preview_control_transparent_color')
@@ -1065,7 +1067,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if not isinstance(background, (list, tuple)) or len(background) != 3 or any(type(v) is not int or not 0 <= v <= 255 for v in background):
             raise ValueError('Krea preview alpha background must be three RGB integers from 0 to 255')
         sd = getattr(self, 'sd', None)
-        if sd is not None:
+        if sd is not None and getattr(self, 'flow_profile', None) is not None:
             sd._specialized_preview_background = tuple(background)
         dtype = str(getattr(sd, 'torch_dtype', get_torch_dtype(self.train_config.dtype))).replace('torch.', '')
         return {'control_background': list(background), 'model_dtype': dtype}
@@ -1079,20 +1081,32 @@ class BaseSDTrainProcess(BaseTrainProcess):
             and self.model_config.arch == 'krea2' and self.model_config.model_kwargs.get('edit', False))
         workflow_path = self._get_comfy_workflow_path(comfy_config)
         is_krea_edit_workflow = workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH
-        if is_krea_edit_workflow:
+        is_krea_ostris_edit_workflow = workflow_path == DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH
+        if is_krea_edit_workflow or is_krea_ostris_edit_workflow:
             if self.model_config.arch != 'krea2':
                 raise ValueError('The Krea 2 edit workflow requires a Krea 2 model.')
             if getattr(self, 'flow_profile', None) is not None:
                 raise ValueError('The Krea 2 edit KSampler workflow is for diffusion_trainer. '
                                  'Specialized Krea training requires the native Krea 2 preview workflow.')
+            if is_krea_ostris_edit_workflow and not self.model_config.model_kwargs.get('edit', False):
+                raise ValueError('The experimental Krea 2 edit workflow requires a Krea 2 edit-training model.')
             for i, gen_config in enumerate(gen_img_config_list):
                 if not (gen_config.ctrl_img_1 or gen_config.ctrl_img):
                     raise ValueError(f'Krea 2 edit ComfyUI sample {i + 1} is missing ctrl_img or ctrl_img_1.')
-                if (gen_config.ctrl_img_2 or gen_config.ctrl_img_3
-                        or (gen_config.ctrl_img and gen_config.ctrl_img_1
-                            and gen_config.ctrl_img != gen_config.ctrl_img_1)):
+                conflicting_aliases = (gen_config.ctrl_img and gen_config.ctrl_img_1
+                                       and gen_config.ctrl_img != gen_config.ctrl_img_1)
+                if is_krea_ostris_edit_workflow and conflicting_aliases:
+                    raise ValueError(f'Krea 2 edit ComfyUI sample {i + 1} has conflicting ctrl_img and ctrl_img_1 aliases.')
+                if is_krea_edit_workflow and (gen_config.ctrl_img_2 or gen_config.ctrl_img_3 or conflicting_aliases):
                     raise ValueError(f'Krea 2 edit ComfyUI sample {i + 1} supports exactly one control image. '
                                      'Use ctrl_img or ctrl_img_1, without ctrl_img_2/ctrl_img_3.')
+                if gen_config.ctrl_img_3 and not gen_config.ctrl_img_2:
+                    raise ValueError(f'Krea 2 edit ComfyUI sample {i + 1} has ctrl_img_3 without ctrl_img_2.')
+                for path in (gen_config.ctrl_img_1 or gen_config.ctrl_img, gen_config.ctrl_img_2, gen_config.ctrl_img_3):
+                    if is_krea_ostris_edit_workflow and path and not os.path.isfile(path):
+                        raise FileNotFoundError(f'Krea 2 edit ComfyUI sample {i + 1} control image does not exist: {path}')
+        is_krea_edit = is_krea_edit or is_krea_ostris_edit_workflow
+        krea_control_settings = self._get_krea_preview_control_settings(include_ordinary_edit=is_krea_ostris_edit_workflow)
         is_qwen_image_2_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH
         is_qwen_image_edit_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH
         is_qwen_image_edit_plus_workflow = (
@@ -1119,8 +1133,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         def upload_control(path):
             if is_krea_edit:
                 from toolkit.control_image import load_control_rgb
-                settings = self._get_krea_preview_control_settings()
-                return client.upload_image(path, prepared_image=load_control_rgb(path, settings['control_background']))
+                return client.upload_image(path, prepared_image=load_control_rgb(path, krea_control_settings['control_background']))
             return client.upload_image(path)
 
         def render(offload_models=True, unload_models=True):
@@ -1211,7 +1224,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         model_arch=getattr(self.model_config, 'arch', ''),
                         model_kwargs=getattr(self.model_config, 'model_kwargs', {}),
                         specialized_flow=getattr(self, 'flow_profile', None) is not None,
-                        **self._get_krea_preview_control_settings(),
+                        **krea_control_settings,
                         prompt=gen_config.prompt,
                         negative_prompt=comfy_config.negative_prompt,
                         width=gen_config.width,
@@ -1242,7 +1255,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     )
                     patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)
                     client.begin_live_progress()
-                    if request.specialized_flow and workflow_path in (
+                    if is_krea_ostris_edit_workflow or request.specialized_flow and workflow_path in (
                         DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
                         DEFAULT_COMFY_ANIMA_WORKFLOW_PATH, DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
                     ):
@@ -1320,8 +1333,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         comfy_config = sample_config.comfy
         workflow_path = self._get_comfy_workflow_path(comfy_config, batch=True)
-        if workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
-            print_acc('Krea 2 edit ComfyUI samples use individual prompts with one reference each.')
+        if workflow_path in (DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH, DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH):
+            print_acc('Krea 2 edit ComfyUI samples use individual prompts to retain per-image references.')
             return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
         if workflow_path == DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH:
             print_acc(

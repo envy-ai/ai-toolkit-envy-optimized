@@ -1,0 +1,77 @@
+{
+  "29": {
+    "class_type": "SaveImageWithMetaData",
+    "inputs": {
+      "filename_prefix": {{ filename_prefix | json }},
+      "subdirectory_name": "",
+      "output_format": {{ output_format | json }},
+      "quality": {{ output_quality | json }},
+      "metadata_scope": "full",
+      "include_batch_num": true,
+      "prefer_nearest": true,
+      "images": ["54", 0]
+    }
+  },
+  "53": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": {{ seed_literal }},
+      "steps": {{ steps }},
+      "cfg": {{ cfg }},
+      "sampler_name": {{ sampler | json }},
+      "scheduler": {{ scheduler | json }},
+      "denoise": 1,
+      "model": ["79", 0],
+      "positive": ["84", 0],
+      "negative": ["84", 1],
+      "latent_image": ["82", 0]
+    }
+  },
+  "54": {"class_type": "VAEDecode", "inputs": {"samples": ["53", 0], "vae": ["57", 0]}},
+  "55": {"class_type": "UNETLoader", "inputs": {"unet_name": {{ model | json }}, "weight_dtype": "default"}},
+  "56": {"class_type": "CLIPLoader", "inputs": {"clip_name": {{ text_encoder | json }}, "type": "krea2", "device": "default"}},
+  "57": {"class_type": "VAELoader", "inputs": {"vae_name": {{ vae | json }}}},
+  {% if inference_lora_enabled %}
+  "71": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {"lora_name": {{ inference_lora | json }}, "strength_model": {{ inference_lora_strength }}, "model": ["55", 0]},
+    "_meta": {"title": "Inference helper"}
+  },
+  {% endif %}
+  "72": {"class_type": "LoadImage", "inputs": {"image": {{ control_image | json }}}},
+  {% if has_control_image_2 %}
+  "74": {"class_type": "LoadImage", "inputs": {"image": {{ control_image_2 | json }}}},
+  {% endif %}
+  {% if has_control_image_3 %}
+  "75": {"class_type": "LoadImage", "inputs": {"image": {{ control_image_3 | json }}}},
+  {% endif %}
+  "79": {
+    "class_type": "Krea2OstrisEditModelPatch",
+    "inputs": {"model": ["111", 0], "kv_cache": {{ krea_edit_kv_cache | json }}}
+  },
+  "82": {"class_type": "EmptySD3LatentImage", "inputs": {"width": {{ width }}, "height": {{ height }}, "batch_size": 1}},
+  "84": {
+    "class_type": "AIToolkitKreaEditConditioning",
+    "inputs": {
+      {% for key, value in krea_edit_preview_values %}
+      {{ key | json }}: {{ value | json }},
+      {% endfor %}
+      {% if has_control_image_2 %}
+      "image2": ["74", 0], "mask2": ["74", 1],
+      {% endif %}
+      {% if has_control_image_3 %}
+      "image3": ["75", 0], "mask3": ["75", 1],
+      {% endif %}
+      "clip": ["56", 0], "vae": ["57", 0], "image1": ["72", 0], "mask1": ["72", 1]
+    }
+  },
+  "111": {
+    "class_type": "load_lora_from_absolute_path",
+    "inputs": {
+      "absolute_path": {{ training_lora_path | json }},
+      "lora_strength": {{ training_lora_strength }},
+      "model": [{% if inference_lora_enabled %}"71"{% else %}"55"{% endif %}, 0]
+    },
+    "_meta": {"title": "LoRA in training (model only)"}
+  }
+}

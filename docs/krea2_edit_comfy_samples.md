@@ -1,7 +1,71 @@
 # Krea 2 edit samples through ComfyUI
 
-Select **Krea 2 Edit LoRA (one reference)** under **Sample Renderer Workflow**
-for an ordinary `diffusion_trainer` Krea 2 job. Its template is
+## Experimental Edit Training models
+
+For **Krea 2 (raw) [Edit Training]** or **Krea 2 Turbo (w/ Training Adapter)
+[Edit Training]**, select **Krea 2 Experimental Edit LoRA (1–3 references)**
+under **Sample Renderer Workflow**. The template is
+`config/comfy_templates/krea2_ostris_edit_lora_sample.json.njk`. These model
+choices run ordinary `diffusion_trainer` jobs: their UI architectures
+`krea2:o_edit` / `krea2:o_edit_turbo` normalize to `krea2`, with
+`model.model_kwargs.edit=true`. They are distinct from specialized flow trainers.
+The model selector sets this preview template by default for newly selected edit
+models. Already-saved jobs must select it explicitly; no saved sample, component,
+sampler, or training setting is migrated automatically.
+
+This template retains the source graph's `UNETLoader`, `CLIPLoader` (type
+`krea2`), standard `VAELoader`/`VAEDecode`, `EmptySD3LatentImage`, `KSampler`,
+model-only LoRA loaders and metadata output. Its edit conditioning instead uses
+the fork's `AIToolkitKreaEditConditioning` and installed
+`Krea2OstrisEditModelPatch`, matching the experimental trainer's reference-token
+convention. It requires `comfy_nodes/ai_toolkit_krea_preview` to be installed in
+ComfyUI; see that directory's README for manual installation while Comfy is idle.
+No node installation or service restart happens automatically.
+
+Each sample requires one to three consecutive existing reference files:
+`ctrl_img`/`ctrl_img_1`, optionally `ctrl_img_2`, then `ctrl_img_3`. The first
+two names are aliases for one slot and cannot specify distinct paths. Missing
+references, gaps, conflicting aliases and nonexistent paths are rejected before
+saving a preview checkpoint or uploading references. **Send Prompts as Batch**
+uses individual requests, retaining each sample's references and settings.
+
+Both CFG branches share one set of VAE reference encodings. The helper encodes
+the configured negative prompt (including empty text) when CFG exceeds 1;
+otherwise it reuses the positive conditioning. `model_kwargs.kv_cache` is passed
+to the model patch (default false when absent). The node receives the model's
+`vlm_max_pixels` (default `384²`), `control_image_max_pixels` (default `1024²`),
+`match_target_res` (default false), sample width/height and model input dtype.
+References upload as canonical RGB PNGs using the common control loader. The
+background is inferred from a common Dataset Control Transparency Color, or
+set explicitly with `model_kwargs.preview_control_transparent_color: [r,g,b]`;
+mixed dataset colors require that explicit override. References retain their
+order and use the helper's native-aligned resize/filter/precision handling.
+This enables the shared RGB presentation for this Comfy preview; the ordinary
+trainer's existing control-image decoding is unchanged. It does not establish
+identical source presentation between the two loaders for every image format.
+
+Prompt, negative prompt, model/component filenames, sampler, scheduler, steps,
+CFG, seed, dimensions, LoRA strengths, absolute training-LoRA path and output
+format/quality all come from the saved form, including per-sample overrides.
+The optional **Comfy Inference LoRA** loads first; the current training adapter
+loads second at `network_multiplier` (default 1). Both affect only the diffusion
+model, leaving CLIP connected directly to the conditioner. **Helper LoRA Path**
+under Model controls the frozen training helper and is separate from the Comfy
+inference helper. Compatibility of external helper weights such as
+`krea2_general_edit_v2.safetensors` with this experimental edit path has not been
+established by selecting or rendering this template.
+
+The source graph's `ref_boost`, `ref_boost_a`, `fit_mode`, `grounding_px` and
+custom `system_prompt` knobs do not apply to this experimental template.
+Preprocessing alignment does not establish numerical or image-quality parity
+between native training and Comfy inference. This ordinary workflow uses
+`KSampler`; specialized flow trainers retain their existing native
+`ManualSigmas` / `SamplerCustomAdvanced` template and reject this one.
+
+## Source graph edit workflow
+
+Select **Krea 2 Edit LoRA (one reference)** for the separate source graph edit
+path in an ordinary `diffusion_trainer` Krea 2 job. Its template is
 `config/comfy_templates/krea2_edit_lora_sample.json.njk`, adapted from
 `tmp/krea2_identity_edit.json`.
 
@@ -57,7 +121,7 @@ the supplied values instead of adding controls:
 - Standard `VAEEncode`/`VAEDecode` with no tiled decode controls. This differs
   from the existing Krea text-to-image preview template's VAE Utils nodes.
 
-The sample control form can expose more image slots for Krea 2; this graph
+The sample control form can expose more image slots for Krea 2; this source graph
 supports only the first. The original graph's `SaveImage` is replaced with the
 existing `SaveImageWithMetaData` convention so the form's output format and
 quality apply. Its metadata scope is `full`, with batch numbering and nearest

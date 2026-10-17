@@ -1,14 +1,16 @@
 # AI Toolkit Krea edit preview helper
 
-Optional V3 ComfyUI extension for this fork's specialized Krea Flow-DPO and
-guidance-distillation previews. It requires Comfy's Krea encoder and the existing
+Optional V3 ComfyUI extension for this fork's specialized Krea Flow-DPO,
+guidance-distillation previews and ordinary experimental Krea Edit Training
+previews (`krea2_ostris_edit_lora_sample.json.njk`). It requires Comfy's Krea encoder and the existing
 `ComfyUI-Krea2-Ostris-Edit` model patch. No additional pip dependencies are needed.
 
 Copy this directory into your ComfyUI `custom_nodes` directory (or symlink it),
 then restart Comfy when no training or sampling task is using it. This repository
 does **not** install the extension or restart Comfy automatically. Until it is
-loaded, edit previews report a missing-node error; ordinary/text-to-image jobs
-do not need it. On another machine, copy the whole directory, not only nodes.py.
+loaded, these edit previews report a missing-node error; text-to-image jobs and
+the separate source graph `krea2_edit_lora_sample.json.njk` do not need it.
+On another machine, copy the whole directory, not only nodes.py.
 
 Edit references require a working VAE encoder as well as a decoder. Older
 `ComfyUI-VAE-Utils` releases that reimplement VAE initialization may omit
@@ -39,10 +41,12 @@ or installation is performed by these tests:
 conda run --no-capture-output -n ai-toolkit python -m unittest testing.test_krea_preview_v3
 ```
 
-Specialized Krea edit previews upload canonical RGB PNGs decoded with the same
-versioned loader as raw training controls. This handles indexed transparency,
+Specialized and experimental Krea edit previews upload canonical RGB PNGs decoded
+with the versioned loader used by specialized raw training controls. Ordinary
+native edit control loading is unchanged, so presentation equivalence with its
+loader is not established for every image format. The shared loader handles indexed transparency,
 16-bit grayscale, EXIF orientation and the first frame of animated images
 consistently, without changing source files. Prepared uploads use content-specific
 names; changing the source or alpha background cannot overwrite a queued reference.
 The presentation version/source identity invalidates only affected specialized
-Krea text/reference caches. Ordinary and legacy Qwen loaders remain unchanged.
+Krea text/reference caches. Other ordinary and legacy Qwen loaders remain unchanged.
