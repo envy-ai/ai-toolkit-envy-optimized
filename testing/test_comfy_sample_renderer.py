@@ -1238,7 +1238,10 @@ class ComfySampleTrainProcessTests(unittest.TestCase):
         render_start = source.index("def _render_comfy_samples")
         render_end = source.index("def _render_comfy_sample_batch", render_start)
         render_source = source[render_start:render_end]
-        loop_start = source.index("for i, gen_config in enumerate(gen_img_config_list):", render_start)
+        offload_call = source.index("self._ensure_models_offloaded_for_comfy(client)", render_start)
+        loop_start = source.index(
+            "for i, gen_config in enumerate(gen_img_config_list):", offload_call
+        )
         patch_start = source.index("patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)", render_start)
         prompt_start = source.index("prompt_id = client.post_prompt(patched_workflow)", render_start)
         before_loop = source[render_start:loop_start]

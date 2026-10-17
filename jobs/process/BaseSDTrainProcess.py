@@ -89,6 +89,7 @@ from toolkit.comfy_sample import (
     ComfyPromptWaitCancelled,
     ComfySampleRequest,
     DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
+    DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH,
     DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
@@ -960,6 +961,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         new_templates = {'anima': DEFAULT_COMFY_ANIMA_WORKFLOW_PATH,
                          'ideogram4': DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH}
         known_templates = {DEFAULT_COMFY_WORKFLOW_PATH: 'krea2', DEFAULT_COMFY_BATCH_WORKFLOW_PATH: 'krea2',
+                           DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH: 'krea2',
                            DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH: 'qwen_image_2',
                            DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH: 'qwen_image_2',
                            **{path: arch for arch, path in new_templates.items()}}
@@ -1076,6 +1078,21 @@ class BaseSDTrainProcess(BaseTrainProcess):
         is_krea_edit = (getattr(self, 'flow_profile', None) is not None
             and self.model_config.arch == 'krea2' and self.model_config.model_kwargs.get('edit', False))
         workflow_path = self._get_comfy_workflow_path(comfy_config)
+        is_krea_edit_workflow = workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH
+        if is_krea_edit_workflow:
+            if self.model_config.arch != 'krea2':
+                raise ValueError('The Krea 2 edit workflow requires a Krea 2 model.')
+            if getattr(self, 'flow_profile', None) is not None:
+                raise ValueError('The Krea 2 edit KSampler workflow is for diffusion_trainer. '
+                                 'Specialized Krea training requires the native Krea 2 preview workflow.')
+            for i, gen_config in enumerate(gen_img_config_list):
+                if not (gen_config.ctrl_img_1 or gen_config.ctrl_img):
+                    raise ValueError(f'Krea 2 edit ComfyUI sample {i + 1} is missing ctrl_img or ctrl_img_1.')
+                if (gen_config.ctrl_img_2 or gen_config.ctrl_img_3
+                        or (gen_config.ctrl_img and gen_config.ctrl_img_1
+                            and gen_config.ctrl_img != gen_config.ctrl_img_1)):
+                    raise ValueError(f'Krea 2 edit ComfyUI sample {i + 1} supports exactly one control image. '
+                                     'Use ctrl_img or ctrl_img_1, without ctrl_img_2/ctrl_img_3.')
         is_qwen_image_2_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH
         is_qwen_image_edit_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH
         is_qwen_image_edit_plus_workflow = (
@@ -1167,6 +1184,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             or is_qwen_image_edit_plus_workflow
                             or is_minimax_h3_fl2v_workflow
                             or is_krea_edit
+                            or is_krea_edit_workflow
                         )
                         else None
                     )
@@ -1302,6 +1320,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         comfy_config = sample_config.comfy
         workflow_path = self._get_comfy_workflow_path(comfy_config, batch=True)
+        if workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
+            print_acc('Krea 2 edit ComfyUI samples use individual prompts with one reference each.')
+            return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
         if workflow_path == DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH:
             print_acc(
                 "MiniMax H3 ComfyUI sampling supports optional per-prompt keyframes. "

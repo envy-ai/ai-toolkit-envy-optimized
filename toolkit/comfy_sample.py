@@ -23,6 +23,7 @@ COMFY_CACHE_MONITOR_RELEASE_PATH = "/comfyui-cache-monitor/release_vram"
 COMFY_LEGACY_FREE_PATH = "/api/free"
 DEFAULT_COMFY_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample.json.njk"
 DEFAULT_COMFY_BATCH_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample_batch_easy_use.json.njk"
+DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH = "config/comfy_templates/krea2_edit_lora_sample.json.njk"
 DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH = (
     "config/comfy_templates/qwen_image_2_lora_sample.json.njk"
 )
@@ -311,6 +312,7 @@ def build_template_context(request: Any) -> Dict[str, Any]:
         "steps": request.steps,
         "cfg": request.cfg,
         "seed": request.seed,
+        "seed_literal": str(request.seed),
         "model": request.model,
         "vae": request.vae,
         "audio_vae": request.audio_vae,
@@ -465,6 +467,14 @@ def get_workflow_for_sample(
     request: ComfySampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
+        if request.model_arch != 'krea2':
+            raise ValueError('The Krea 2 edit workflow requires a Krea 2 model.')
+        if request.specialized_flow:
+            raise ValueError('The Krea 2 edit KSampler workflow is for diffusion_trainer. '
+                             'Specialized Krea training requires the native Krea 2 preview workflow.')
+        if not request.control_image or request.control_image_2 or request.control_image_3:
+            raise ValueError('The Krea 2 edit workflow requires exactly one control image.')
     if workflow_path_is_template(workflow_path):
         workflow = render_nunjucks_workflow(workflow_path, request)
         if workflow_path == DEFAULT_COMFY_WORKFLOW_PATH:
@@ -596,6 +606,8 @@ def get_workflow_for_samples(
     request: ComfyBatchSampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
+        raise ValueError('The Krea 2 edit workflow requires individual requests with one reference each.')
     if request.specialized_flow and request.model_arch == 'krea2' and (request.model_kwargs or {}).get('edit'):
         raise ValueError('Krea edit previews require individual requests to retain per-image references.')
     if workflow_path_is_template(workflow_path):

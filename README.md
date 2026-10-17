@@ -168,6 +168,7 @@ Optional ComfyUI sample renderer requirements:
 - Both templates require [comfyui_image_metadata_extension](https://github.com/edelvarden/comfyui_image_metadata_extension) for `SaveImageWithMetaData`. Disable other metadata saver packages that register the same node name if ComfyUI loads the wrong one.
 - `krea2_lora_sample.json.njk` also requires [WAS Node Suite](https://github.com/WASasquatch/was-node-suite-comfyui) for `Seed`, `Text Multiline`, and `Text to Console`.
 - `krea2_lora_sample_batch_easy_use.json.njk` also requires [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use) for the `easy *` loop, list, string, and integer nodes.
+- The one-reference [Krea 2 edit sample workflow](docs/krea2_edit_comfy_samples.md) uses `comfyui-krea2edit`, the absolute-path LoRA loader, and the metadata saver. It keeps the supplied edit graph's fixed grounding and reference-boost settings; see the workflow documentation for form mappings and limitations.
 
 
 Linux:
