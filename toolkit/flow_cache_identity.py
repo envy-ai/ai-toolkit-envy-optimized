@@ -64,6 +64,22 @@ def component_identity_digest(payload):
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def specialized_vae_cache_identity(model):
+    """Identify the loaded VAE separately from text/transformer conditioning.
+
+    This is opt-in for MOSS target caches; changing a caption, adapter or CFG
+    must not force target images through the VAE again.
+    """
+    vae = getattr(model, 'vae', None)
+    return component_identity_digest({
+        'version': 1, 'arch': getattr(model, 'arch', None),
+        'latent_layout': 'moss_flux2_packed_bn_v1',
+        'vae': _component_info(vae),
+        'vae_dtype': str(getattr(model, 'vae_torch_dtype', None)),
+        'loaded_dtype': str(getattr(vae, 'dtype', None)),
+    })
+
+
 def resolved_semantic_components(model, processor, name_or_path):
     return {'version': 1, 'source': name_or_path, 'model': _component_info(model),
             'processor': _component_info(processor), 'local': local_component_identity(name_or_path),
@@ -132,6 +148,7 @@ def prepare_specialized_conditioning(model):
     """
     if getattr(model, 'arch', None) == 'moss_image':
         model._specialized_flow_training = True
+        model._specialized_latent_cache_identity = specialized_vae_cache_identity(model)
     if getattr(model, 'arch', None) == 'krea2' and getattr(model, 'is_edit', False):
         model.cache_processed_control_text_embeddings = True
         model._specialized_control_presentation = KREA_EDIT_CONTROL_PRESENTATION

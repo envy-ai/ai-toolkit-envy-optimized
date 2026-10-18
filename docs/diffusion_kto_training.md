@@ -82,7 +82,8 @@ same helper. It is excluded from preview samples and the saved trained LoRA.
 
 Ordinary signed-strength LoRA export and native/architecture-compatible Comfy
 previews are unchanged. Ideogram uses its selected CFG reference policy for
-previews; KTO scoring itself is conditional CFG 1.
+previews; KTO scoring itself is conditional CFG 1. MOSS specialized jobs require
+native previews and reject the Comfy renderer, including live sample-only edits.
 
 ## Examples and evidence
 
@@ -92,9 +93,10 @@ previews; KTO scoring itself is conditional CFG 1.
 - `config/examples/train_diffusion_kto_ideogram4.yaml`
 - `config/examples/train_diffusion_kto_moss_image.yaml`
 
-Replace component and dataset paths before use. Constructor fixtures check all
-four YAMLs with unequal image sizes/counts/stems. CPU fixtures exercise the real
-optimizer hook against a full-graph oracle across all four flow profiles,
+Replace component and dataset paths before use. Constructor fixtures check these
+YAMLs; the original four-model fixtures include unequal image sizes/counts/stems.
+CPU fixtures exercise the real optimizer hook against a full-graph oracle across
+the Qwen, Krea, Anima and Ideogram flow profiles,
 including Anima's integer prompt fields, class weights, deterministic stochastic
 replay, exception cleanup and checkpoint-boundary optimizer/RNG resume. They do
 not substitute for full-checkpoint gradient/export/render or quality tests.
@@ -105,6 +107,12 @@ full-graph oracle while leaving the reference and Anima conditioner frozen.
 Actual architecture key converters and safetensors reloads preserve predictions
 at signed/fractional strengths. Installed-Comfy loading and live rendering of
 these KTO exports still require their separate integration checks.
+
+MOSS has separate CPU coverage for its six example constructors, fixed shift 5,
+native packing, checkpointed transformer gradients, reference-branch guidance,
+frozen VAE decode gradients, cache identity and supported edit boundaries.
+This does not certify MOSS KTO optimizer numerics against the four-model oracle,
+full-checkpoint quality, export compatibility with external renderers or VRAM fit.
 
 Method background: [Diffusion-KTO paper](https://arxiv.org/abs/2404.04465) and
 [official SD 1.5 training code](https://github.com/jacklishufan/diffusion-kto/blob/main/train_kto_sd_v1.5.py).

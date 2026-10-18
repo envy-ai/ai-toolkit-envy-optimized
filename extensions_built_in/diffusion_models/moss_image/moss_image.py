@@ -184,6 +184,13 @@ class MossImageModel(BaseModel):
     def get_bucket_divisibility(self):
         return 16  # f8 conv + 2x2 packing
 
+    def get_latent_space_version(self):
+        version = super().get_latent_space_version()
+        identity = getattr(self, '_specialized_latent_cache_identity', None)
+        if identity is not None:
+            return f'{version}_flow_vae_v1_{identity}'
+        return version
+
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------

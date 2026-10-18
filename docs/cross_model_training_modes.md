@@ -78,6 +78,12 @@ to select the matching base source explicitly. MOSS text conditioning uses the
 Qwen3.5-9B final hidden states, with one unpadded encoder forward per prompt;
 variable prompt lengths remain separate cached tensors. An optional encoder
 override uses `model.te_name_or_path` (or `model_kwargs.text_encoder_path`).
+MOSS specialized target-latent caches also include the actual resolved VAE file
+identity, precision and packed/normalized layout. Unchanged VAE inputs retain
+their cache keys; replacing the VAE or its BatchNorm statistics invalidates
+them. The first specialized run builds these versioned target caches instead
+of trusting ordinary MOSS caches that have no VAE provenance. Other models and
+ordinary MOSS keep their existing latent-cache contracts.
 
 These objectives use one frozen base with adapters disabled for reference
 predictions, not a second full model. Sequential backward/recomputation, CPU
