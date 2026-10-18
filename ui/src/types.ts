@@ -226,6 +226,7 @@ export interface TrainConfig {
   max_denoising_steps?: number;
   do_differential_guidance?: boolean;
   differential_guidance_scale?: number;
+  pool_datasets?: boolean;
   audio_loss_multiplier?: number;
   max_loss?: number | null;
   validation_config?: ValidationConfig;
@@ -537,6 +538,13 @@ export interface CaptionProcessConfig {
     layer_offloading?: boolean;
     layer_offloading_percent?: number;
     loras?: CaptionLora[];
+    // Qwen3.8 captioner
+    mtp?: boolean;
+    mtp_depth?: number;
+    cuda_graph?: boolean;
+    vision_bf16?: boolean;
+    video_fps?: number;
+    system_prompt?: string;
   }
 }
 

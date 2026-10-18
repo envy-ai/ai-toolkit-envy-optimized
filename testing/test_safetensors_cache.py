@@ -60,17 +60,23 @@ class SafetensorsCacheTests(unittest.TestCase):
             with self.subTest(to_memory=to_memory), tempfile.TemporaryDirectory() as directory:
                 valid = Path(directory) / 'valid.safetensors'
                 broken = Path(directory) / 'broken.safetensors'
+                dataset_config = SimpleNamespace(cache_latents_num_workers=1)
                 atomic_save_file({'latent': torch.ones(2)}, valid)
                 broken.write_bytes(bytes(129504))
                 items = []
                 for cache in (valid, broken):
-                    item = SimpleNamespace(path=str(cache.with_suffix('.png')), is_latent_cached=False)
+                    item = SimpleNamespace(
+                        path=str(cache.with_suffix('.png')),
+                        is_latent_cached=False,
+                        dataset_config=dataset_config,
+                        dataloader_transforms=None,
+                    )
                     item.get_latent_path = lambda recalculate=False, cache=cache: str(cache)
                     item.load_and_process_image = Mock()
                     items.append(item)
                 dataset = LatentCachingMixin.__new__(LatentCachingMixin)
                 dataset.dataset_path = directory
-                dataset.dataset_config = SimpleNamespace(cache_latents_num_workers=1)
+                dataset.dataset_config = dataset_config
                 dataset.is_caching_latents_to_disk = True
                 dataset.is_caching_latents_to_memory = to_memory
                 dataset.file_list = items
@@ -111,7 +117,8 @@ class SafetensorsCacheTests(unittest.TestCase):
                         path.write_bytes(bytes(64))
                     else:
                         PromptEmbeds(torch.zeros(1, 2, 3)).save(str(path))
-                item = SimpleNamespace(caption=f'caption {index}', encode_control_in_text_embeddings=False,
+                item = SimpleNamespace(caption=f'caption {index}', dataset_config=dataset.dataset_config,
+                                       encode_control_in_text_embeddings=False,
                                        control_path=None, is_video=False, is_text_embedding_cached=False)
                 item.get_text_embedding_path = lambda recalculate=False, path=normal: str(path)
                 item.get_blank_text_embedding_path = lambda recalculate=False, path=blank: str(path)

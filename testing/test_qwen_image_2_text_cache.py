@@ -89,6 +89,7 @@ class QwenImage2TextCacheTests(unittest.TestCase):
             )
             dataset.transform = None
             file_item = FakeProcessedControlFileItem(tmp_dir)
+            file_item.dataset_config = dataset.dataset_config
             dataset.file_list = [file_item]
 
             TextEmbeddingCachingMixin.cache_text_embeddings(dataset)

@@ -114,6 +114,10 @@ All Qwen Image 2.1 training modes support one frozen training helper at **Model 
 Helper LoRA Path** (`model.assistant_lora_path`). The helper contributes to teacher,
 reference and student predictions and generated Fizgig/SliderSpace practice images.
 It does not train, appear in exported LoRAs, or contribute to native/Comfy previews.
+The Qwen helper accepts a local file or an `owner/repo/file` Hub path. Its strict
+import preserves split/fused MLP layers and per-layer ranks/scales. With layer
+offloading enabled it attaches before streaming starts, keeping the transformer
+on CPU during setup to avoid a temporary full-model GPU allocation.
 
 ## Preview renderers
 

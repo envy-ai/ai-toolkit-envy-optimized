@@ -2,7 +2,7 @@
 // registers in AI_TOOLKIT_MODELS. Loaded at runtime by the UI, not bundled:
 // see ui/src/extensions/README.md for the convention and the allowed imports.
 import Link from "next/link";
-import type { ModelArch } from "@/app/jobs/new/options";
+import type { CustomModelOption, ModelArch } from "@/app/jobs/new/options";
 import type { JobConfig } from "@/types";
 import {
   defaultComfySampleConfig,
@@ -12,6 +12,71 @@ import {
 
 const defaultNameOrPath = "";
 const defaultLinearRank = 32;
+
+// MOSS-Image edit LoRAs need the companion custom nodes in ComfyUI
+const mossImageEditNotes = (
+  <p>
+    Using these LoRAs in ComfyUI requires{" "}
+    <a
+      href="https://github.com/ostris/ComfyUI-MOSS-Image-Ostris-Edit"
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-400 hover:text-blue-300 underline"
+    >
+      ComfyUI-MOSS-Image-Ostris-Edit
+    </a>
+    .
+  </p>
+);
+
+// Qwen-Image-2.1 and its turbo distill share the RGBA VAE, so both entries
+// carry this option
+const qwenImage21TransparencyOption: CustomModelOption[] = [
+  {
+    type: "checkbox",
+    label: "Transparency (RGBA)",
+    getValue: (config: JobConfig) =>
+      config?.config?.process?.[0]?.model?.model_kwargs?.rgba ?? false,
+    onChange: (
+      value: boolean,
+      config: JobConfig,
+      setJobConfig: (value: any, key: string) => void,
+    ) => {
+      const kwargs = {
+        ...(config?.config?.process?.[0]?.model?.model_kwargs ?? {}),
+      };
+      if (value) {
+        kwargs.rgba = true;
+      } else {
+        delete kwargs.rgba;
+      }
+      setJobConfig(kwargs, "config.process[0].model.model_kwargs");
+    },
+    doc: {
+      title: "Transparency (RGBA)",
+      description: (
+        <div className="space-y-2">
+          <p>
+            This model&apos;s VAE is natively RGBA, so alpha can be carried
+            end to end. When on, dataset images and reference images load
+            with their alpha channel, the VAE encodes all four channels, and
+            samples are saved as PNGs with their transparency intact.
+          </p>
+          <p>
+            Images with no alpha of their own get a fully opaque one, so a
+            mixed dataset is fine. Turn this off to train and sample flat
+            RGB: alpha is dropped on the way in and added back as opaque.
+          </p>
+          <p>
+            Changing this re-caches latents, and it cannot be combined with
+            a dataset using <code>alpha_mask</code>, which consumes the
+            alpha channel as a loss mask instead.
+          </p>
+        </div>
+      ),
+    },
+  },
+];
 
 export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
   ...([['instruct', 2.5], ['base', 5.0]] as const).map(([variant, guidance]): ModelArch => ({
@@ -638,52 +703,56 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
       "model.layer_offloading",
       "model.qie.match_target_res",
     ],
-    customModelSelectOptions: [
-      {
-        type: "checkbox",
-        label: "Transparency (RGBA)",
-        getValue: (config: JobConfig) =>
-          config?.config?.process?.[0]?.model?.model_kwargs?.rgba ?? false,
-        onChange: (
-          value: boolean,
-          config: JobConfig,
-          setJobConfig: (value: any, key: string) => void,
-        ) => {
-          const kwargs = {
-            ...(config?.config?.process?.[0]?.model?.model_kwargs ?? {}),
-          };
-          if (value) {
-            kwargs.rgba = true;
-          } else {
-            delete kwargs.rgba;
-          }
-          setJobConfig(kwargs, "config.process[0].model.model_kwargs");
+    customModelSelectOptions: qwenImage21TransparencyOption,
+  },
+  {
+    name: "qwen_image_2:turbo",
+    label: "Qwen-Image-2.1 Turbo (w/ Training Adapter)",
+    generateNameOverride: "Qwen-Image-2.1 Turbo",
+    group: "image",
+    defaults: {
+      // default updates when [selected, unselected] in the UI
+      // the turbo weight file in the repack (text encoder and VAE come from
+      // the same repack); model_kwargs.turbo selects the turbo schedule
+      "config.process[0].model.name_or_path": [
+        "Comfy-Org/Qwen-Image-2.1/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors",
+        defaultNameOrPath,
+      ],
+      "config.process[0].model.quantize": [true, false],
+      "config.process[0].model.quantize_te": [true, false],
+      "config.process[0].model.low_vram": [true, false],
+      "config.process[0].train.unload_text_encoder": [false, false],
+      "config.process[0].sample.sampler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.noise_scheduler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.timestep_type": ["shift", "sigmoid"],
+      "config.process[0].model.qtype": ["convrot8", "qfloat8"],
+      "config.process[0].model.qtype_te": ["convrot8", "qfloat8"],
+      // training adapter: live on the DiT while training, off while sampling
+      "config.process[0].model.assistant_lora_path": [
+        'ostris/qwen_image_2_turbo_training_adapter/qwen_image_2_turbo_training_adapter_v1.safetensors',
+        undefined
+      ],
+      // the turbo checkpoint samples with its own fixed 8-step schedule at
+      // CFG 1; the step count here is informational
+      "config.process[0].sample.guidance_scale": [1.0, 4.0],
+      "config.process[0].sample.sample_steps": [8, 25],
+      "config.process[0].model.model_kwargs": [
+        {
+          turbo: true,
+          rgba: false,
         },
-        doc: {
-          title: "Transparency (RGBA)",
-          description: (
-            <div className="space-y-2">
-              <p>
-                This model&apos;s VAE is natively RGBA, so alpha can be carried
-                end to end. When on, dataset images and reference images load
-                with their alpha channel, the VAE encodes all four channels, and
-                samples are saved as PNGs with their transparency intact.
-              </p>
-              <p>
-                Images with no alpha of their own get a fully opaque one, so a
-                mixed dataset is fine. Turn this off to train and sample flat
-                RGB: alpha is dropped on the way in and added back as opaque.
-              </p>
-              <p>
-                Changing this re-caches latents, and it cannot be combined with
-                a dataset using <code>alpha_mask</code>, which consumes the
-                alpha channel as a loss mask instead.
-              </p>
-            </div>
-          ),
-        },
-      },
+        {},
+      ],
+    },
+    disableSections: ["network.conv", "train.unload_text_encoder"],
+    additionalSections: [
+      "datasets.multi_control_paths",
+      "sample.multi_ctrl_imgs",
+      "model.low_vram",
+      "model.layer_offloading",
+      "model.assistant_lora_path",
     ],
+    customModelSelectOptions: qwenImage21TransparencyOption,
   },
   {
     name: "ming_image",
@@ -1732,6 +1801,240 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
     ],
   },
   {
+    name: "flux3",
+    label: "FLUX.3 Image Klein (base)",
+    group: "image",
+    gateUrl: "https://huggingface.co/black-forest-labs/flux-3-image-klein-base",
+    defaults: {
+      // default updates when [selected, unselected] in the UI
+      "config.process[0].model.name_or_path": [
+        "black-forest-labs/flux-3-image-klein-base",
+        defaultNameOrPath,
+      ],
+      "config.process[0].model.quantize": [true, false],
+      "config.process[0].model.qtype": ["convrot8", "qfloat8"],
+      "config.process[0].model.quantize_te": [true, false],
+      "config.process[0].model.qtype_te": ["convrot8", "qfloat8"],
+      "config.process[0].model.low_vram": [true, false],
+      "config.process[0].sample.sampler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.noise_scheduler": ["flowmatch", "flowmatch"],
+      "config.process[0].sample.width": [1024, 1024],
+      "config.process[0].sample.height": [1024, 1024],
+      "config.process[0].sample.guidance_scale": [3.5, 4],
+      "config.process[0].sample.sample_steps": [28, 25],
+      "config.process[0].train.timestep_type": ["shift", "sigmoid"],
+      "config.process[0].model.model_kwargs": [
+        {
+          match_target_res: true,
+        },
+        {},
+      ],
+    },
+    disableSections: ["network.conv"],
+    additionalSections: [
+      "datasets.multi_control_paths",
+      "sample.multi_ctrl_imgs",
+      "model.layer_offloading",
+      "model.low_vram",
+      "model.qie.match_target_res",
+    ],
+  },
+  {
+    name: "moss_image",
+    label: "MOSS-Image SFT",
+    group: "image",
+    defaults: {
+      // default updates when [selected, unselected] in the UI
+      // the vendor repo: its transformer is merged once into the comfy models
+      // folder; a .safetensors path (fine-tune / int8 convrot repack) loads as named
+      "config.process[0].model.name_or_path": [
+        "OpenMOSS-Team/MOSS-Image-SFT",
+        defaultNameOrPath,
+      ],
+      "config.process[0].model.quantize": [true, false],
+      "config.process[0].model.qtype": ["convrot8", "qfloat8"],
+      // Qwen3.5-9B text encoder
+      "config.process[0].model.quantize_te": [true, false],
+      "config.process[0].model.qtype_te": ["convrot8", "qfloat8"],
+      "config.process[0].model.low_vram": [true, false],
+      "config.process[0].sample.sampler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.noise_scheduler": ["flowmatch", "flowmatch"],
+      "config.process[0].sample.width": [1024, 1024],
+      "config.process[0].sample.height": [1024, 1024],
+      // vendor defaults: CFG 3 with block 22 skipped on the negative branch
+      "config.process[0].sample.guidance_scale": [3, 4],
+      "config.process[0].sample.sample_steps": [30, 25],
+      "config.process[0].train.timestep_type": ["shift", "sigmoid"],
+      // sampling: the CFG negative branch skips these DiT blocks (zero-based)
+      "config.process[0].model.model_kwargs": [
+        {
+          uncond_skip_layers: [22],
+        },
+        {},
+      ],
+      // keep the LoRA off the block the negative branch skips, so CFG's
+      // skipped-block contrast stays the base model's
+      "config.process[0].network.network_kwargs.ignore_if_contains": [
+        ["layers.22."],
+        [],
+      ],
+    },
+    disableSections: ["network.conv"],
+    additionalSections: ["model.layer_offloading", "model.low_vram"],
+  },
+  {
+    name: "moss_image:base",
+    label: "MOSS-Image Base",
+    generateNameOverride: "MOSS-Image Base",
+    group: "image",
+    defaults: {
+      // default updates when [selected, unselected] in the UI
+      // the vendor repo: Comfy-Org/MOSS-Image base files on disk win, else the
+      // repack's bf16 (identical weights) is downloaded
+      "config.process[0].model.name_or_path": [
+        "OpenMOSS-Team/MOSS-Image-Base",
+        defaultNameOrPath,
+      ],
+      "config.process[0].model.quantize": [true, false],
+      "config.process[0].model.qtype": ["convrot8", "qfloat8"],
+      // Qwen3.5-9B text encoder
+      "config.process[0].model.quantize_te": [true, false],
+      "config.process[0].model.qtype_te": ["convrot8", "qfloat8"],
+      "config.process[0].model.low_vram": [true, false],
+      "config.process[0].sample.sampler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.noise_scheduler": ["flowmatch", "flowmatch"],
+      "config.process[0].sample.width": [1024, 1024],
+      "config.process[0].sample.height": [1024, 1024],
+      // vendor defaults: CFG 3 with block 22 skipped on the negative branch
+      "config.process[0].sample.guidance_scale": [3, 4],
+      "config.process[0].sample.sample_steps": [30, 25],
+      "config.process[0].train.timestep_type": ["shift", "sigmoid"],
+      // sampling: the CFG negative branch skips these DiT blocks (zero-based)
+      "config.process[0].model.model_kwargs": [
+        {
+          uncond_skip_layers: [22],
+        },
+        {},
+      ],
+      // keep the LoRA off the block the negative branch skips, so CFG's
+      // skipped-block contrast stays the base model's
+      "config.process[0].network.network_kwargs.ignore_if_contains": [
+        ["layers.22."],
+        [],
+      ],
+    },
+    disableSections: ["network.conv"],
+    additionalSections: ["model.layer_offloading", "model.low_vram"],
+  },
+  {
+    name: "moss_image:edit",
+    label: "MOSS-Image SFT [Edit Training]",
+    generateNameOverride: "MOSS-Image SFT Edit",
+    group: "experimental",
+    modelNotes: mossImageEditNotes,
+    defaults: {
+      // default updates when [selected, unselected] in the UI
+      "config.process[0].model.name_or_path": [
+        "OpenMOSS-Team/MOSS-Image-SFT",
+        defaultNameOrPath,
+      ],
+      "config.process[0].model.quantize": [true, false],
+      "config.process[0].model.qtype": ["convrot8", "qfloat8"],
+      // Qwen3.5-9B text encoder + vision tower (references ride in the prompt)
+      "config.process[0].model.quantize_te": [true, false],
+      "config.process[0].model.qtype_te": ["convrot8", "qfloat8"],
+      "config.process[0].model.low_vram": [true, false],
+      // prompt embeds depend on the control images, so the TE stays loaded
+      "config.process[0].train.unload_text_encoder": [false, false],
+      "config.process[0].sample.sampler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.noise_scheduler": ["flowmatch", "flowmatch"],
+      "config.process[0].sample.width": [1024, 1024],
+      "config.process[0].sample.height": [1024, 1024],
+      "config.process[0].sample.guidance_scale": [3, 4],
+      "config.process[0].sample.sample_steps": [30, 25],
+      "config.process[0].train.timestep_type": ["shift", "sigmoid"],
+      // edit: references as clean t=0 latents + in the prompt; kv_cache:
+      // references attend only to themselves, so sampling computes their K/V
+      // once (must be trained that way)
+      "config.process[0].model.model_kwargs": [
+        {
+          edit: true,
+          kv_cache: true,
+          match_target_res: true,
+          uncond_skip_layers: [22],
+        },
+        {},
+      ],
+      "config.process[0].network.network_kwargs.ignore_if_contains": [
+        ["layers.22."],
+        [],
+      ],
+    },
+    disableSections: ["network.conv", "train.unload_text_encoder"],
+    additionalSections: [
+      "datasets.multi_control_paths",
+      "sample.multi_ctrl_imgs",
+      "model.low_vram",
+      "model.layer_offloading",
+      "model.qie.match_target_res",
+      "model.model_kwargs.kv_cache",
+    ],
+  },
+  {
+    name: "moss_image:base_edit",
+    label: "MOSS-Image Base [Edit Training]",
+    generateNameOverride: "MOSS-Image Base Edit",
+    group: "experimental",
+    modelNotes: mossImageEditNotes,
+    defaults: {
+      // default updates when [selected, unselected] in the UI
+      "config.process[0].model.name_or_path": [
+        "OpenMOSS-Team/MOSS-Image-Base",
+        defaultNameOrPath,
+      ],
+      "config.process[0].model.quantize": [true, false],
+      "config.process[0].model.qtype": ["convrot8", "qfloat8"],
+      // Qwen3.5-9B text encoder + vision tower (references ride in the prompt)
+      "config.process[0].model.quantize_te": [true, false],
+      "config.process[0].model.qtype_te": ["convrot8", "qfloat8"],
+      "config.process[0].model.low_vram": [true, false],
+      // prompt embeds depend on the control images, so the TE stays loaded
+      "config.process[0].train.unload_text_encoder": [false, false],
+      "config.process[0].sample.sampler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.noise_scheduler": ["flowmatch", "flowmatch"],
+      "config.process[0].sample.width": [1024, 1024],
+      "config.process[0].sample.height": [1024, 1024],
+      "config.process[0].sample.guidance_scale": [3, 4],
+      "config.process[0].sample.sample_steps": [30, 25],
+      "config.process[0].train.timestep_type": ["shift", "sigmoid"],
+      // edit: references as clean t=0 latents + in the prompt; kv_cache:
+      // references attend only to themselves, so sampling computes their K/V
+      // once (must be trained that way)
+      "config.process[0].model.model_kwargs": [
+        {
+          edit: true,
+          kv_cache: true,
+          match_target_res: true,
+          uncond_skip_layers: [22],
+        },
+        {},
+      ],
+      "config.process[0].network.network_kwargs.ignore_if_contains": [
+        ["layers.22."],
+        [],
+      ],
+    },
+    disableSections: ["network.conv", "train.unload_text_encoder"],
+    additionalSections: [
+      "datasets.multi_control_paths",
+      "sample.multi_ctrl_imgs",
+      "model.low_vram",
+      "model.layer_offloading",
+      "model.qie.match_target_res",
+      "model.model_kwargs.kv_cache",
+    ],
+  },
+  {
     name: "flux2_klein_4b",
     label: "FLUX.2-klein-base-4B",
     group: "image",
@@ -1974,6 +2277,29 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
     },
     disableSections: ["network.conv"],
     additionalSections: ["model.low_vram", "model.layer_offloading", "model.text_encoder_path"],
+  },
+  {
+    name: "iris3b",
+    label: "Iris-3B (pixel space)",
+    group: "image",
+    defaults: {
+      "config.process[0].model.name_or_path": [
+        "speridlabs/iris-3b",
+        defaultNameOrPath,
+      ],
+      "config.process[0].model.quantize": [true, false],
+      "config.process[0].model.quantize_te": [true, false],
+      "config.process[0].model.qtype": ["convrot8", "qfloat8"],
+      "config.process[0].model.qtype_te": ["convrot8", "qfloat8"],
+      "config.process[0].train.timestep_type": ["shift", "sigmoid"],
+      "config.process[0].sample.guidance_scale": [3, 4],
+      "config.process[0].sample.sample_steps": [30, 25],
+      "config.process[0].network.conv": [undefined, 16],
+      "config.process[0].network.conv_alpha": [undefined, 16],
+      "config.process[0].model.low_vram": [true, false],
+    },
+    disableSections: ["network.conv"],
+    additionalSections: ["model.low_vram", "model.layer_offloading"],
   },
   {
     name: "krea2",

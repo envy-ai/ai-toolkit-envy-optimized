@@ -20,10 +20,13 @@ from .ideogram4 import Ideogram4Model
 from .prx_pixel_t2i import PRXPixelT2IModel
 from .iris import IrisModel
 from .krea2 import Krea2Model
+from .iris3b import Iris3BModel
 from .boogu_image import BooguImageModel, BooguImageEditModel
 from .mageflow import MageFlowModel, MageFlowEditModel
 from .minimax_h3 import MinimaxH3Model, MinimaxH3Ref2VAModel, MinimaxH3FastModel
 from .hunyuan_image_3 import HunyuanImage3InstructModel, HunyuanImage3BaseModel
+from .flux3 import Flux3Model
+from .moss_image import MossImageModel
 
 AI_TOOLKIT_MODELS = [
     # put a list of models here
@@ -59,6 +62,7 @@ AI_TOOLKIT_MODELS = [
     PRXPixelT2IModel,
     IrisModel,
     Krea2Model,
+    Iris3BModel,
     BooguImageModel,
     BooguImageEditModel,
     MageFlowModel,
@@ -68,4 +72,6 @@ AI_TOOLKIT_MODELS = [
     MinimaxH3FastModel,
     HunyuanImage3InstructModel,
     HunyuanImage3BaseModel,
+    Flux3Model,
+    MossImageModel,
 ]

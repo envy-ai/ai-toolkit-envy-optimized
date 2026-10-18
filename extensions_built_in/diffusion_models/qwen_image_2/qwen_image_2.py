@@ -19,12 +19,21 @@ see the sampled timestep.
 
 Flow-matching convention matches ai-toolkit (t=1 noise -> t=0 clean, target =
 noise - clean), so `get_noise_prediction` does no time flip or negation.
+
+Qwen-Image-2.1-Turbo is the same architecture distilled to 8 steps at CFG 1.
+Point `name_or_path` at its weight file in the repack
+(`Comfy-Org/Qwen-Image-2.1/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors`);
+`model_kwargs.turbo` samples with the schedule the checkpoint ships. Training
+it goes through a training adapter
+(`assistant_lora_path`): a LoRA that is live on the DiT while training and
+off while sampling, so samples show the turbo model plus what was trained.
 """
 
 import hashlib
 import os
 from typing import TYPE_CHECKING, List, Optional
 
+import huggingface_hub
 import numpy as np
 import torch
 from PIL import Image
@@ -81,6 +90,16 @@ scheduler_config = {
 # configs and the processor, which the repack does not carry
 COMFY_REPO = "Comfy-Org/Qwen-Image-2.1"
 BASE_REPO = "Qwen/Qwen-Image-2.1"
+
+# the turbo checkpoint is sampled with the schedule it ships
+# (TURBO_SAMPLE_SIGMAS in src/pipeline.py) as-is: no resolution shift, no
+# terminal stretch; the step count is fixed
+turbo_scheduler_config = {
+    **scheduler_config,
+    "shift": 1.0,
+    "shift_terminal": None,
+    "use_dynamic_shifting": False,
+}
 
 # decode above this many output pixels goes through the VAE's tiled path
 TILE_DECODE_ABOVE_PIXELS = 1024 * 1024
@@ -164,6 +183,15 @@ class QwenImage2Model(BaseModel):
     def get_train_scheduler():
         return CustomFlowMatchEulerDiscreteScheduler(**scheduler_config)
 
+    @property
+    def is_turbo(self) -> bool:
+        return bool(self.model_config.model_kwargs.get("turbo", False))
+
+    def get_sample_scheduler(self):
+        if self.is_turbo:
+            return CustomFlowMatchEulerDiscreteScheduler(**turbo_scheduler_config)
+        return self.get_train_scheduler()
+
     def get_bucket_divisibility(self):
         # 16 for the VAE, 2 more because the DiT groups target latent tokens
         # into 2x2 blocks, one per vision slot
@@ -195,15 +223,46 @@ class QwenImage2Model(BaseModel):
         ):
             raise FileNotFoundError(f"Qwen-Image 2.1 text encoder not found: {text_encoder_path}")
         assistant_path = self.model_config.assistant_lora_path
-        if assistant_path and not os.path.isfile(assistant_path):
+        if assistant_path and os.path.isabs(assistant_path) and not os.path.isfile(assistant_path):
             raise FileNotFoundError(f"Qwen-Image 2.1 training adapter not found: {assistant_path}")
 
+        load_kwargs = self.component_load_kwargs("transformer")
         self.print_and_status_update("Loading transformer")
-        transformer = QwenImage21Transformer2DModel.load(
-            model_path,
-            config_path=base_model_path,
-            **self.component_load_kwargs("transformer"),
-        )
+        if not assistant_path:
+            transformer = QwenImage21Transformer2DModel.load(
+                model_path, config_path=base_model_path, **load_kwargs
+            )
+        else:
+            # the adapter stays a live LoRA on the quantized linears, attached
+            # after quantization (it must wrap the quantized forward) and
+            # before layer offloading (the offloader routes through it)
+            offload = load_kwargs.pop("offload", 0.0)
+            transformer = QwenImage21Transformer2DModel.load_model(
+                model_path,
+                dtype=load_kwargs["dtype"],
+                config_path=base_model_path,
+                qtype=(load_kwargs.get("qtype") or "").split("|", 1)[0] or None,
+                quantize_on_load=False,
+            )
+            post_load_kwargs = dict(load_kwargs)
+            if offload and offload > 0:
+                # Delay streaming until the adapter is attached without placing
+                # the entire transformer on the GPU in the meantime.
+                post_load_kwargs["device"] = "cpu"
+            transformer.aitk_post_load(offload=0.0, **post_load_kwargs)
+            self.model = transformer
+            self.text_encoder = []
+            self.pipeline = QwenImage21Pipeline(self)
+            self.load_training_adapter()
+            if offload and offload > 0:
+                from toolkit.memory_management import MemoryManager
+
+                MemoryManager.attach(
+                    transformer,
+                    torch.device(load_kwargs["quantize_device"]),
+                    offload_percent=offload,
+                    ignore_modules=list(transformer.get_offload_ignore_modules() or []),
+                )
         flush()
 
         self.print_and_status_update("Loading text encoder")
@@ -238,12 +297,24 @@ class QwenImage2Model(BaseModel):
         self.model = transformer
         self.prompt_encoder = QwenImage21PromptEncoder(text_encoder, processor)
         self.pipeline = QwenImage21Pipeline(self)
-        if assistant_path:
-            self.print_and_status_update("Loading Qwen-Image 2.1 training adapter")
-            self.assistant_lora = load_assistant_lora_from_path(
-                assistant_path, self, strict=True
-            )
         self.print_and_status_update("Model Loaded")
+
+    def load_training_adapter(self):
+        """Attach the frozen helper before offloading, using strict fork conversion."""
+        adapter_path = self.model_config.assistant_lora_path
+        if not os.path.isfile(adapter_path):
+            parts = adapter_path.split("/")
+            if len(parts) != 3:
+                raise ValueError(f"Assistant LoRA path is not a local file or owner/repo/file: {adapter_path}")
+            adapter_path = huggingface_hub.hf_hub_download(
+                repo_id="/".join(parts[:2]), filename=parts[2]
+            )
+            self.model_config.assistant_lora_path = adapter_path
+        self.print_and_status_update("Loading Qwen-Image 2.1 training adapter")
+        self.assistant_lora = load_assistant_lora_from_path(
+            adapter_path, self, strict=True, is_ara=True
+        )
+        self.invert_assistant_lora = False
 
     def convert_assistant_lora_weights_before_load(self, state_dict):
         """Fuse diffusers' split MLP LoRAs into the Comfy gate_up projection."""

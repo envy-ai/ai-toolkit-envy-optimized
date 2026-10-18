@@ -41,7 +41,12 @@ class QwenImage2TrainingAdapterTests(unittest.TestCase):
         model.arch = 'qwen_image_2'
         model.target_lora_modules = ['QwenImage21Transformer2DModel']
         model.use_old_lokr_format = False
-        model.component_load_kwargs = Mock(return_value={})
+        model.component_load_kwargs = Mock(side_effect=lambda component: {
+            'dtype': torch.float32,
+            'device': torch.device('cuda') if component == 'transformer' else torch.device('cpu'),
+            'quantize_device': torch.device('cpu'),
+            'offload': 0.25 if component == 'transformer' else 0.0,
+        })
         model.print_and_status_update = Mock()
         return model
 
@@ -59,7 +64,11 @@ class QwenImage2TrainingAdapterTests(unittest.TestCase):
             model.text_encoder = []
             # Qwen's minimal pipeline does not expose transformer/text_encoder.
             model.pipeline = SimpleNamespace()
-            assistant = load_assistant_lora_from_path(str(path), model, strict=True)
+            assistant = load_assistant_lora_from_path(
+                str(path), model, strict=True, is_ara=True
+            )
+            base_layer_helper = model.model.transformer_blocks[0].attn.to_q.ara_lora_ref()
+            self.assertIn(base_layer_helper, assistant.unet_loras)
             inputs = torch.ones(1, 2)
             self.assertTrue(torch.equal(model.model(inputs), torch.full((1, 2), 2.0)))
             self.assertTrue(all(not param.requires_grad for param in assistant.parameters()))
@@ -135,23 +144,50 @@ class QwenImage2TrainingAdapterTests(unittest.TestCase):
                 text_encoder_path=str(encoder_path), assistant_lora_path=str(assistant_path)
             )
             module = 'extensions_built_in.diffusion_models.qwen_image_2.qwen_image_2'
-            with patch(module + '.QwenImage21Transformer2DModel.load') as transformer_load, \
+            events = []
+            transformer = Mock()
+            assistant = Mock()
+            transformer.aitk_post_load.side_effect = lambda **kwargs: events.append(('post_load', kwargs))
+            transformer.get_offload_ignore_modules.return_value = ['keep_resident']
+            with patch(module + '.QwenImage21Transformer2DModel.load_model',
+                       side_effect=lambda *args, **kwargs: (events.append(('transformer_load', args, kwargs)) or transformer)) as transformer_load, \
                  patch(module + '.QwenImage21TextEncoder.load_processor') as processor_load, \
                  patch(module + '.QwenImage21TextEncoder.load_model') as encoder_load, \
                  patch(module + '.AutoencoderKLQwenImage21.load'), \
-                 patch(module + '.load_assistant_lora_from_path') as assistant_load, \
+                 patch(module + '.load_assistant_lora_from_path',
+                       side_effect=lambda *args, **kwargs: (events.append(('assistant_load', args, kwargs)) or assistant)) as assistant_load, \
+                 patch('toolkit.memory_management.MemoryManager.attach',
+                       side_effect=lambda *args, **kwargs: events.append(('attach', args, kwargs))) as attach, \
                  patch.object(QwenImage2Model, 'get_train_scheduler'), \
                  patch(module + '.flush'):
                 model.load_model()
+
+            self.assertEqual([event[0] for event in events], [
+                'transformer_load', 'post_load', 'assistant_load', 'attach'
+            ])
+            _, load_args, load_call_kwargs = events[0]
+            self.assertEqual(load_args, (model.model_config.name_or_path,))
+            self.assertEqual(load_call_kwargs['dtype'], torch.float32)
+            self.assertEqual(load_call_kwargs['config_path'], 'Qwen/Qwen-Image-2.1')
+            self.assertEqual(load_call_kwargs['quantize_on_load'], False)
+            self.assertEqual(events[1][1]['offload'], 0.0)
+            self.assertEqual(events[1][1]['device'], 'cpu')
+            self.assertEqual(events[2][2], {'strict': True, 'is_ara': True})
+            attach.assert_called_once_with(
+                transformer, torch.device('cpu'), offload_percent=0.25,
+                ignore_modules=['keep_resident'],
+            )
 
             encoder_load.assert_called_once_with(
                 str(encoder_path), dtype=torch.float32, subfolder='text_encoder',
                 config_path='Qwen/Qwen-Image-2.1',
             )
             processor_load.assert_called_once_with('Qwen/Qwen-Image-2.1')
-            assistant_load.assert_called_once_with(str(assistant_path), model, strict=True)
-            self.assertIs(model.assistant_lora, assistant_load.return_value)
-            self.assertIs(model.model, transformer_load.return_value)
+            assistant_load.assert_called_once_with(
+                str(assistant_path), model, strict=True, is_ara=True
+            )
+            self.assertIs(model.assistant_lora, assistant)
+            self.assertIs(model.model, transformer)
 
     def test_missing_paths_fail_before_loading_transformer(self):
         for config in (

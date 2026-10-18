@@ -77,7 +77,7 @@ def _assistant_lora_is_transformer_only(layer_names: list[str]) -> bool:
 
 
 def load_assistant_lora_from_path(
-    adapter_path, sd: 'StableDiffusion | BaseModel', strict: bool = False
+    adapter_path, sd: 'StableDiffusion | BaseModel', strict: bool = False, *, is_ara: bool = False
 ) -> LoRASpecialNetwork:
     is_flux_style_model = sd.is_flux or getattr(sd, "is_transformer", False)
     if not is_flux_style_model:
@@ -149,6 +149,7 @@ def load_assistant_lora_from_path(
         network_type=network_config.type,
         transformer_only=network_config.transformer_only,
         is_assistant_adapter=True,
+        is_ara=is_ara,
         base_model=sd,
     )
     # A fused projection can require a different rank from the other layers.
