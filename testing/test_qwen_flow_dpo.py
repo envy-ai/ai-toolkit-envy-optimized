@@ -13,6 +13,7 @@ from extensions_built_in.sd_trainer.QwenFlowDPOTrainer import (
     QwenFlowDPOTrainer, flow_dpo_terms,
 )
 from toolkit.dataloader_mixins import LatentCachingFileItemDTOMixin
+from toolkit.dataset_validation import DatasetValidationError
 
 
 class QwenFlowDPOTests(unittest.TestCase):
@@ -71,7 +72,7 @@ class QwenFlowDPOTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Control Dataset 1|positive dataset"):
             QwenFlowDPOTrainer(0, None, config)
 
-    def test_edit_source_must_match_each_pair(self):
+    def test_empty_edit_source_is_rejected_before_model_loading(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             win, lose, source = (root / name for name in ("win", "lose", "source"))
@@ -85,7 +86,7 @@ class QwenFlowDPOTests(unittest.TestCase):
                 "datasets": [{"folder_path": str(win), "control_path_1": str(lose),
                               "control_path_2": str(source), "cache_latents_to_disk": True}],
             }
-            with self.assertRaisesRegex(ValueError, "one edit source"):
+            with self.assertRaisesRegex(DatasetValidationError, "Folder has no usable images"):
                 QwenFlowDPOTrainer(0, None, config)
 
     def test_invalid_dataset_loss_weights_fail_before_base_initialization(self):

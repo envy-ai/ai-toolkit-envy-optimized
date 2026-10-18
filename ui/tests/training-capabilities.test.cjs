@@ -29,7 +29,7 @@ function config(arch, type, network = 'lora') {
 test('capability matrix agrees with Python and supports all objectives without duplicate legacy choices', () => {
   const backend = fs.readFileSync(path.resolve(__dirname, '../../toolkit/training_capabilities.py'), 'utf8');
   const declarations = [...backend.matchAll(/'([^']+)': FlowTrainingCapability\('([^']+)', (\d+)([^\n]*)/g)];
-  assert.equal(declarations.length, 4);
+  assert.equal(declarations.length, 5);
   for (const [, arch, label, bucket, options] of declarations) {
     assert.deepEqual(caps.flowTrainingModels[arch], { label, bucketDivisibility: Number(bucket), editReferences: options.includes('edit_references=True') });
     for (const mode of modes) {
@@ -105,9 +105,44 @@ test('paired targets are not edit references and unsupported actual edit fields 
     process.datasets = [{ folder_path: '/preferred', control_path_1: '/rejected' }];
     assert.deepEqual(caps.validateTrainingCapabilities(job), []);
     process.datasets[0].control_path_2 = '/source';
-    if (arch === 'krea2') process.model.model_kwargs.edit = true;
-    assert.equal(caps.validateTrainingCapabilities(job).length, ['krea2', 'qwen_image_2'].includes(arch) ? 0 : 1);
+    if (arch === 'krea2' || arch === 'moss_image') process.model.model_kwargs.edit = true;
+    assert.equal(caps.validateTrainingCapabilities(job).length, ['krea2', 'qwen_image_2', 'moss_image'].includes(arch) ? 0 : 1);
   }
+});
+
+test('MOSS variants normalize correctly and architecture switching retains shared settings', () => {
+  const variants = {
+    moss_image: [false, false],
+    'moss_image:base': [false, false],
+    'moss_image:edit': [true, true],
+    'moss_image:base_edit': [true, true],
+  };
+  for (const [variant, [edit, kvCache]] of Object.entries(variants)) {
+    const effective = caps.effectiveFlowModel({ arch: variant, model_kwargs: { custom: true } });
+    assert.equal(effective.arch, 'moss_image');
+    assert.equal(effective.model_kwargs.edit ?? false, edit);
+    assert.equal(effective.model_kwargs.kv_cache ?? false, kvCache);
+    assert.deepEqual(effective.model_kwargs.uncond_skip_layers, [22]);
+    assert.equal(caps.flowTrainingModelOptions.some(option => option.value === variant), true);
+
+    for (const mode of modes) {
+      const job = config(variant, mode);
+      const errors = caps.validateTrainingCapabilities(job);
+      assert.equal(errors.length === 0, !edit || ['flow_dpo', 'guidance_distillation'].includes(mode), `${variant}: ${mode}: ${errors}`);
+    }
+  }
+
+  const editJob = config('moss_image:edit', 'flow_dpo');
+  editJob.config.process[0].datasets = [{ folder_path: '/preferred', control_path_1: '/rejected', control_path_2: '/source' }];
+  assert.deepEqual(caps.validateTrainingCapabilities(editJob), []);
+  const { config: switched } = caps.switchSpecializedArchitecture(editJob, 'moss_image:base_edit');
+  const process = switched.config.process[0];
+  assert.equal(process.model.arch, 'moss_image:base_edit');
+  assert.equal(process.model.model_kwargs.edit, true);
+  assert.equal(process.model.model_kwargs.kv_cache, true);
+  assert.equal(process.model.name_or_path, '');
+  assert.equal(process.datasets[0].control_path_1, '/rejected');
+  assert.equal(process.datasets[0].control_path_2, undefined);
 });
 
 test('architecture switching preserves pairs, prompts and memory options but never swaps in a checkpoint', () => {

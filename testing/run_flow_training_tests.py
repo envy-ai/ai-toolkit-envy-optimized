@@ -23,6 +23,7 @@ import torch
 import triton
 
 DEFAULT_TESTS = [
+    'testing.test_moss_image_modes',
     'testing.test_flow_training_contract', 'testing.test_fizgig_slider',
     'testing.test_fizgig_multipoint', 'testing.test_fizgig_anchors',
     'testing.test_qwen_flow_dpo', 'testing.test_qwen_guidance_distillation',

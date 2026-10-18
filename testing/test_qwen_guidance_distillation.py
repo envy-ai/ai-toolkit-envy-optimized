@@ -64,6 +64,28 @@ class CacheItem(TextEmbeddingFileItemDTOMixin):
 
 
 class GuidanceDistillationTests(unittest.TestCase):
+    def test_moss_reference_teacher_branches_skip_block_22_but_positive_and_student_do_not(self):
+        for objective in ('full_guidance', 'negative_only'):
+            with self.subTest(objective=objective):
+                trainer, _, batch, seen = self.make_trainer(objective)
+                trainer.sd.arch = 'moss_image'
+                trainer.sd.uncond_skip_layers = (22,)
+                # Full-guidance also needs a teacher negative branch; negative-only
+                # additionally evaluates the blank branch for cancellation.
+                trainer._teacher_embeds = lambda _: (
+                    embeds(1), None if objective == 'full_guidance' else embeds(0)
+                )
+                trainer.train_single_accumulation(batch)
+
+                calls = [entry[3] for entry in seen]
+                expected_count = 3 if objective == 'full_guidance' else 4
+                self.assertEqual(len(calls), expected_count)
+                self.assertNotIn('skip_layers', calls[0])  # Positive teacher.
+                self.assertEqual(calls[1]['skip_layers'], (22,))  # Negative teacher.
+                if objective == 'negative_only':
+                    self.assertEqual(calls[2]['skip_layers'], (22,))  # Blank teacher.
+                self.assertNotIn('skip_layers', calls[-1])  # Trainable positive student.
+
     def test_example_logging_leaves_loss_gradients_rng_and_predictions_unchanged(self):
         from toolkit.training_examples import capture_training_rng
         from unittest.mock import Mock

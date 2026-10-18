@@ -6,13 +6,15 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class FizgigSliderFormTests(unittest.TestCase):
-    def test_both_job_types_are_qwen_only_in_selector(self):
+    def test_both_job_types_use_shared_architecture_capability_filter(self):
         options = (REPO_ROOT / "ui/src/app/jobs/new/options.tsx").read_text()
         page = (REPO_ROOT / "ui/src/app/jobs/new/page.tsx").read_text()
+        capabilities = (REPO_ROOT / "ui/src/app/jobs/new/trainingCapabilities.ts").read_text()
         self.assertIn("value: 'fizgig_image_slider'", options)
         self.assertIn("value: 'fizgig_prompt_slider'", options)
-        self.assertIn("model.arch === 'qwen_image_2'", page)
-        self.assertIn("option.value.startsWith('fizgig_')", page)
+        self.assertIn("trainingModeVisible(", page)
+        self.assertIn("flowTrainingModels[canonicalFlowArch(arch)]", capabilities)
+        self.assertIn("moss_image: { label: 'MOSS-Image'", capabilities)
 
     def test_image_negative_uses_control_dataset_one_and_prompt_fields_are_full_width(self):
         form = (REPO_ROOT / "ui/src/app/jobs/new/SimpleJob.tsx").read_text()
