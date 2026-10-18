@@ -198,7 +198,9 @@ def _training_lora_context(training_lora_filename: str, training_lora_path: str)
 def build_template_context(request: Any) -> Dict[str, Any]:
     kwargs = request.model_kwargs or {}
     krea_native_preview = request.specialized_flow and request.model_arch == 'krea2'
-    krea_context = {'krea_native_preview': krea_native_preview, 'krea_native_sigmas': ''}
+    krea_context = {'krea_native_preview': krea_native_preview, 'krea_native_sigmas': '',
+                    'krea2_edit_fit_mode': ('crop (legacy)' if request.model_arch == 'krea2_edit'
+                                           and not kwargs.get('fit_refs', True) else 'fit')}
     if request.model_arch == 'krea2' and kwargs.get('edit') and isinstance(request, ComfySampleRequest):
         krea_context.update(krea_edit_preview_values=_krea_edit_preview_values(request),
                             krea_edit_kv_cache=bool(kwargs.get('kv_cache', False)))
@@ -471,6 +473,8 @@ def get_workflow_for_sample(
     request: ComfySampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if request.model_arch == 'krea2_edit' and workflow_path != DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
+        raise ValueError('krea2_edit previews require the source-graph Krea 2 edit workflow.')
     if workflow_path == DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH:
         if request.model_arch != 'krea2' or not (request.model_kwargs or {}).get('edit'):
             raise ValueError('The experimental Krea 2 edit workflow requires a Krea 2 edit-training model.')
@@ -480,7 +484,7 @@ def get_workflow_for_sample(
         if not request.control_image:
             raise ValueError('The experimental Krea 2 edit workflow requires at least one control image.')
     if workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
-        if request.model_arch != 'krea2':
+        if request.model_arch not in ('krea2', 'krea2_edit'):
             raise ValueError('The Krea 2 edit workflow requires a Krea 2 model.')
         if request.specialized_flow:
             raise ValueError('The Krea 2 edit KSampler workflow is for diffusion_trainer. '
@@ -1026,6 +1030,9 @@ class ComfyApiClient:
         pre-render free-memory target and a driver-level probe.
         """
         deadline = time.monotonic() + timeout
+        last_used_bytes = None
+        last_free_bytes = None
+        last_probe_error = None
         while time.monotonic() < deadline:
             try:
                 stats = self.get_system_stats()
@@ -1051,20 +1058,36 @@ class ComfyApiClient:
                         free = int(primary_device.get("vram_free", 0))
                         used = max(0, total - free)
                         has_usage = total > 0
+                    last_used_bytes = used if has_usage else None
                     allocator_released = has_usage and used <= max_used_bytes
-                    physical_memory_released = True
-                    if min_free_bytes is not None and free_memory_probe is not None:
+                    has_physical_target = min_free_bytes is not None and free_memory_probe is not None
+                    physical_memory_released = False
+                    if has_physical_target:
                         try:
+                            last_free_bytes = int(free_memory_probe())
                             physical_memory_released = (
-                                int(free_memory_probe()) >= int(min_free_bytes)
+                                last_free_bytes >= int(min_free_bytes)
                             )
-                        except (RuntimeError, ValueError, TypeError):
+                            last_probe_error = None
+                        except (RuntimeError, ValueError, TypeError) as error:
+                            last_free_bytes = None
+                            last_probe_error = str(error)
                             physical_memory_released = False
-                    if allocator_released and physical_memory_released:
+                    # A measured pre-render capacity target is authoritative.
+                    # Cache-preserving release can retain small runtime tensors
+                    # beyond the fixed allocator cap while restoring enough VRAM.
+                    release_ready = physical_memory_released if has_physical_target else allocator_released
+                    if release_ready:
                         return True
-            except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, TypeError):
-                pass
+            except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, TypeError) as error:
+                last_probe_error = str(error)
             time.sleep(poll_interval)
+        print(
+            "ComfyUI VRAM release timed out: "
+            f"active_bytes={last_used_bytes} (limit={max_used_bytes}), "
+            f"driver_free_bytes={last_free_bytes} (required={min_free_bytes})"
+            + (f"; last probe error: {last_probe_error}" if last_probe_error else "")
+        )
         return False
 
 

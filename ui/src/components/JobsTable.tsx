@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { matchesSearch } from '@/utils/search';
 import useJobsList from '@/hooks/useJobsList';
 import Link from 'next/link';
 import UniversalTable, { TableColumn } from '@/components/UniversalTable';
@@ -33,6 +34,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 
 interface JobsTableProps {
+  search?: string;
   autoStartQueue?: boolean;
   onlyActive?: boolean;
   job_type?: string | null;
@@ -196,7 +198,7 @@ function SortableQueueTable({
   );
 }
 
-export default function JobsTable({ onlyActive = false, job_type = null }: JobsTableProps) {
+export default function JobsTable({ onlyActive = false, job_type = null, search = '' }: JobsTableProps) {
   const { jobs, setJobs, status, refreshJobs } = useJobsList({ onlyActive, reloadInterval: 5000, job_type });
   const { queues, status: queueStatus, refreshQueues } = useQueueList();
   const { gpuList, isGPUInfoLoaded } = useGPUInfo();
@@ -210,7 +212,9 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
   };
 
   const isDeleting = deleteProgress !== null;
-  const allSelected = jobs.length > 0 && jobs.every(job => selectedIds.has(job.id));
+  const visibleJobs = useMemo(() => jobs.filter(job => matchesSearch(job.name, search)), [jobs, search]);
+  const selectedJobs = visibleJobs.filter(job => selectedIds.has(job.id));
+  const allSelected = visibleJobs.length > 0 && visibleJobs.every(job => selectedIds.has(job.id));
 
   const toggleRow = (id: string) => {
     setSelectedIds(prev => {
@@ -225,7 +229,7 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
   };
 
   const toggleAll = () => {
-    setSelectedIds(allSelected ? new Set() : new Set(jobs.map(job => job.id)));
+    setSelectedIds(allSelected ? new Set() : new Set(visibleJobs.map(job => job.id)));
   };
 
   const openDatasetLightbox = (jobId: string, imagePath?: string | null) => {
@@ -233,6 +237,13 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
   };
 
   const onReorderQueue = (queueID: string, orderedJobIds: string[]) => {
+    // Reorder matching rows within their existing slots, preserving hidden jobs.
+    const movedIds = new Set(orderedJobIds);
+    let nextVisible = 0;
+    orderedJobIds = jobs
+      .filter(job => job.status === 'queued' && job.gpu_ids === queueID)
+      .sort((a, b) => (a.queue_position ?? Infinity) - (b.queue_position ?? Infinity))
+      .map(job => movedIds.has(job.id) ? orderedJobIds[nextVisible++] : job.id);
     const nextPositionById = new Map(orderedJobIds.map((id, index) => [id, (index + 1) * 1000]));
     setJobs(prevJobs =>
       prevJobs.map(job =>
@@ -246,7 +257,7 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
   };
 
   const onMassDelete = () => {
-    const jobsToDelete = jobs.filter(job => selectedIds.has(job.id));
+    const jobsToDelete = selectedJobs;
     if (jobsToDelete.length === 0) return;
     const runningCount = jobsToDelete.filter(job => job.status === 'running').length;
     let message = `Are you sure you want to delete ${jobsToDelete.length} job${
@@ -474,7 +485,7 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
         initialImagePath={datasetLightboxJob?.imagePath ?? null}
         onClose={() => setDatasetLightboxJob(null)}
       />
-      {(selectedIds.size > 0 || isDeleting) && (
+      {(selectedJobs.length > 0 || isDeleting) && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2 bg-gray-800 rounded-lg border border-gray-700 shadow-lg">
           {isDeleting ? (
             <>
@@ -486,7 +497,7 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
           ) : (
             <>
               <span className="text-sm text-gray-300 flex-1">
-                {selectedIds.size} job{selectedIds.size === 1 ? '' : 's'} selected
+                {selectedJobs.length} job{selectedJobs.length === 1 ? '' : 's'} selected
               </span>
               <button
                 onClick={() => setSelectedIds(new Set())}
@@ -504,6 +515,9 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
             </>
           )}
         </div>
+      )}
+      {!isLoading && visibleJobs.length === 0 && search.trim() && (
+        <p role="status" className="p-6 text-center text-sm text-gray-400">No jobs match your search.</p>
       )}
       {Object.keys(jobsDict)
         .sort()
@@ -557,7 +571,7 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
               </div>
               <SortableQueueTable
                 columns={columns}
-                rows={jobsDict[gpuKey].jobs}
+                rows={jobsDict[gpuKey].jobs.filter(job => matchesSearch(job.name, search))}
                 queueID={gpuKey}
                 isLoading={isLoading}
                 onRefresh={refresh}
@@ -578,7 +592,7 @@ export default function JobsTable({ onlyActive = false, job_type = null }: JobsT
               <h2 className="font-semibold text-gray-100">Idle</h2>
             </div>
           </div>
-          <UniversalTable columns={columns} rows={jobsDict['Idle'].jobs} isLoading={isLoading} onRefresh={refresh} />
+          <UniversalTable columns={columns} rows={jobsDict['Idle'].jobs.filter(job => matchesSearch(job.name, search))} isLoading={isLoading} onRefresh={refresh} />
         </div>
       )}
     </div>

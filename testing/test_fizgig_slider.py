@@ -14,12 +14,71 @@ from extensions_built_in.sd_trainer.FizgigSliderTrainer import (
     pair_difference_weights,
     parse_cfg_negative_prompts,
     parse_prompt_triplets,
+    slider_loss_mean,
     validate_image_slider_pairs,
 )
 from toolkit.models.DoRA import DoRAModule
+from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
 
 
 class FizgigSliderTests(unittest.TestCase):
+    def test_min_snr_weights_each_image_and_its_gradient_before_batch_reduction(self):
+        scheduler = CustomFlowMatchEulerDiscreteScheduler()
+        self.assertFalse(hasattr(scheduler, 'alphas_cumprod'))
+        prediction = torch.tensor([1., 2.], requires_grad=True)
+        clean = torch.zeros(2, 1, 2, 2)
+        trainer = SimpleNamespace(
+            train_config=SimpleNamespace(min_snr_gamma=5.),
+            sd=SimpleNamespace(noise_scheduler=scheduler), slider_diff_weight=0.,
+            _noised_state=lambda x: (x, torch.tensor([100., 900.]), torch.zeros_like(x)),
+            _predict=lambda *args: prediction.view(2, 1, 1, 1).expand_as(clean),
+        )
+        loss = FizgigSliderTrainer._image_loss(trainer, clean, clean, None)
+        self.assertAlmostEqual(loss.item(), (5 / 81 + 4) / 2, places=5)
+        loss.backward()
+        torch.testing.assert_close(prediction.grad, torch.tensor([5 / 81, 2.]))
+        for scale in (0., 1., 3.):
+            prediction.grad = None
+            trainer.train_config.do_differential_guidance = True
+            trainer.train_config.differential_guidance_scale = scale
+            guided = FizgigSliderTrainer._image_loss(trainer, clean, clean, None)
+            self.assertAlmostEqual(guided.item(), loss.item() * scale ** 2, places=4)
+            guided.backward()
+            torch.testing.assert_close(prediction.grad, torch.tensor([5 / 81, 2.]) * scale)
+
+    def test_differential_guidance_configuration_accepted_and_validated(self):
+        config = dict(type='fizgig_prompt_slider', model=dict(arch='qwen_image_2'),
+                      network=dict(type='lora'), train=dict(noise_scheduler='flowmatch',
+                      do_differential_guidance=True), fizgig_slider=dict(
+                      neutral_prompt='cat', positive_prompt='large cat', negative_prompt='small cat'))
+        for scale in (0., 1., 3.):
+            config['train']['differential_guidance_scale'] = scale
+            with patch.object(DiffusionTrainer, '__init__', return_value=None):
+                FizgigSliderTrainer(0, None, config)
+        for scale in (-1., float('nan'), float('inf'), '3'):
+            config['train']['differential_guidance_scale'] = scale
+            with self.assertRaisesRegex(ValueError, 'Differential Guidance Scale'):
+                FizgigSliderTrainer(0, None, config)
+
+    def test_disabled_min_snr_preserves_plain_mean_without_a_scheduler(self):
+        loss = torch.tensor([[1., 3.], [5., 7.]], requires_grad=True)
+        for gamma in (None, 0.):
+            trainer = SimpleNamespace(train_config=SimpleNamespace(min_snr_gamma=gamma))
+            result = slider_loss_mean(trainer, loss, torch.tensor([100., 900.]))
+            torch.testing.assert_close(result, loss.mean())
+
+    def test_min_snr_uses_continuous_noise_level_and_handles_endpoints(self):
+        # No scheduler setup or lookup: include a fractional timestep and both
+        # pure-signal/pure-noise endpoints, checking the actual backward weights.
+        trainer = SimpleNamespace(train_config=SimpleNamespace(min_snr_gamma=5.))
+        values = torch.ones(4, 1, requires_grad=True)
+        sigma = torch.tensor([0., .123456, .9, 1.])
+        expected = torch.tensor([0., 5 * (.123456 / (1 - .123456)) ** 2, 1., 1.])
+        loss = slider_loss_mean(trainer, values, sigma * 1000)
+        torch.testing.assert_close(loss, expected.mean())
+        loss.backward()
+        torch.testing.assert_close(values.grad.flatten(), expected / 4)
+
     def test_pair_difference_weight_targets_changed_latents(self):
         positive = torch.zeros(1, 2, 2, 2)
         negative = positive.clone()
@@ -135,6 +194,22 @@ class FizgigSliderTests(unittest.TestCase):
         self.assertEqual(network.multiplier, 1.0)
         self.assertFalse(network.is_active)
         self.assertEqual(cfg_negatives_at_prediction, [0, -2, 2, 0, 0])
+
+        # The same teacher target and both signed backward passes must receive
+        # the configured weighting, rather than weighting only the reported loss.
+        parameter.grad = None
+        fake.train_config = SimpleNamespace(min_snr_gamma=5.)
+        # sigma=1/11 gives SNR=100 under the same noising equation as Fizgig.
+        fake._noised_state = lambda clean: (clean, torch.tensor([1000. / 11]), None)
+        loss = FizgigSliderTrainer.train_single_accumulation(fake, None)
+        self.assertAlmostEqual(loss.item(), 196 * 0.05, places=4)
+        self.assertAlmostEqual(parameter.grad.item(), -28 * 0.05, places=4)
+        parameter.grad = None
+        fake.train_config.do_differential_guidance = True
+        fake.train_config.differential_guidance_scale = 3.
+        loss = FizgigSliderTrainer.train_single_accumulation(fake, None)
+        self.assertAlmostEqual(loss.item(), 196 * .05 * 9, places=3)
+        self.assertAlmostEqual(parameter.grad.item(), -28 * .05 * 3, places=4)
 
     def test_predict_forwards_cfg_to_noise_model_only_when_negative_is_present(self):
         calls = []

@@ -63,7 +63,17 @@ export interface CustomModelCheckboxOption {
   doc?: ConfigDoc;
 }
 
-export type CustomModelOption = CustomModelSelectOption | CustomModelCheckboxOption;
+export interface CustomModelNumberOption {
+  type: 'number';
+  label: string;
+  getValue: (config: JobConfig) => number | null;
+  onChange: (value: number | null, config: JobConfig, setJobConfig: (value: any, key: string) => void) => void;
+  min?: number;
+  step?: number;
+  doc?: ConfigDoc;
+}
+
+export type CustomModelOption = CustomModelSelectOption | CustomModelCheckboxOption | CustomModelNumberOption;
 
 export type SampleTag = {
   title: string;
@@ -81,6 +91,8 @@ export type GenerateModality = 'image' | 'video' | 'audio';
 // from the training entry (name_or_path / quantize defaults, video/audio
 // group, ctrl_img section); set these only where the derivation is wrong.
 export interface GenerateOptions {
+  /** Training-only extensions may not provide the native inference pipeline. */
+  disabled?: boolean;
   modality?: GenerateModality;
   model?: { [key: string]: any }; // extra ModelConfig kwargs
   sample?: { [key: string]: any }; // GenerateImageConfig kwargs
@@ -120,6 +132,8 @@ export interface ModelArch {
   gateUrl?: string;
   modelNotes?: React.ReactNode;
   customModelSelectOptions?: CustomModelOption[];
+  /** Ordered reference folders stored in dataset.control_path, rather than numbered fields. */
+  datasetControlPathListMax?: number;
 }
 
 /** Grouped select options for an arch list (see useModelArchs). */

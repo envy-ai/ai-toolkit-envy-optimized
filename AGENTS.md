@@ -1,3 +1,8 @@
+# Shared instructions
+
+Read and follow `~/AGENTS.md` in addition to this file. If the two files
+conflict, the instructions in this project file take precedence.
+
 # Development environment
 
 Use the `ai-toolkit` Conda environment for all project Python commands:

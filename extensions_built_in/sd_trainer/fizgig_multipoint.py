@@ -3,7 +3,7 @@
 import math
 import os
 
-from PIL import Image, ImageOps
+from toolkit.dataset_validation import paired_image_issues, raise_dataset_issues
 
 
 def parse_points(config):
@@ -82,7 +82,7 @@ def parse_multipoint_prompts(config, points):
     return parsed
 
 
-def _images(folder):
+def _images(folder, issues):
     if not isinstance(folder, str) or not os.path.isdir(folder):
         raise ValueError(f"Multi-point image folder does not exist: {folder}")
     images = {}
@@ -95,12 +95,9 @@ def _images(folder):
             if name.startswith(".") or ext.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".jxl"}:
                 continue  # Includes *.png.disabled, as in the ordinary loader.
             if ext.lower() == ".jxl":
-                raise ValueError("Multi-point paired images do not support JXL")
-            if stem in images:
-                raise ValueError(f"Multi-point folder has ambiguous filename stem: {stem}")
-            images[stem] = os.path.join(root, name)
-    if not images:
-        raise ValueError(f"Multi-point folder has no usable images: {folder}")
+                issues.append(f"Multi-point paired images do not support JXL: {os.path.join(root, name)}")
+                continue
+            images.setdefault(stem, []).append(os.path.join(root, name))
     return images
 
 
@@ -112,6 +109,7 @@ def validate_multipoint_images(datasets, points):
     reference = next((p for p in points if p["strength"] == 0), None)
     reference = reference or next((p for p in points if p["strength"] == 1), points[0])
     groups = []
+    issues = []
     for dataset in datasets:
         if dataset.get("is_reg") or not dataset.get("buckets", True) or dataset.get("num_frames", 1) != 1:
             raise ValueError("Multi-point image slider requires non-regularization bucketed still images")
@@ -128,16 +126,9 @@ def validate_multipoint_images(datasets, points):
                 raise ValueError("Multi-point image folders contain duplicate/unknown point IDs")
             ident = mapping["point_id"]
             folders[ident] = mapping.get("folder_path")
-            images[ident] = _images(folders[ident])
-        stems = set(images[reference["id"]])
-        if any(set(bank) != stems for bank in images.values()):
-            raise ValueError("Multi-point image folders must have matching filename stems")
-        for stem in stems:
-            sizes = []
-            for bank in images.values():
-                with Image.open(bank[stem]) as image:
-                    sizes.append(ImageOps.exif_transpose(image).size)
-            if len(set(sizes)) != 1:
-                raise ValueError(f"Multi-point pair {stem} has different dimensions")
+            images[ident] = _images(folders[ident], issues)
+        issues.extend(paired_image_issues({folders[ident]: bank for ident, bank in images.items()}))
+        images = {ident: {stem: paths[0] for stem, paths in bank.items()} for ident, bank in images.items()}
         groups.append({"folders": folders, "images": images, "reference_id": reference["id"]})
+    raise_dataset_issues(issues)
     return groups

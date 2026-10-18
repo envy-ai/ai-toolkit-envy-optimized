@@ -3,8 +3,10 @@
 import JobsTable from '@/components/JobsTable';
 import { TopBar, MainContent } from '@/components/layout';
 import Link from 'next/link';
+import { useState } from 'react';
 
 export default function Dashboard() {
+  const [search, setSearch] = useState('');
   return (
     <>
       <TopBar>
@@ -22,8 +24,19 @@ export default function Dashboard() {
           </Link>
         </div>
       </TopBar>
-      <MainContent>
-        <JobsTable />
+      <div className="absolute top-12 left-0 w-full h-16 z-10 bg-gray-950 border-b border-gray-800 px-2 sm:px-4 flex items-center gap-3">
+        <input
+          type="search"
+          aria-label="Search training jobs"
+          placeholder="Search training jobs…"
+          title="Match all space-separated substrings in job names (case-insensitive)"
+          value={search}
+          onChange={event => setSearch(event.target.value)}
+          className="min-w-0 flex-1 rounded-md bg-gray-800 border border-gray-600 text-sm text-gray-200 placeholder-gray-500 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      </div>
+      <MainContent belowTopBar style={{ top: '7rem' }}>
+        <JobsTable search={search} />
       </MainContent>
     </>
   );

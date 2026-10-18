@@ -1,0 +1,15 @@
+{
+  "id": "nerfviking/qwen21-fizgig-train",
+  "title": "Qwen21 Fizgig Train",
+  "code_file": "train_draft.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

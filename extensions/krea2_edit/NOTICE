@@ -1,0 +1,11 @@
+krea2-edit-trainer
+Copyright 2026 Conrad Locke
+
+This product includes software developed at Krea AI:
+krea2_edit/src/mmdit.py, krea2_edit/src/text_encoder.py, and krea2_edit/src/pipeline.py
+are vendored/adapted from the reference implementation at
+https://github.com/krea-ai/krea-2 (Apache License 2.0).
+
+Krea 2 RAW model weights are NOT distributed with this software.
+Krea 2 is licensed under the Krea 2 Community License Agreement. For more
+information, visit https://krea.ai/krea-2-licensing.

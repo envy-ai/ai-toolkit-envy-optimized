@@ -148,6 +148,12 @@ class AnchorTests(unittest.TestCase):
         loss = trainer._train_anchor_preservation(1)
         self.assertAlmostEqual(loss.item(), 2)
         self.assertAlmostEqual(drift.grad.item(), 4)
+        drift.grad = None
+        trainer.train_config.do_differential_guidance = True
+        trainer.train_config.differential_guidance_scale = 3.
+        loss = trainer._train_anchor_preservation(1)
+        self.assertAlmostEqual(loss.item(), 18)
+        self.assertAlmostEqual(drift.grad.item(), 12)
 
     def test_strength_restored_on_backward_failure(self):
         trainer = self.trainer()

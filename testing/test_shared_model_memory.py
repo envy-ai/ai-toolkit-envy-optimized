@@ -551,9 +551,15 @@ class TrainerAndWorkflowTests(unittest.TestCase):
             update_db_key=lambda *args: calls.append('db'), step_num=7, progress_bar=None,
             sd=types.SimpleNamespace(), optimizer=types.SimpleNamespace(zero_grad=lambda: calls.append('zero_grad')),
             train_config=types.SimpleNamespace(free_u=False, unload_text_encoder=False),
-            sample=lambda *args: calls.append('render'), ensure_params_requires_grad=lambda: calls.append('restore'))
+            sample=lambda *args: calls.append(('render', args)),
+            sample_with_optimizer_state_offload=lambda *args: (
+                calls.append(('offload', args)), process.sample(*args)
+            ),
+            ensure_params_requires_grad=lambda: calls.append('restore'))
         namespace['maybe_sample'](process)
-        self.assertEqual(calls, ['db', 'zero_grad', 'render', 'restore', 'flush'])
+        self.assertEqual(calls, [
+            'db', 'zero_grad', ('offload', (7,)), ('render', (7,)), 'restore', 'flush'
+        ])
 
     def test_tiny_training_park_resume_preserves_update_rng_optimizer(self):
         import torch

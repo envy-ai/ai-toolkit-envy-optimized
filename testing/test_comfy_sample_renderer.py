@@ -976,6 +976,155 @@ class ComfyApiClientTests(unittest.TestCase):
 
         self.assertEqual(ComfyApiClient().timeout, 30 * 60)
 
+    def test_vram_release_timeout_reports_comfy_and_driver_memory_measurements(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        active_bytes = 186 * 1024 ** 2
+        limit_bytes = 1 * 1024 ** 3
+        required_free_bytes = 15 * 1024 ** 3
+        measured_free_bytes = 14 * 1024 ** 3
+        client = ComfyApiClient()
+        client.get_system_stats = mock.Mock(return_value={"devices": [{
+            "torch_vram_total": 512 * 1024 ** 2,
+            "torch_vram_free": 512 * 1024 ** 2 - active_bytes,
+        }]})
+
+        with (
+            mock.patch("toolkit.comfy_sample.time.monotonic", side_effect=[0, 0, 2]),
+            mock.patch("toolkit.comfy_sample.time.sleep"),
+            mock.patch("builtins.print") as log,
+        ):
+            released = client.wait_for_vram_release(
+                max_used_bytes=limit_bytes,
+                timeout=1,
+                poll_interval=0,
+                min_free_bytes=required_free_bytes,
+                free_memory_probe=lambda: measured_free_bytes,
+            )
+
+        self.assertFalse(released)
+        log.assert_called_once_with(
+            "ComfyUI VRAM release timed out: "
+            f"active_bytes={active_bytes} (limit={limit_bytes}), "
+            f"driver_free_bytes={measured_free_bytes} (required={required_free_bytes})"
+        )
+
+    def test_vram_release_wait_requires_both_allocator_and_driver_release(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient()
+        client.get_system_stats = mock.Mock(return_value={"devices": [{
+            "torch_vram_total": 512,
+            "torch_vram_free": 256,
+        }]})
+        measured_free_bytes = iter((99, 100))
+
+        with (
+            mock.patch("toolkit.comfy_sample.time.monotonic", return_value=0),
+            mock.patch("toolkit.comfy_sample.time.sleep"),
+            mock.patch("builtins.print") as log,
+        ):
+            released = client.wait_for_vram_release(
+                max_used_bytes=256,
+                timeout=1,
+                poll_interval=0,
+                min_free_bytes=100,
+                free_memory_probe=lambda: next(measured_free_bytes),
+            )
+
+        self.assertTrue(released)
+        self.assertEqual(client.get_system_stats.call_count, 2)
+        log.assert_not_called()
+
+    def test_vram_release_uses_met_physical_target_even_when_allocator_is_high(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient()
+        client.get_system_stats = mock.Mock(return_value={"devices": [{
+            "torch_vram_total": 4096,
+            "torch_vram_free": 0,
+        }]})
+        with mock.patch("toolkit.comfy_sample.time.monotonic", return_value=0):
+            released = client.wait_for_vram_release(
+                max_used_bytes=1024,
+                timeout=1,
+                poll_interval=0,
+                min_free_bytes=100,
+                free_memory_probe=lambda: 100,
+            )
+
+        self.assertTrue(released)
+
+    def test_vram_release_fails_when_physical_target_is_unmet_even_with_low_allocator(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient()
+        client.get_system_stats = mock.Mock(return_value={"devices": [{
+            "torch_vram_total": 512,
+            "torch_vram_free": 511,
+        }]})
+        with (
+            mock.patch("toolkit.comfy_sample.time.monotonic", side_effect=[0, 0, 2]),
+            mock.patch("toolkit.comfy_sample.time.sleep"),
+            mock.patch("builtins.print") as log,
+        ):
+            released = client.wait_for_vram_release(
+                max_used_bytes=256,
+                timeout=1,
+                poll_interval=0,
+                min_free_bytes=100,
+                free_memory_probe=lambda: 99,
+            )
+
+        self.assertFalse(released)
+        self.assertIn("driver_free_bytes=99 (required=100)", log.call_args.args[0])
+
+    def test_vram_release_fails_when_physical_probe_errors_even_with_low_allocator(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient()
+        client.get_system_stats = mock.Mock(return_value={"devices": [{
+            "torch_vram_total": 512,
+            "torch_vram_free": 511,
+        }]})
+        with (
+            mock.patch("toolkit.comfy_sample.time.monotonic", side_effect=[0, 0, 2]),
+            mock.patch("toolkit.comfy_sample.time.sleep"),
+            mock.patch("builtins.print") as log,
+        ):
+            released = client.wait_for_vram_release(
+                max_used_bytes=256,
+                timeout=1,
+                poll_interval=0,
+                min_free_bytes=100,
+                free_memory_probe=mock.Mock(side_effect=RuntimeError("probe failed")),
+            )
+
+        self.assertFalse(released)
+        self.assertIn("last probe error: probe failed", log.call_args.args[0])
+
+    def test_vram_release_without_physical_probe_keeps_allocator_guard(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient()
+        client.get_system_stats = mock.Mock(return_value={"devices": [{
+            "torch_vram_total": 4096,
+            "torch_vram_free": 0,
+        }]})
+        with (
+            mock.patch("toolkit.comfy_sample.time.monotonic", side_effect=[0, 0, 2]),
+            mock.patch("toolkit.comfy_sample.time.sleep"),
+            mock.patch("builtins.print"),
+        ):
+            released = client.wait_for_vram_release(
+                max_used_bytes=1024,
+                timeout=1,
+                poll_interval=0,
+                min_free_bytes=100,
+            )
+
+        self.assertFalse(released)
+
     def test_prompt_wait_can_be_cancelled_when_training_stops(self):
         from toolkit.comfy_sample import ComfyApiClient, ComfyPromptWaitCancelled
 

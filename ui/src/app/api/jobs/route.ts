@@ -7,6 +7,7 @@ import { cached } from '@/server/apiCache';
 import { mergeSampleOnlyJobConfig } from '@/helpers/sampleOnlyJobConfig';
 import { validateTrainingCapabilities } from '@/app/jobs/new/trainingCapabilities';
 import { validateSliderSpace } from '@/app/jobs/new/sliderspace';
+import { createJobFork, JobForkError, previewJobFork } from '@/server/jobFork';
 
 const TOOLKIT_ROOT = path.resolve('@', '..', '..');
 const defaultTrainFolder = path.join(TOOLKIT_ROOT, 'output');
@@ -101,6 +102,7 @@ const attachDatasetThumbnail = <T extends { job_config: string }>(job: T) => {
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get('id');
+  const forkId = searchParams.get('forkId');
   const job_ref = searchParams.get('job_ref');
   const job_type = searchParams.get('job_type');
   const only_active = searchParams.get('only_active');
@@ -108,6 +110,7 @@ export async function GET(request: Request) {
   const matchesName = (job: { name: string }) => job.name.toLowerCase().includes(name.toLowerCase());
 
   try {
+    if (forkId) return NextResponse.json(await previewJobFork(forkId));
     if (id) {
       const job = await prisma.job.findUnique({
         where: { id },
@@ -153,14 +156,25 @@ export async function GET(request: Request) {
     return NextResponse.json({ jobs: jobs.filter(matchesName).map(attachDatasetThumbnail) });
   } catch (error) {
     console.error(error);
+    if (error instanceof JobForkError) {
+      return NextResponse.json({ error: error.message, stack: error.stack }, { status: error.status });
+    }
+    if (forkId && error instanceof Error) {
+      return NextResponse.json({ error: error.message, stack: error.stack }, { status: 500 });
+    }
     return NextResponse.json({ error: 'Failed to fetch training data' }, { status: 500 });
   }
 }
 
 export async function POST(request: Request) {
+  let isForkRequest = false;
   try {
     const body = await request.json();
-    const { id, name, job_config, sample_only } = body;
+    const { id, name, job_config, sample_only, fork_from_id } = body;
+    isForkRequest = Boolean(fork_from_id);
+    if (fork_from_id && (id || sample_only || body.job_type && body.job_type !== 'train')) {
+      return NextResponse.json({ error: 'Fork creates a new training job; it cannot update an existing job' }, { status: 400 });
+    }
     if (!sample_only) {
       const errors = [...validateTrainingCapabilities(job_config), ...validateSliderSpace(job_config)];
       if (errors.length) return NextResponse.json({ error: [...new Set(errors)].join('\n') }, { status: 400 });
@@ -234,23 +248,34 @@ export async function POST(request: Request) {
       const newQueuePosition = (highestQueuePosition._max.queue_position || 0) + 1000;
 
       // Create new training
-      const training = await prisma.job.create({
+      const createTraining = (step = 0) => prisma.job.create({
         data: {
           name,
           gpu_ids,
           job_config: JSON.stringify(job_config),
           queue_position: newQueuePosition,
           ...extra,
+          step,
+          status: 'stopped',
         },
       });
+      const training = fork_from_id
+        ? await createJobFork(fork_from_id, name, job_config, snapshot => createTraining(snapshot.step))
+        : await createTraining();
       return NextResponse.json(training);
     }
   } catch (error: any) {
+    console.error(error);
+    if (error instanceof JobForkError) {
+      return NextResponse.json({ error: error.message, stack: error.stack }, { status: error.status });
+    }
     if (error.code === 'P2002') {
       // Handle unique constraint violation, 409=Conflict
       return NextResponse.json({ error: 'Job name already exists' }, { status: 409 });
     }
-    console.error(error);
+    if (isForkRequest) {
+      return NextResponse.json({ error: error.message, stack: error.stack }, { status: 500 });
+    }
     // Handle other errors
     return NextResponse.json({ error: 'Failed to save training data' }, { status: 500 });
   }

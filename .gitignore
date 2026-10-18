@@ -183,6 +183,7 @@ cython_debug/
 !/output/.gitkeep
 /extensions/*
 !/extensions/example
+!/extensions/krea2_edit/
 /temp
 /wandb
 .vscode/settings.json

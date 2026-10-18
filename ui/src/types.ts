@@ -142,7 +142,7 @@ export interface DatasetConfig {
   cache_latents_to_disk?: boolean;
   resolution: number[];
   controls: string[];
-  control_path?: string | null;
+  control_path?: string | string[] | null;
   num_frames: number;
   shrink_video_to_frames: boolean;
   do_i2v?: boolean;

@@ -614,8 +614,10 @@ class SingleStreamDiT(nn.Module, OstrisModelMixin):
 
         freqs = self.posemb(pos)
 
-        for block, blockkv in zip(self.blocks, blockcaches):
-            if self.gradient_checkpointing and torch.is_grad_enabled():
+        for block_index, (block, blockkv) in enumerate(zip(self.blocks, blockcaches)):
+            checkpoint_every_n = getattr(self, "checkpoint_every_n", 1)
+            if (self.gradient_checkpointing and torch.is_grad_enabled()
+                    and block_index % checkpoint_every_n == 0):
                 combined = checkpoint(
                     block,
                     combined,

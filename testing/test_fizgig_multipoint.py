@@ -154,6 +154,12 @@ class MultipointTests(unittest.TestCase):
         self.assertTrue(all(r[2] is noisy and r[3] is timestep for r in records))
         self.assertEqual(trainer.network.multiplier, .7)
         self.assertFalse(trainer.network.is_active)
+        trainer.train_config.do_differential_guidance = True
+        trainer.train_config.differential_guidance_scale = 3.
+        parameter.grad = None
+        guided = trainer.train_single_accumulation(None, accum_scale=.25)
+        self.assertAlmostEqual(guided.item(), expected * 9, places=4)
+        self.assertAlmostEqual(parameter.grad.item(), expected_grad * 3, places=5)
 
     def test_multipoint_network_restored_on_backward_exception(self):
         trainer = self.trainer()

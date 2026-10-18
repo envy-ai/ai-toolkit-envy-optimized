@@ -54,11 +54,34 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
+  const pauseRequested = request.nextUrl.searchParams.get('saveFirst') === '1' && job.job_type === 'train';
+  if (pauseRequested) {
+    if (!['running', 'stopping'].includes(job.status)) {
+      return NextResponse.json({ error: 'Only a running job can be paused' }, { status: 409 });
+    }
+    if (job.step > 0) {
+      // Reuse Save Now. The trainer clears it only after writing the checkpoint,
+      // then observes stop at the same step boundary. SIGINT would bypass this.
+      const updated = await prisma.job.update({
+        where: { id: jobID },
+        data: {
+          save_now: true,
+          stop: true,
+          status: 'stopping',
+          info: 'Pause requested: saving at the next completed training step...',
+        },
+      });
+      return NextResponse.json(updated);
+    }
+  }
+
   await prisma.job.update({
     where: { id: jobID },
     data: {
       stop: true,
       info: 'Stopping job...',
+      // Before any completed steps there is no trained checkpoint to save.
+      ...(job.job_type === 'train' && job.step === 0 ? { save_now: false } : {}),
     },
   });
 

@@ -35,3 +35,18 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
   browser console; the others still load.
 - Type check: `cd ui && npm run check_extensions` (uses the repo root
   `tsconfig.json`, which editors also pick up for these files).
+
+Training form model controls use `customModelSelectOptions`. Each option has a
+`label`, `getValue(config)`, `onChange(value, config, setJobConfig)`, and optional
+`doc`. The existing form renders `type: 'checkbox'` with `Checkbox`,
+`type: 'number'` with `NumberInput` (`min` and `step` optional; no blur clamping),
+and absent/`'select'` with `SelectInput` and an `options` array. These retain the
+standard mouse, Tab, arrow-key, and Space/Enter behavior of the shared controls.
+
+`datasetControlPathListMax` exposes that many ordered reference-folder selectors
+using the existing `SelectInput`, stored as `dataset.control_path: string[]`.
+It is independent of `datasets.multi_control_paths`, which retains the existing
+numbered fields and sample controls. Incomplete slots stay visible while editing;
+model validation determines allowed reference counts. Training-only model
+packages can set `generate: { disabled: true }` to omit their unsupported native
+pipeline from the Generate page while keeping the training selector.

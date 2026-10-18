@@ -33,12 +33,19 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     if (value !== undefined && typeof value !== 'boolean') errors.push(`Logging ${key} must be a boolean.`);
   }
   if (process.logging?.record_training_rng && process.logging?.record_training_examples === false) errors.push('Recording noise RNG state requires per-image loss logging.');
+  if (process.model?.arch === 'krea2_edit') errors.push(...validateKrea2Edit(config));
   if (!isSpecializedTrainingMode(mode)) return errors;
   const model = process.model;
   if (!model || !trainingModeSupported(model.arch, mode)) return [...errors, `${mode} supports Qwen Image 2.1, Krea 2, Anima and Ideogram 4.`];
   const networks = mode.startsWith('fizgig_') ? ['lora', 'dora'] : ['lora'];
   if (!networks.includes(process.network?.type ?? '')) errors.push(`${mode} requires ${networks.length === 1 ? 'LoRA only' : 'LoRA or DoRA'}.`);
   const kwargs = model.model_kwargs ?? {};
+  if (mode.startsWith('fizgig_') && process.train.do_differential_guidance) {
+    const scale = process.train.differential_guidance_scale ?? 3;
+    if (typeof scale !== 'number' || !Number.isFinite(scale) || scale < 0) {
+      errors.push('Differential Guidance Scale must be finite and nonnegative.');
+    }
+  }
   if (process.sample?.comfy?.enabled && ['anima', 'ideogram4'].includes(model.arch)) {
     const workflow = (process.sample.comfy.workflow_path ?? '').replaceAll('\\', '/').split('/').pop() ?? '';
     const known: Record<string, string> = { 'krea2_lora_sample.json.njk': 'krea2', 'krea2_lora_sample_batch_easy_use.json.njk': 'krea2',
@@ -69,6 +76,38 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     && (!cfgNegativeTextEnabled(model) || !process.guidance_distillation.negative_prompt?.trim())) errors.push('Ideogram negative-only distillation requires text-negative CFG and a nonempty teacher negative prompt.');
   if (mode === 'diffusion_kto') errors.push(...validateDiffusionKTO(config));
   return [...new Set(errors)];
+}
+
+/** The external identity/edit extension has its own dataset and preview contract. */
+export function validateKrea2Edit(config: JobConfig): string[] {
+  const process = config.config.process[0];
+  const kwargs = process.model.model_kwargs ?? {};
+  const errors: string[] = [];
+  if (process.train.batch_size !== 1) errors.push('Krea 2 Identity/Edit requires Batch Size 1.');
+  if (process.train.unload_text_encoder) errors.push('Krea 2 Identity/Edit requires Unload TE off.');
+  for (const key of ['fit_refs', 'multi_ref']) {
+    if (kwargs[key] !== undefined && typeof kwargs[key] !== 'boolean') errors.push(`Krea 2 Identity/Edit ${key} must be a boolean.`);
+  }
+  const checkpointEvery = kwargs.checkpoint_every_n ?? 1;
+  if (!Number.isInteger(checkpointEvery) || checkpointEvery < 1) errors.push('Checkpoint Every N Transformer Blocks must be a positive integer.');
+  if (kwargs.edit || kwargs.kv_cache) errors.push('Krea 2 Identity/Edit uses fit_refs/multi_ref; remove the experimental edit/kv_cache settings.');
+  if (!process.train.disable_sampling) {
+    const comfy = process.sample?.comfy;
+    if (!comfy?.enabled) errors.push('Krea 2 Identity/Edit samples require Use ComfyUI Renderer, or Disable Sampling.');
+    else if ((comfy.workflow_path ?? '').replaceAll('\\', '/').split('/').pop() !== 'krea2_edit_lora_sample.json.njk') {
+      errors.push('Krea 2 Identity/Edit samples require the Krea 2 Edit LoRA (one reference) workflow.');
+    }
+  }
+  for (const dataset of Array.isArray(process.datasets) ? process.datasets : []) {
+    if (!dataset || typeof dataset !== 'object') continue;
+    if (dataset.flip_x || dataset.flip_y) errors.push('Krea 2 Identity/Edit requires horizontal and vertical flips off.');
+    if (dataset.control_path_1 || dataset.control_path_2 || dataset.control_path_3) errors.push('Krea 2 Identity/Edit reference folders must use the ordered control_path list.');
+    const refs = Array.isArray(dataset.control_path) ? dataset.control_path : dataset.control_path ? [dataset.control_path] : [];
+    if (refs.length > 2 || refs.some(path => typeof path !== 'string' || !path.trim())) {
+      errors.push('Krea 2 Identity/Edit supports at most two consecutive reference dataset folders.');
+    } else if (refs.length > 1 && !kwargs.multi_ref) errors.push('Enable Train with Two References to configure a second reference dataset.');
+  }
+  return errors;
 }
 
 /** Runtime-shape checks also run on imported JSON/YAML and server requests. */

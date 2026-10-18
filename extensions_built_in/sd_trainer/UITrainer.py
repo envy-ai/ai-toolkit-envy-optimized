@@ -4,6 +4,7 @@ import sqlite3
 import asyncio
 import concurrent.futures
 from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+from toolkit.ui_checkpoint import UICheckpointControls
 from typing import Literal, Optional
 import threading
 import time
@@ -12,7 +13,7 @@ import signal
 AITK_Status = Literal["running", "stopped", "error", "completed"]
 
 
-class UITrainer(SDTrainer):
+class UITrainer(UICheckpointControls, SDTrainer):
     def __init__(self, process_id: int, job, config: OrderedDict, **kwargs):
         super(UITrainer, self).__init__(process_id, job, config, **kwargs)
         self.sqlite_db_path = self.config.get("sqlite_db_path", "./aitk_db.db")
@@ -105,17 +106,6 @@ class UITrainer(SDTrainer):
         conn.isolation_level = None  # Enable autocommit mode
         return conn
 
-    def should_stop(self):
-        def _check_stop():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT stop FROM Job WHERE id = ?", (self.job_id,))
-                stop = cursor.fetchone()
-                return False if stop is None else stop[0] == 1
-
-        return _check_stop()
-    
     def should_return_to_queue(self):
         def _check_return_to_queue():
             with self._db_connect() as conn:
@@ -251,6 +241,7 @@ class UITrainer(SDTrainer):
     def end_step_hook(self):
         super(UITrainer, self).end_step_hook()
         self.update_step()
+        self.maybe_save()
         self.maybe_stop()
 
     def hook_before_model_load(self):

@@ -1,6 +1,7 @@
 import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
 import { ModelArch } from './options';
 import { objectCopy } from '@/utils/basic';
+import { getDatasetControlPaths } from '@/helpers/datasetControls';
 
 const expandDatasetDefaults = (
   defaults: { [key: string]: any },
@@ -80,7 +81,19 @@ export const handleModelArchChange = (
   const datasets = jobConfig.config.process[0].datasets.map(dataset => {
     const newDataset = objectCopy(dataset);
     newDataset.controls = controls;
-    if (hasMultiControlPaths) {
+    if (newArch.datasetControlPathListMax) {
+      const numberedPaths = [newDataset.control_path_1, newDataset.control_path_2, newDataset.control_path_3];
+      const paths = getDatasetControlPaths(newDataset);
+      if (!paths.length && numberedPaths.some(Boolean)) {
+        while (numberedPaths.length && !numberedPaths.at(-1)) numberedPaths.pop();
+        newDataset.control_path = numberedPaths.map(path => path ?? '');
+      } else {
+        newDataset.control_path = paths;
+      }
+      delete newDataset.control_path_1;
+      delete newDataset.control_path_2;
+      delete newDataset.control_path_3;
+    } else if (hasMultiControlPaths) {
       // make sure the config has the multi control paths
       newDataset.control_path_1 = newDataset.control_path_1 || null;
       newDataset.control_path_2 = newDataset.control_path_2 || null;
@@ -90,12 +103,15 @@ export const handleModelArchChange = (
       if (newDataset.control_path && newDataset.control_path !== '') {
         // only set if not overwriting
         if (!newDataset.control_path_1) {
-          newDataset.control_path_1 = newDataset.control_path;
+          const paths = getDatasetControlPaths(newDataset);
+          newDataset.control_path_1 = paths[0] || null;
+          if (!newDataset.control_path_2) newDataset.control_path_2 = paths[1] || null;
+          if (!newDataset.control_path_3) newDataset.control_path_3 = paths[2] || null;
         }
       }
       delete newDataset.control_path; // remove single control path
     } else if (hasControlPath) {
-      newDataset.control_path = newDataset.control_path || null;
+      newDataset.control_path = getDatasetControlPaths(newDataset)[0] || null;
       if (newDataset.control_path_1 && newDataset.control_path_1 !== '') {
         newDataset.control_path = newDataset.control_path_1;
       }

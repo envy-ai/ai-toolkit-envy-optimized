@@ -1,5 +1,26 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+Training jobs support **Fork this job** from their gear menu. It opens the job
+form and creates an independent, stopped job from the latest complete checkpoint
+and optimizer state. See [the fork workflow and supported layouts](../docs/job_fork.md).
+
+**Pause** saves a checkpoint before stopping when the training job has completed
+more than zero steps. At step zero it stops immediately without requesting a
+checkpoint or waiting for a training step. **Save Now** remains a separate manual
+checkpoint request.
+
+**Krea 2 Identity/Edit (krea2edit extension)** selects the external `krea2_edit`
+training architecture. Its Model options expose **Fit References to Target**,
+**Train with Two References**, and **Checkpoint Every N Transformer Blocks**.
+Use one ordered **Reference Dataset** folder, or enable two-reference training
+and select two. Select matching reference images separately for Comfy samples;
+the source-graph preview supports one reference per sample. New selections use
+the source-graph Krea 2 Edit LoRA workflow and ComfyUI renderer. Keep batch size
+1, both flips off, and Unload TE off; Cache Text Embeddings is enabled for
+memory savings. Native Generate is unavailable for this extension. Existing
+jobs retain their saved architecture and settings. See the
+[Comfy sample workflow guide](../docs/krea2_edit_comfy_samples.md).
+
 ## Getting Started
 
 First, run the development server:

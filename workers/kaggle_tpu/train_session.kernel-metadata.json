@@ -1,0 +1,21 @@
+{
+  "id": "nerfviking/qwen21-fizgig-train",
+  "title": "Qwen21 Fizgig Train",
+  "code_file": "train_session.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "machine_shape": "TpuV5E8",
+  "docker_image": "",
+  "dataset_sources": [
+    "nerfviking/qwen21-fizgig-smoke-assets",
+    "nerfviking/qwen21-fizgig-paired-cache",
+    "nerfviking/qwen21-fizgig-tpu-train-source"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

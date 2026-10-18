@@ -18,10 +18,10 @@ export const startJob = (jobID: string) => {
   });
 };
 
-export const stopJob = (jobID: string) => {
+export const stopJob = (jobID: string, saveFirst = false) => {
   return new Promise<void>((resolve, reject) => {
     apiClient
-      .get(`/api/jobs/${jobID}/stop`)
+      .get(`/api/jobs/${jobID}/stop${saveFirst ? '?saveFirst=1' : ''}`)
       .then(res => res.data)
       .then(data => {
         console.log('Job stopped:', data);

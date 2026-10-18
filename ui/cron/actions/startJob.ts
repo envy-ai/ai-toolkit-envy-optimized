@@ -160,7 +160,7 @@ const watchDetachedJob = (pid: number, jobID: string, logPath: string) => {
       : 'Job process exited unexpectedly.';
     void prisma.job
       .updateMany({
-        where: { id: jobID, status: 'running' },
+        where: { id: jobID, status: { in: ['running', 'stopping'] } },
         data: { status: 'error', info: message, pid: null },
       })
       .then(result => {
@@ -350,7 +350,7 @@ const startAndWatchJob = (job: Job) => {
           appendJobLog(logPath, `\n${message}\n`);
           void prisma.job
             .updateMany({
-              where: { id: jobID, status: 'running' },
+              where: { id: jobID, status: { in: ['running', 'stopping'] } },
               data: { status: 'error', info: message, pid: null },
             })
             .catch(updateError => {

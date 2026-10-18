@@ -31,6 +31,7 @@ export default function TrainingForm() {
   const runId = searchParams.get('id');
   const sampleOnlyMode = searchParams.get('sampleOnly') === '1';
   const cloneId = searchParams.get('cloneId');
+  const forkId = searchParams.get('forkId');
   const cloneWithEmbeddings = searchParams.get('withEmbeddings') === '1';
   const [gpuIDs, setGpuIDs] = useState<string | null>(null);
   const { settings, isSettingsLoaded } = useSettings();
@@ -41,6 +42,8 @@ export default function TrainingForm() {
 
   const [jobConfig, setJobConfig] = useNestedState<JobConfig>(objectCopy(migrateJobConfig(defaultJobConfig)));
   const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
+  const [forkSnapshot, setForkSnapshot] = useState<{ step: number; checkpoint: string; warnings?: string[] } | null>(null);
+  const [forkError, setForkError] = useState<{ message: string; stack: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImportConfig = () => {
@@ -135,6 +138,27 @@ export default function TrainingForm() {
   }, [cloneId, cloneWithEmbeddings]);
 
   useEffect(() => {
+    if (!forkId) return;
+    let cancelled = false;
+    setForkSnapshot(null);
+    setForkError(null);
+    apiClient.get(`/api/jobs?forkId=${encodeURIComponent(forkId)}`)
+      .then(res => {
+        if (cancelled) return;
+        setGpuIDs(res.data.gpu_ids);
+        setJobConfig(migrateJobConfig(JSON.parse(res.data.job_config)));
+        setForkSnapshot(res.data.fork_snapshot);
+      })
+      .catch(error => {
+        if (cancelled) return;
+        console.error('Error preparing fork:', error);
+        setForkError({ message: error.response?.data?.error || error.message,
+          stack: error.response?.data?.stack || error.stack || '' });
+      });
+    return () => { cancelled = true; };
+  }, [forkId]);
+
+  useEffect(() => {
     if (runId) {
       apiClient
         .get(`/api/jobs?id=${runId}`)
@@ -164,6 +188,8 @@ export default function TrainingForm() {
 
   const saveJob = async () => {
     if (status === 'saving') return;
+    if (forkId && !forkSnapshot) return;
+    if (forkId) setForkError(null);
     const errors = sampleOnlyMode ? validateSliderSpacePreview(jobConfig) :
       [...validateTrainingCapabilities(jobConfig), ...validateSliderSpace(jobConfig)];
     if (errors.length) {
@@ -184,6 +210,7 @@ export default function TrainingForm() {
         gpu_ids: gpuIDs,
         job_config: jobConfig,
         sample_only: sampleOnlyMode,
+        fork_from_id: forkId,
       })
       .then(res => {
         setStatus('success');
@@ -194,7 +221,10 @@ export default function TrainingForm() {
         }
       })
       .catch(error => {
-        if (error.response?.status === 409) {
+        if (forkId) {
+          setForkError({ message: error.response?.data?.error || error.message,
+            stack: error.response?.data?.stack || error.stack || '' });
+        } else if (error.response?.status === 409) {
           alert('Training name already exists. Please choose a different name.');
         } else if (error.response?.status === 400 && typeof error.response.data?.error === 'string') {
           alert(error.response.data.error);
@@ -215,6 +245,23 @@ export default function TrainingForm() {
     saveJob();
   };
 
+  const forkNotice = forkId ? (
+    <div className="mb-4 p-3 rounded border border-gray-700 bg-gray-900 text-sm" role="status">
+      {forkSnapshot ? (
+        <p>Fork resumes from step {forkSnapshot.step} ({forkSnapshot.checkpoint}). Edit settings and name, then create the stopped job.
+          {jobConfig.config.process[0].train.steps <= forkSnapshot.step && ' Increase total training steps to continue beyond this checkpoint.'}
+          {' '}The latest complete checkpoint is copied when you create the job.</p>
+      ) : !forkError ? <p>Checking source checkpoint and resume state…</p> : null}
+      {forkSnapshot?.warnings?.map(warning => <p key={warning} className="mt-2 text-amber-300">{warning}</p>)}
+      {forkError && (
+        <div role="alert" className="text-red-400">
+          <p>{forkError.message}</p>
+          <details className="mt-2"><summary>Error details</summary><pre className="whitespace-pre-wrap break-words">{forkError.stack}</pre></details>
+        </div>
+      )}
+    </div>
+  ) : null;
+
   return (
     <>
       <TopBar>
@@ -225,7 +272,7 @@ export default function TrainingForm() {
         </div>
         <div className="flex-shrink-0">
           <h1 className="text-base sm:text-lg truncate max-w-[120px] sm:max-w-none">
-            {sampleOnlyMode ? 'Edit Sample Settings' : runId ? 'Edit Training Job' : 'New Training Job'}
+            {sampleOnlyMode ? 'Edit Sample Settings' : runId ? 'Edit Training Job' : forkId ? 'Fork Training Job' : 'New Training Job'}
           </h1>
         </div>
         <div className="flex-1"></div>
@@ -291,7 +338,7 @@ export default function TrainingForm() {
           <Button
             className="text-white bg-green-600 hover:bg-green-700 px-2 sm:px-3 py-1 rounded-md text-xs sm:text-base"
             onClick={() => saveJob()}
-            disabled={status === 'saving'}
+            disabled={status === 'saving' || Boolean(forkId && !forkSnapshot)}
           >
             {status === 'saving' ? (
               'Saving...'
@@ -317,6 +364,7 @@ export default function TrainingForm() {
 
       {!sampleOnlyMode && showAdvancedView ? (
         <div className="pt-[48px] absolute top-0 left-0 w-full h-full overflow-auto">
+          {forkNotice}
           <AdvancedConfigEditor
             config={jobConfig}
             setConfig={setJobConfig}
@@ -335,6 +383,7 @@ export default function TrainingForm() {
         </div>
       ) : (
         <MainContent>
+          {forkNotice}
           <ErrorBoundary
             fallback={
               <div className="flex items-center justify-center h-64 text-lg text-red-600 font-medium bg-red-100 dark:bg-red-900/20 dark:text-red-400 border border-red-300 dark:border-red-700 rounded-lg">
@@ -353,7 +402,7 @@ export default function TrainingForm() {
               gpuList={gpuList}
               datasetOptions={datasetOptions}
               sampleOnlyMode={sampleOnlyMode}
-              isLoading={!isSettingsLoaded || !isGPUInfoLoaded || datasetFetchStatus !== 'success'}
+              isLoading={!isSettingsLoaded || !isGPUInfoLoaded || datasetFetchStatus !== 'success' || Boolean(forkId && !forkSnapshot)}
             />
           </ErrorBoundary>
 

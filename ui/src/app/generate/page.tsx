@@ -299,7 +299,7 @@ function GeneratePageInner() {
   // text-generating archs have no Generate page path yet
   const { archs: modelArchs } = useModelArchs();
   const archs: GenerateDefaults[] = useMemo(
-    () => modelArchs.filter(a => a.group !== 'llm').map(getGenerateDefaults),
+    () => modelArchs.filter(a => a.group !== 'llm' && !a.generate?.disabled).map(getGenerateDefaults),
     [modelArchs],
   );
   const ready = !!engineStatus?.running;

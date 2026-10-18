@@ -169,6 +169,7 @@ Optional ComfyUI sample renderer requirements:
 - `krea2_lora_sample.json.njk` also requires [WAS Node Suite](https://github.com/WASasquatch/was-node-suite-comfyui) for `Seed`, `Text Multiline`, and `Text to Console`.
 - `krea2_lora_sample_batch_easy_use.json.njk` also requires [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use) for the `easy *` loop, list, string, and integer nodes.
 - The one-reference [Krea 2 edit sample workflow](docs/krea2_edit_comfy_samples.md) uses `comfyui-krea2edit`, the absolute-path LoRA loader, and the metadata saver. It keeps the supplied edit graph's fixed grounding and reference-boost settings; see the workflow documentation for form mappings and limitations.
+- UI-requested samples offload optimizer state through the same path as scheduled samples. Foreground Comfy previews require physical free VRAM to recover to the pre-render target before restoring training; callers without a physical-memory probe use the allocator limit instead; a release timeout logs the measured active bytes and driver-free bytes alongside their thresholds.
 
 
 Linux:

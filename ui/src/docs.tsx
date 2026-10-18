@@ -3,6 +3,10 @@ import { ConfigDoc } from '@/types';
 import { IoFlaskSharp } from 'react-icons/io5';
 
 const docs: { [key: string]: ConfigDoc } = {
+  'train.min_snr_gamma': {
+    title: 'Min SNR Gamma',
+    description: <>Reduces the contribution of cleaner, high-SNR examples to the training loss. Set to 0 to disable. Fizgig applies this to prompt, image-pair, and multi-point slider losses, including preservation anchors. Changes take effect when training starts or resumes. For flow-matching models such as Qwen 2.1, compare against a disabled baseline; 5 is not a universally optimal value.</>,
+  },
   'logging.record_training_examples': {
     title: 'Per-image Loss Details',
     description: <>On by default for every training mode. Records training inputs and available objective losses in the job&apos;s SQLite log for the Loss Report. Shared step/pair objectives are labeled rather than assigned independent image losses. Dataset images stay in place; prompt-slider practice images are saved as they are generated. No extra model passes or VAE decoding. Turn off to disable recording when starting or resuming training. Existing scalar losses cannot recover which inputs were used.</>,
@@ -469,15 +473,15 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'Differential Guidance',
     description: (
       <>
-        Differential Guidance will amplify the difference of the model prediction and the target during training to make
-        a new target. Differential Guidance Scale will be the multiplier for the difference. This is still experimental,
-        but in my tests, it makes the model train faster, and learns details better in every scenario I have tried with
-        it.
+        Extrapolates the training target away from the current prediction using a detached prediction.
+        With MSE, a scale of 3 multiplies the prediction gradient by 3 and the reported loss by 9.
+        A scale of 1 keeps the original objective; 0 removes its gradient. This is experimental and does not
+        guarantee faster or better learning.
         <br />
         <br />
-        The idea is that normal training inches closer to the target but never actually gets there, because it is
-        limited by the learning rate. With differential guidance, we amplify the difference for a new target beyond the
-        actual target, this would make the model learn to hit or overshoot the target instead of falling short.
+        Supported by Fizgig prompt, image-pair, and multi-point sliders, including preservation anchors.
+        It combines with Min SNR Gamma and adds no model forward passes. This is separate from slider teacher
+        guidance and sampling CFG. Changes take effect when training starts or resumes.
         <br />
         <br />
         <img src="/imgs/diff_guidance.png" alt="Differential Guidance Diagram" className="max-w-full mx-auto" />

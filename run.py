@@ -1,5 +1,6 @@
 import os
 import sys
+from toolkit.dataset_validation import DatasetValidationError
 from dotenv import load_dotenv
 # Load the .env file if it exists
 load_dotenv()
@@ -125,6 +126,14 @@ def main():
             job.run()
             job.cleanup()
             jobs_completed += 1
+        except DatasetValidationError as e:
+            from toolkit.ui_job_status import UIJobStatus
+            print_acc(f'\n{e}\n')
+            UIJobStatus(e.sqlite_db_path).update_status('stopped', str(e))
+            jobs_failed += 1
+            if not args.recover:
+                print_end_message(jobs_completed, jobs_failed)
+                sys.exit(2)
         except Exception as e:
             print_acc(f"Error running job: {e}")
             jobs_failed += 1

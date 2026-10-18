@@ -12,13 +12,15 @@ import copy
 from collections import OrderedDict
 
 import torch
-import torch.nn.functional as F
 from PIL import Image, ImageOps
 from tqdm.auto import tqdm
 
 from toolkit.flow_training import (FlowTrainingProfile, trainer_flow_profile,
                                    guided_flow_prediction, render_flow_bank_image)
 from toolkit.training_capabilities import validate_specialized_model
+from toolkit.fizgig_image_objective import (pair_difference_weights, slider_squared_error,
+                                          slider_loss_mean, _noised_state, _image_loss)
+from toolkit.dataset_validation import paired_image_issues, raise_dataset_issues
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 from toolkit.data_loader import get_dataloader_datasets, get_dataloader_from_datasets
 from toolkit.train_tools import get_torch_dtype
@@ -34,6 +36,7 @@ def validate_image_slider_pairs(datasets, *, label="Image slider", allow_edit_co
     """Fail instead of silently training only the subset that has a negative."""
     if not datasets:
         raise ValueError(f"{label} requires at least one positive dataset")
+    issues = []
     for dataset in datasets:
         positive_dir = dataset.get("folder_path")
         negative_dir = dataset.get("control_path_1")
@@ -73,47 +76,36 @@ def validate_image_slider_pairs(datasets, *, label="Image slider", allow_edit_co
                 if not name.startswith(".") and os.path.splitext(name)[1].lower() in POSITIVE_EXTENSIONS
                 and os.path.basename(root) != "_controls"
             )
-        if not positives:
-            raise ValueError(f"{label} has no images in {positive_dir}")
         if not (dataset.get("cache_latents_to_disk") or dataset.get("cache_latents")):
             raise ValueError(f"{label} requires Cache Latents for its preferred images")
         if dataset.get("augmentations") or dataset.get("augments"):
             raise ValueError(f"{label} does not support stochastic image augmentations")
+        positive_bank = {}
         for path in positives:
-            name = os.path.basename(path)
-            if os.path.splitext(name)[1].lower() not in IMAGE_EXTENSIONS:
-                raise ValueError(f"{label} cannot pair unsupported image format: {path}")
-            matches = negatives.get(os.path.splitext(name)[0], [])
-            if len(matches) != 1:
-                raise ValueError(f"{label} requires one rejected image matching {name}; found {len(matches)}")
-            if allow_edit_controls:
-                for key in ("control_path_2", "control_path_3"):
-                    control_dir = dataset.get(key)
-                    if control_dir:
-                        stem = os.path.splitext(name)[0]
-                        controls = [
-                            os.path.join(control_dir, stem + ext) for ext in IMAGE_EXTENSIONS
-                            if os.path.isfile(os.path.join(control_dir, stem + ext))
-                        ]
-                        if len(controls) != 1:
-                            raise ValueError(
-                                f"{label} requires one edit source in {key} matching {name}; found {len(controls)}"
-                            )
-            with Image.open(path) as pos, Image.open(matches[0]) as neg:
-                if ImageOps.exif_transpose(pos).size != ImageOps.exif_transpose(neg).size:
-                    raise ValueError(f"{label} pair {name} has different dimensions/crop at preferred and rejected")
+            stem, ext = os.path.splitext(os.path.basename(path))
+            if ext.lower() not in IMAGE_EXTENSIONS:
+                issues.append(f"{label} cannot pair unsupported image format: {path}")
+                continue
+            positive_bank.setdefault(stem, []).append(path)
+        banks = {positive_dir: positive_bank, negative_dir: negatives}
+        if allow_edit_controls:
+            for key in ("control_path_2", "control_path_3"):
+                folder = dataset.get(key)
+                if folder:
+                    bank = {}
+                    for name in os.listdir(folder):
+                        stem, ext = os.path.splitext(name)
+                        if ext in IMAGE_EXTENSIONS and os.path.isfile(os.path.join(folder, name)):
+                            bank.setdefault(stem, []).append(os.path.join(folder, name))
+                    banks[folder] = bank
+        issues.extend(paired_image_issues(banks, (positive_dir, negative_dir)))
+    raise_dataset_issues(issues)
 
 
-def pair_difference_weights(positive, negative, strength):
-    """Fizgig's per-latent-token difference weighting; mean weight remains 1."""
-    difference = (positive.float() - negative.float()).abs().mean(dim=1)
-    difference = difference.flatten(1)
-    mean = difference.mean(dim=1, keepdim=True)
-    relative = (difference / mean.clamp_min(1e-8)).clamp(max=8.0)
-    weight = (1.0 - strength) + strength * relative
-    weight = weight / weight.mean(dim=1, keepdim=True).clamp_min(1e-8)
-    weight = torch.where(mean > 1e-6, weight, torch.ones_like(weight))
-    return weight
+
+
+
+
 
 
 def parse_prompt_triplets(slider):
@@ -250,8 +242,12 @@ class FizgigSliderTrainer(DiffusionTrainer):
             raise ValueError("Fizgig sliders do not support output-preservation losses")
         if train.get("frequency_loss_type", "none") != "none":
             raise ValueError("Fizgig sliders do not support auxiliary frequency loss")
-        if train.get("do_guidance_loss") or train.get("do_differential_guidance"):
+        if train.get("do_guidance_loss"):
             raise ValueError("Fizgig sliders do not support additional guidance losses")
+        if train.get("do_differential_guidance"):
+            scale = train.get("differential_guidance_scale", 3.0)
+            if not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale < 0:
+                raise ValueError("Differential Guidance Scale must be finite and nonnegative")
         if (train.get("ema_config") or {}).get("use_ema"):
             raise ValueError("Fizgig sliders do not support EMA")
         slider = config.get("fizgig_slider") or {}
@@ -541,7 +537,8 @@ class FizgigSliderTrainer(DiffusionTrainer):
                 strengths = (-1.0, 1.0, random.uniform(-1.0, 1.0))
             for strength in strengths:
                 network.multiplier = strength
-                loss = F.mse_loss(self._predict(noisy, timestep, positive, negative), reference)
+                loss = slider_loss_mean(self, slider_squared_error(self,
+                    self._predict(noisy, timestep, positive, negative), reference), timestep)
                 weighted = loss * (self.slider_preservation_weight / len(strengths))
                 self.accelerator.backward(weighted * accum_scale)
                 total += weighted.detach()
@@ -707,21 +704,7 @@ class FizgigSliderTrainer(DiffusionTrainer):
             f"across {len(self.slider_prompt_triplets)} triplets"
         )
 
-    def _noised_state(self, clean):
-        # Fizgig v6.7.0: sigmoid-normal time, Qwen's resolution shift, linear
-        # interpolation, and velocity target noise - clean.
-        clean = clean.to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
-        batch_size, _, height, width = clean.shape
-        mu = trainer_flow_profile(self).shift(height, width)
-        t = torch.sigmoid(torch.randn(batch_size, device=self.device_torch, dtype=torch.float32) + mu)
-        min_t = self.train_config.min_denoising_steps / 1000.0
-        max_t = self.train_config.max_denoising_steps / 1000.0
-        t = min_t + (max_t - min_t) * t
-        noise = torch.randn_like(clean, dtype=torch.float32)
-        t_view = t.view(-1, 1, 1, 1)
-        noisy = ((1 - t_view) * clean.float() + t_view * noise).to(clean.dtype)
-        target = noise - clean.float()
-        return noisy, (t * 1000).to(self.device_torch), target
+    _noised_state = _noised_state
 
     def _predict(self, noisy, timestep, embeds, unconditional_embeds=None):
         if getattr(self.sd, 'arch', 'qwen_image_2') != 'qwen_image_2':
@@ -744,14 +727,7 @@ class FizgigSliderTrainer(DiffusionTrainer):
             batch=None,
         ).float()
 
-    def _image_loss(self, clean, other, embeds):
-        noisy, timestep, target = self._noised_state(clean)
-        prediction = self._predict(noisy, timestep, embeds)
-        squared_error = (prediction - target).square().mean(dim=1).flatten(1)
-        if self.slider_diff_weight:
-            weights = pair_difference_weights(clean, other, self.slider_diff_weight)
-            squared_error = squared_error * weights
-        return squared_error.mean()
+    _image_loss = _image_loss
 
     def _train_multipoint_prompt(self, accum_scale):
         latent, entry_index = random.choice(self.slider_bank)
@@ -772,7 +748,8 @@ class FizgigSliderTrainer(DiffusionTrainer):
                 del positive, cfg_negative
             self.network.is_active = True
             self.network.multiplier = point["strength"]
-            loss = F.mse_loss(self._predict(noisy, timestep, neutral, negative), target)
+            loss = slider_loss_mean(self, slider_squared_error(self,
+                self._predict(noisy, timestep, neutral, negative), target), timestep)
             self.accelerator.backward(loss * (accum_scale / len(points)))
             total += loss.detach() / len(points)
             del loss, target
@@ -816,7 +793,8 @@ class FizgigSliderTrainer(DiffusionTrainer):
                 noisy, timestep, target = self._noised_state(clean)
             self.network.multiplier = point["strength"]
             prediction = self._predict(noisy, timestep, embeds)
-            loss = ((prediction - target).square().mean(dim=1).flatten(1) * weights.to(self.device_torch)).mean()
+            loss = slider_loss_mean(self,
+                slider_squared_error(self, prediction, target).mean(dim=1).flatten(1) * weights.to(self.device_torch), timestep)
             self.accelerator.backward(loss * (accum_scale / len(points)))
             total += loss.detach() / len(points)
             del prediction, loss, clean, noisy, target
@@ -874,8 +852,9 @@ class FizgigSliderTrainer(DiffusionTrainer):
                     )
                 for multiplier in (1.0, -1.0):
                     network.multiplier = multiplier
-                    loss = F.mse_loss(self._predict(noisy, timestep, neutral, cfg_negatives[0]),
-                                      frozen_neutral + multiplier * delta)
+                    loss = slider_loss_mean(self, slider_squared_error(self,
+                        self._predict(noisy, timestep, neutral, cfg_negatives[0]),
+                        frozen_neutral + multiplier * delta), timestep)
                     self.accelerator.backward(loss * (0.5 * accum_scale))
                     total += 0.5 * loss.detach()
             if getattr(self, "slider_anchor_bank", []) and self.slider_preservation_weight:

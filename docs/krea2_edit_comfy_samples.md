@@ -65,7 +65,10 @@ between native training and Comfy inference. This ordinary workflow uses
 ## Source graph edit workflow
 
 Select **Krea 2 Edit LoRA (one reference)** for the separate source graph edit
-path in an ordinary `diffusion_trainer` Krea 2 job. Its template is
+path in an ordinary `diffusion_trainer` Krea 2 job. The tracked
+[`krea2_edit` extension](../extensions/krea2_edit/README.md) provides the matching
+training contract and appears as **Krea 2 Identity/Edit (krea2edit extension)** in the
+form. Its template is
 `config/comfy_templates/krea2_edit_lora_sample.json.njk`, adapted from
 `tmp/krea2_identity_edit.json`.
 
@@ -114,8 +117,16 @@ the supplied values instead of adding controls:
 
 - `Krea2EditModelPatch.ref_boost=2`, `ref_boost_a=2`, and `fit_mode="fit"`.
   The installed node documents `ref_boost_a` as having no effect with one reference.
+  For `krea2_edit`, `model_kwargs.fit_refs: false` instead selects
+  `fit_mode="crop (legacy)"` to retain that explicit training geometry.
 - Positive `grounding_px=0` (native source resolution), negative
   `grounding_px=768`, and both `system_prompt=""` (the node's training default).
+  The `krea2_edit` training recipe jitters grounding from 384 to 768;
+  native-resolution positive grounding preserves the source graph's inference
+  choice and is outside that training range for larger sources. Likewise,
+  `ref_boost=2` biases inference attention toward references, whereas training
+  uses unboosted attention (equivalent to 1). These inference choices do not
+  establish an identical training forward pass.
 - `KSampler.denoise=1`, `EmptySD3LatentImage.batch_size=1`, loader
   `weight_dtype="default"`, and text encoder `device="default"`.
 - Standard `VAEEncode`/`VAEDecode` with no tiled decode controls. This differs
@@ -133,10 +144,20 @@ workflow and edit conditioning; selecting this KSampler workflow for them
 raises a descriptive error.
 
 The supplied graph uses `comfyui-krea2edit`'s grounded encoding, fitted source
-geometry, and reference boost. The existing native Krea edit wrapper documents
+geometry, and reference boost. The `krea2_edit` extension retains the upstream
+trainer's corresponding grounding template, reference-before-target token order,
+frame indices, and fitted fractional positions. It reuses this fork's model
+loaders and memory options. Its grounding cap/jitter defaults are 768/384; cached
+text embeddings freeze a single grounding scale and have a distinct cache
+identity. Training and inference use different resize kernels, so geometry
+agreement does not establish numerical or image-quality parity.
+
+The existing native Krea edit wrapper documents
 `ComfyUI-Krea2-Ostris-Edit` with reference tokens at `t=0`. These are distinct
-edit paths; this preview workflow does not establish numerical or conditioning
-parity with the trainer and does not change its training path.
+edit paths. Choosing this preview for built-in `krea2` does not change its training
+path. To train the source graph contract, select `arch: krea2_edit`, remove the
+built-in `model_kwargs.edit` flag and start fresh weights. Do not resume a LoRA
+trained under the earlier experimental contract.
 
 Template selection preserves the saved form values. For example, the supplied
 graph uses a turbo convrot model, a heretic convrot text encoder, 10 steps, and

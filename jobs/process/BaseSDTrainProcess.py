@@ -959,6 +959,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # at render time so already-saved jobs do not feed Qwen's VAE through
         # the incompatible Krea custom VAE loader.
         model_arch = getattr(getattr(self, 'model_config', None), 'arch', None)
+        if model_arch == 'krea2_edit' and workflow_path != DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
+            raise ValueError('krea2_edit previews require config/comfy_templates/krea2_edit_lora_sample.json.njk.')
         new_templates = {'anima': DEFAULT_COMFY_ANIMA_WORKFLOW_PATH,
                          'ideogram4': DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH}
         known_templates = {DEFAULT_COMFY_WORKFLOW_PATH: 'krea2', DEFAULT_COMFY_BATCH_WORKFLOW_PATH: 'krea2',
@@ -1054,8 +1056,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         progress_bar.close()
 
     def _get_krea_preview_control_settings(self, include_ordinary_edit=False):
-        if not ((getattr(self, 'flow_profile', None) is not None or include_ordinary_edit)
-                and self.model_config.arch == 'krea2' and self.model_config.model_kwargs.get('edit', False)):
+        if not (self.model_config.arch == 'krea2_edit' or (
+                (getattr(self, 'flow_profile', None) is not None or include_ordinary_edit)
+                and self.model_config.arch == 'krea2' and self.model_config.model_kwargs.get('edit', False))):
             return {}
         background = self.model_config.model_kwargs.get('preview_control_transparent_color')
         if background is None:
@@ -1083,12 +1086,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
         is_krea_edit_workflow = workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH
         is_krea_ostris_edit_workflow = workflow_path == DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH
         if is_krea_edit_workflow or is_krea_ostris_edit_workflow:
-            if self.model_config.arch != 'krea2':
+            if self.model_config.arch not in ('krea2', 'krea2_edit'):
                 raise ValueError('The Krea 2 edit workflow requires a Krea 2 model.')
             if getattr(self, 'flow_profile', None) is not None:
                 raise ValueError('The Krea 2 edit KSampler workflow is for diffusion_trainer. '
                                  'Specialized Krea training requires the native Krea 2 preview workflow.')
-            if is_krea_ostris_edit_workflow and not self.model_config.model_kwargs.get('edit', False):
+            if is_krea_ostris_edit_workflow and (self.model_config.arch != 'krea2'
+                    or not self.model_config.model_kwargs.get('edit', False)):
                 raise ValueError('The experimental Krea 2 edit workflow requires a Krea 2 edit-training model.')
             for i, gen_config in enumerate(gen_img_config_list):
                 if not (gen_config.ctrl_img_1 or gen_config.ctrl_img):
@@ -1103,9 +1107,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if gen_config.ctrl_img_3 and not gen_config.ctrl_img_2:
                     raise ValueError(f'Krea 2 edit ComfyUI sample {i + 1} has ctrl_img_3 without ctrl_img_2.')
                 for path in (gen_config.ctrl_img_1 or gen_config.ctrl_img, gen_config.ctrl_img_2, gen_config.ctrl_img_3):
-                    if is_krea_ostris_edit_workflow and path and not os.path.isfile(path):
+                    if (is_krea_ostris_edit_workflow or self.model_config.arch == 'krea2_edit') and path and not os.path.isfile(path):
                         raise FileNotFoundError(f'Krea 2 edit ComfyUI sample {i + 1} control image does not exist: {path}')
-        is_krea_edit = is_krea_edit or is_krea_ostris_edit_workflow
+        is_krea_edit = is_krea_edit or is_krea_ostris_edit_workflow or self.model_config.arch == 'krea2_edit'
         krea_control_settings = self._get_krea_preview_control_settings(include_ordinary_edit=is_krea_ostris_edit_workflow)
         is_qwen_image_2_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH
         is_qwen_image_edit_workflow = workflow_path == DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH
@@ -1255,7 +1259,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     )
                     patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)
                     client.begin_live_progress()
-                    if is_krea_ostris_edit_workflow or request.specialized_flow and workflow_path in (
+                    if is_krea_ostris_edit_workflow or self.model_config.arch == 'krea2_edit' or request.specialized_flow and workflow_path in (
                         DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
                         DEFAULT_COMFY_ANIMA_WORKFLOW_PATH, DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
                     ):
@@ -1652,6 +1656,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
         gen_img_config_list = []
 
         sample_config = self.first_sample_config if is_first else self.sample_config
+        # Apply architecture preview contracts before changing sampling state;
+        # this includes edits to the saved config while training is running.
+        validate_samples = getattr(self.sd, 'validate_sample_config', None)
+        if callable(validate_samples):
+            validate_samples(sample_config)
         self._get_krea_preview_control_settings()
         start_seed = sample_config.seed
         current_seed = start_seed
@@ -2134,9 +2143,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     state_dict = unwrap_model(self.optimizer).state_dict()
                 except Exception as e:
                     state_dict = self.optimizer.state_dict()
-                torch.save(state_dict, file_path)
+                # Keep the last optimizer file intact if serialization fails.
+                temporary_path = file_path + '.tmp'
+                try:
+                    torch.save(state_dict, temporary_path)
+                    os.replace(temporary_path, file_path)
+                finally:
+                    if os.path.exists(temporary_path):
+                        os.remove(temporary_path)
                 print_acc(f"Saved optimizer to {file_path}")
             except Exception as e:
+                if getattr(self, '_pause_save_in_progress', False):
+                    raise RuntimeError('Pause checkpoint failed: could not save optimizer state') from e
                 print_acc(e)
                 print_acc("Could not save optimizer")
 
@@ -2265,6 +2283,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         pass
 
     def get_latest_save_path(self, name=None, post='', include_pretrained_lora=True):
+        if name in (None, self.job.name) and getattr(self, '_fork_resume_checkpoint_path', None):
+            return self._fork_resume_checkpoint_path
         if name == None:
             name = self.job.name
         # get latest saved step
@@ -3164,6 +3184,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def run(self):
         # torch.autograd.set_detect_anomaly(True)
+        from toolkit.job_fork import validate_fork_resume
+        fork_snapshot = validate_fork_resume(self.save_root, self.job.raw_config)
+        if fork_snapshot is not None:
+            self.require_optimizer_state = True
+            self._fork_resume_checkpoint_path = os.path.join(self.save_root, fork_snapshot['checkpoint'])
         # run base process run
         BaseTrainProcess.run(self)
         params = []
@@ -3618,6 +3643,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         # check if it exists
         optimizer_state_file_path = self.get_optimizer_state_path()
+        if fork_snapshot is not None:
+            if self.step_num != fork_snapshot['step']:
+                raise RuntimeError('Fork checkpoint was not loaded with its saved training step')
+            if not os.path.isfile(optimizer_state_file_path):
+                raise RuntimeError('Fork resume requires its saved optimizer state')
         if os.path.exists(optimizer_state_file_path):
             # try to load
             # previous param groups
@@ -3632,6 +3662,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     # do not load optimizer if the network changed, it will result in
                     # a double state that will oom.
                     load_optimizer = False
+
+            if fork_snapshot is not None and not load_optimizer:
+                raise RuntimeError('Fork network layout changed while loading; optimizer state cannot be restored safely')
 
             if load_optimizer:
                 try:

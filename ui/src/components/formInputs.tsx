@@ -7,6 +7,7 @@ import { CircleHelp } from 'lucide-react';
 import { getDoc } from '@/docs';
 import { openDoc } from '@/components/DocModal';
 import { ConfigDoc, GroupedSelectOption, SelectOption } from '@/types';
+import { filterSelectOption } from '@/utils/search';
 
 const Select = dynamic(() => import('react-select'), { ssr: false });
 
@@ -294,6 +295,7 @@ export const SelectInput = (props: SelectInputProps) => {
         </label>
       )}
       <Select
+        filterOption={filterSelectOption}
         value={selectedOption}
         options={options}
         isDisabled={props.disabled}
@@ -390,6 +392,7 @@ export const CreatableSelectInput = (props: CreatableSelectInputProps) => {
       <div className="flex gap-2">
         <div className={isCustom ? 'w-20 shrink-0' : 'w-full'}>
           <Select
+            filterOption={filterSelectOption}
             value={selectedOption}
             options={selectOptions}
             isDisabled={props.disabled}

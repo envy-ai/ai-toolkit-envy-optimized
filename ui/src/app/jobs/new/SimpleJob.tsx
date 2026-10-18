@@ -11,6 +11,7 @@ import { useModelArchs } from '@/extensions/modelArchs';
 import { defaultCompileOptions, defaultDatasetConfig, defaultSliderConfig } from './jobConfig';
 import { FizgigPromptEntry, FizgigSliderConfig, GroupedSelectOption, JobConfig, SelectOption } from '@/types';
 import { objectCopy, tagsToObj, objToTags } from '@/utils/basic';
+import { getDatasetControlPaths, setDatasetControlPath } from '@/helpers/datasetControls';
 import {
   TextInput,
   TextAreaInput,
@@ -959,6 +960,19 @@ export default function SimpleJob({
                 onChange={value => setJobConfig(value, 'config.process[0].model.model_kwargs.match_target_res')}
               />
             )}
+            {modelArch?.customModelSelectOptions?.map(option => option.type === 'checkbox' ? (
+              <Checkbox key={option.label} label={option.label} doc={option.doc}
+                checked={option.getValue(jobConfig)}
+                onChange={value => option.onChange(value, jobConfig, setJobConfig)} />
+            ) : option.type === 'number' ? (
+              <NumberInput key={option.label} label={option.label} doc={option.doc}
+                value={option.getValue(jobConfig)} min={option.min} step={option.step} clampOnBlur={false}
+                onChange={value => option.onChange(value, jobConfig, setJobConfig)} />
+            ) : (
+              <SelectInput key={option.label} label={option.label} doc={option.doc}
+                value={option.getValue(jobConfig) ?? ''} options={option.options}
+                onChange={value => option.onChange(value, jobConfig, setJobConfig)} />
+            ))}
             {modelArch?.additionalSections?.includes('model.layer_offloading') && !isMac() && (
               <>
                 <Checkbox
@@ -2053,16 +2067,16 @@ export default function SimpleJob({
                     />
                   </>
                 )}
-                <NumberInput
+                </>}
+                {!isQwenGuidanceDistillation && !isSliderSpace && !isDiffusionKTO && <NumberInput
                   label="Min SNR Gamma"
                   className="pt-2"
-                  value={jobConfig.config.process[0].train.min_snr_gamma ?? 5.0}
+                  value={jobConfig.config.process[0].train.min_snr_gamma ?? (isFizgigSlider ? 0 : 5.0)}
                   onChange={value => setJobConfig(value, 'config.process[0].train.min_snr_gamma')}
-                  placeholder="eg. 5.0"
+                  placeholder="0 disables; eg. 5.0"
                   docKey={'train.min_snr_gamma'}
                   min={0}
-                />
-                </>}
+                />}
                 {modelArch?.additionalSections?.includes('train.audio_loss_multiplier') && (
                   <NumberInput
                     label="Audio Loss Multiplier"
@@ -2395,12 +2409,12 @@ export default function SimpleJob({
                     }
                   }}
                 />
-                {jobConfig.config.process[0].train.differential_guidance_scale && (
+                {jobConfig.config.process[0].train.do_differential_guidance && (
                   <>
                     <NumberInput
                       label="Differential Guidance Scale"
                       className="pt-2"
-                      value={(jobConfig.config.process[0].train.differential_guidance_scale as number) || 3.0}
+                      value={jobConfig.config.process[0].train.differential_guidance_scale ?? 3.0}
                       onChange={value => setJobConfig(value, 'config.process[0].train.differential_guidance_scale')}
                       placeholder="eg. 3.0"
                       min={0}
@@ -2479,7 +2493,7 @@ export default function SimpleJob({
                           <SelectInput
                             label="Control Dataset"
                             docKey="datasets.control_path"
-                            value={dataset.control_path ?? ''}
+                            value={typeof dataset.control_path === 'string' ? dataset.control_path : ''}
                             className="pt-2"
                             onChange={value =>
                               setJobConfig(value == '' ? null : value, `config.process[0].datasets[${i}].control_path`)
@@ -2487,6 +2501,13 @@ export default function SimpleJob({
                             options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]}
                           />
                         )}
+                        {modelArch?.datasetControlPathListMax && Array.from({ length: modelArch.datasetControlPathListMax }, (_, index) => (
+                          <SelectInput key={index} label={`Reference Dataset ${index + 1}${index ? ' (optional)' : ''}`}
+                            docKey="datasets.control_path" className="pt-2"
+                            value={getDatasetControlPaths(dataset)[index] ?? ''}
+                            onChange={value => setJobConfig(setDatasetControlPath(dataset, index, value), `config.process[0].datasets[${i}].control_path`)}
+                            options={[{ value: '', label: <>&nbsp;</> }, ...datasetOptions]} />
+                        ))}
                         {!isDiffusionKTO && (isPairedImageTraining || (modelArch?.additionalSections?.includes('datasets.multi_control_paths') && (!isQwenGuidanceDistillation || editSourcesEnabled))) && !(isFizgigImageSlider && isMultipoint) && (
                           <>
                             <SelectInput

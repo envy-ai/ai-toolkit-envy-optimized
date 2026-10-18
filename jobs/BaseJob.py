@@ -3,6 +3,7 @@ from collections import OrderedDict
 from typing import List
 
 from jobs.process import BaseProcess
+from toolkit.dataset_validation import DatasetValidationError
 
 
 class BaseJob:
@@ -62,7 +63,13 @@ class BaseJob:
                 else:
                     # it is the class
                     ProcessClass = process_dict[process['type']]
-                self.process.append(ProcessClass(i, self, process))
+                try:
+                    self.process.append(ProcessClass(i, self, process))
+                except DatasetValidationError as error:
+                    # Constructor validation can fail before run.py has a job
+                    # object. Retain the configured DB location for its handler.
+                    error.sqlite_db_path = process.get('sqlite_db_path', './aitk_db.db')
+                    raise
             else:
                 raise ValueError(f'config file is invalid. Unknown process type: {process["type"]}')
 
