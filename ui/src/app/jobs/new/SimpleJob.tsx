@@ -2741,7 +2741,19 @@ export default function SimpleJob({
                       {!isAudioModel && (
                         <div>
                           <FormGroup label="Resolutions" className="pt-2">
-                            <div className="grid grid-cols-2 gap-2">
+                            <Checkbox
+                              label="Native resolution (no scaling)"
+                              checked={dataset.native_resolution || false}
+                              onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].native_resolution`)}
+                            />
+                            {dataset.native_resolution && (
+                              <p className="text-xs text-gray-400 mt-2">
+                                Uses source target image dimensions. Resolution presets are ignored.
+                                {' '}Requires still images with model-compatible dimensions and flips/augmentations disabled.
+                                {' '}Edit references may still be resized by the model.
+                              </p>
+                            )}
+                            <div className={`grid grid-cols-2 gap-2 mt-2${dataset.native_resolution ? ' opacity-50' : ''}`}>
                               {[
                                 [256, 512, 768, 1024],
                                 [1280, 1328, 1536, 2048],
@@ -2752,6 +2764,7 @@ export default function SimpleJob({
                                       key={res}
                                       label={res.toString()}
                                       checked={dataset.resolution.includes(res)}
+                                      disabled={dataset.native_resolution || false}
                                       onChange={value => {
                                         const resolutions = dataset.resolution.includes(res)
                                           ? dataset.resolution.filter(r => r !== res)

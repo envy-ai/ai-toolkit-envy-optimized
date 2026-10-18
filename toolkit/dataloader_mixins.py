@@ -292,8 +292,6 @@ class BucketsMixin:
             return
         self.buckets = {}  # clear it
 
-        config: 'DatasetConfig' = self.dataset_config
-        bucket_tolerance = config.bucket_tolerance
         file_list: List['FileItemDTO'] = self.file_list
         # pooled datasets suffix the key so only batch-compatible sources share a bucket
         is_pooled = getattr(self, 'is_pooled', False)
@@ -319,7 +317,19 @@ class BucketsMixin:
             width = int(file_item.width * item_config.scale)
             height = int(file_item.height * item_config.scale)
 
-            if item_config.square_crop:
+            if item_config.native_resolution:
+                divisibility = item_config.bucket_tolerance
+                if (divisibility <= 0 or width <= 0 or height <= 0
+                        or width % divisibility or height % divisibility):
+                    raise ValueError(
+                        f'native_resolution requires both target dimensions to be positive '
+                        f'multiples of {divisibility}; {file_item.path} is {width}x{height}. '
+                        'Prepare a compatible source image or disable native_resolution.'
+                    )
+                file_item.scale_to_width = file_item.crop_width = width
+                file_item.scale_to_height = file_item.crop_height = height
+                file_item.crop_x = file_item.crop_y = 0
+            elif item_config.square_crop:
                 # we scale first so smallest size matches resolution
                 scale_factor_x = resolution / width
                 scale_factor_y = resolution / height
@@ -338,7 +348,7 @@ class BucketsMixin:
                 bucket_resolution = get_bucket_for_image_size(
                     width, height,
                     resolution=resolution,
-                    divisibility=bucket_tolerance
+                    divisibility=item_config.bucket_tolerance
                 )
 
                 # Calculate scale factors for width and height
@@ -1006,6 +1016,8 @@ class ImageProcessingDTOMixin:
             img = Image.open(self.path)
             img = exif_transpose(img)
         except Exception as e:
+            if self.dataset_config.native_resolution:
+                raise
             print_acc(f"Error: {e}")
             print_acc(f"Error loading image: {self.path}")
 
@@ -1041,7 +1053,15 @@ class ImageProcessingDTOMixin:
             # do a flip
             img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
-        if self.dataset_config.buckets:
+        if self.dataset_config.native_resolution:
+            expected = (self.crop_width, self.crop_height)
+            if img.size != expected:
+                raise ValueError(
+                    f'native_resolution target dimensions changed: {self.path} is '
+                    f'{img.width}x{img.height}, expected {expected[0]}x{expected[1]}. '
+                    'Rebuild the dataset before training.'
+                )
+        elif self.dataset_config.buckets:
             # scale and crop based on file item
             img = resize_mitchell(img, (self.scale_to_width, self.scale_to_height))
             # crop to x_crop, y_crop, x_crop + crop_width, y_crop + crop_height
@@ -1973,7 +1993,10 @@ class LatentCachingFileItemDTOMixin:
         if self.dataset_config.cache_tensors_to_disk:
             # tensor is stored in the cache file, invalidate caches made without it
             item["cache_tensors_to_disk"] = True
-        if self.dataset_config.buckets and not self.is_audio_model:
+        if getattr(self.dataset_config, 'native_resolution', False):
+            item['native_resolution'] = True
+            item['source_file_identity_v1'] = _text_embedding_file_identity(self.path)
+        elif self.dataset_config.buckets and not self.is_audio_model:
             # A resampler change changes both cached pixels and their VAE latents.
             item["bucket_resize_filter"] = MITCHELL_RESIZE_VERSION
         if getattr(self, "load_rgba", False):
@@ -2094,6 +2117,8 @@ class LatentCachingMixin:
                     # not saved to disk, load the image/video/audio
                     prep_item.load_and_process_image(prep_item.dataloader_transforms or self.transform, only_load_latents=True)
                 except Exception as e:
+                    if getattr(prep_item.dataset_config, 'native_resolution', False):
+                        raise
                     print_acc(f"Error processing image: {prep_item.path}")
                     print_acc(f"Error: {str(e)}")
                     print_acc(" - Skipping file and removing it from the dataset")
@@ -2127,6 +2152,8 @@ class LatentCachingMixin:
                     try:
                         self._cache_one_latent(file_item, latent_path, cached_state_dict, needs_encode, to_disk, to_memory)
                     except UnusableFileError as e:
+                        if getattr(file_item.dataset_config, 'native_resolution', False):
+                            raise
                         pbar.write(f"Skipping unusable file {file_item.path}: {e}")
                         failed_items.append(file_item)
                         pbar.update(1)

@@ -1037,6 +1037,8 @@ class DatasetConfig:
         self.resolution: int = kwargs.get('resolution', 512)
         self.scale: float = kwargs.get('scale', 1.0)
         self.buckets: bool = kwargs.get('buckets', True)
+        # Group targets by their exact source dimensions, preserving every pixel.
+        self.native_resolution: bool = kwargs.get('native_resolution', False)
         self.bucket_tolerance: int = kwargs.get('bucket_tolerance', 64)
         self.is_reg: bool = kwargs.get('is_reg', False)
         self.prior_reg: bool = kwargs.get('prior_reg', False)
@@ -1219,6 +1221,24 @@ class DatasetConfig:
         self.audio_preserve_pitch: bool = kwargs.get('audio_preserve_pitch', False) # preserve pitch when stretching audio to fit num_frames
         self.audio_normalize: bool = kwargs.get('audio_normalize', False) # normalize audio volume levels when loading
 
+        if self.native_resolution:
+            conflicts = []
+            if not self.buckets:
+                conflicts.append('buckets must be true')
+            if self.scale != 1.0:
+                conflicts.append('scale must be 1.0')
+            for name in ('random_scale', 'random_crop', 'square_crop', 'flip_x', 'flip_y',
+                         'augments', 'augmentations', 'standardize_images', 'fast_image_size'):
+                if getattr(self, name):
+                    conflicts.append(f'{name} must be disabled')
+            if self.type != 'image' or self.num_frames != 1 or self.auto_frame_count:
+                conflicts.append('only still-image datasets are supported')
+            if (self.fizgig_slider_pair or self.flow_dpo_pair
+                    or self.fizgig_multipoint_group is not None):
+                conflicts.append('paired slider and Flow-DPO targets are not supported')
+            if conflicts:
+                raise ValueError('native_resolution: ' + '; '.join(conflicts))
+
 
 def preprocess_dataset_raw_config(raw_config: List[dict]) -> List[dict]:
     """
@@ -1248,6 +1268,14 @@ def preprocess_dataset_raw_config(raw_config: List[dict]) -> List[dict]:
     new_config = []
     for dataset in raw_config:
         resolution = dataset.get('resolution', 512)
+        if dataset.get('native_resolution', False):
+            # Resolution presets are ignored: duplicating them would repeat every
+            # native target once per preset. Keep an unused scalar for consumers
+            # that expect DatasetConfig.resolution to be an int.
+            dataset_copy = dataset.copy()
+            dataset_copy['resolution'] = 512 if isinstance(resolution, list) else resolution
+            new_config.append(dataset_copy)
+            continue
         if isinstance(resolution, list):
             resolution_list = resolution
         else:

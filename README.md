@@ -354,6 +354,36 @@ replaced.
 Images are never upscaled but they are downscaled and placed in buckets for batching. **You do not need to crop/resize your images**.
 The loader will automatically resize them and can handle varying aspect ratios. 
 
+To batch still-image targets at their exact source dimensions, enable **Native
+resolution (no scaling)** in each dataset's Resolutions settings, or set:
+
+```yaml
+datasets:
+  - folder_path: /path/to/images
+    native_resolution: true
+    buckets: true
+```
+
+This groups images with identical width and height into batches and skips target
+resizing and cropping. Resolution presets are ignored, so a resolution list does
+not repeat the dataset. Each dimension must already be divisible by the model's
+bucket alignment (32 pixels for Qwen Image 2.1); incompatible images cause an
+error instead of being resized or padded. For example, 2048×512 and 1024×1024
+form separate buckets. There is no area cap in this mode, so source dimensions
+determine training memory use; use batch size 1 if every image has a unique size.
+
+Native resolution requires `scale: 1.0`, bucketed still images, and no flips,
+random scale/crop, square crop, image augments/augmentations, or image
+standardization. `fast_image_size` must be disabled so EXIF orientation is
+respected. Video/audio and paired slider/Flow-DPO targets are unsupported.
+Ordinary still-image training and Diffusion-KTO use the same native target path.
+RGB target pixels are preserved before tensor normalization and VAE encoding;
+EXIF orientation and the model's RGB/RGBA conversion still apply. Edit reference
+images and masks retain their own conditioning preprocessing and can be resized.
+Native latent caches are separate from resized caches and track source file
+modification identity. Decode or cache failures stop native dataset loading
+instead of silently replacing or dropping targets.
+
 
 ## Training Specific Layers
 

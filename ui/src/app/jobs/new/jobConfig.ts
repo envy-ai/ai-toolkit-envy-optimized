@@ -79,6 +79,7 @@ export const defaultDatasetConfig: DatasetConfig = {
   is_reg: false,
   network_weight: 1,
   resolution: [512, 768, 1024],
+  native_resolution: false,
   controls: [],
   shrink_video_to_frames: true,
   num_frames: 1,

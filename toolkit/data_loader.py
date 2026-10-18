@@ -485,6 +485,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         self.is_audio_model = hasattr(sd, 'is_audio_model') and sd.is_audio_model if sd is not None else False
         # text-generating multimodal models take audio, image and video files in one dataset
         self.is_multimodal_llm = getattr(sd, 'is_multimodal_llm', False) if sd is not None else False
+        if any(c.native_resolution for c in self.source_configs) and (self.is_audio_model or self.is_multimodal_llm):
+            raise ValueError('native_resolution only supports still-image diffusion datasets')
         super().__init__()
         folder_path = dataset_config.folder_path
         self.dataset_path = dataset_config.dataset_path
@@ -660,6 +662,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 )
                 source_items.append(file_item)
             except Exception as e:
+                if dataset_config.native_resolution:
+                    raise
                 print_acc(traceback.format_exc())
                 if self.is_video:
                     print_acc(f"Error processing video: {file}")
@@ -760,6 +764,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         try:
             file_item.load_and_process_image(file_item.dataloader_transforms or self.transform)
         except Exception as e:
+            if file_item.dataset_config.native_resolution:
+                raise
             if isinstance(e, CachedTensorError):
                 print(f"Error loading training cache for image {file_item.path}, skipping and loading a different one: {e}")
             else:

@@ -141,6 +141,7 @@ export interface DatasetConfig {
   network_weight: number;
   cache_latents_to_disk?: boolean;
   resolution: number[];
+  native_resolution?: boolean;
   controls: string[];
   control_path?: string | string[] | null;
   num_frames: number;

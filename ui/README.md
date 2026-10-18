@@ -9,6 +9,13 @@ more than zero steps. At step zero it stops immediately without requesting a
 checkpoint or waiting for a training step. **Save Now** remains a separate manual
 checkpoint request.
 
+Dataset **Resolutions** include **Native resolution (no scaling)**. Toggle it by
+clicking its label/switch, or focus the switch with Tab and press Space. Enabled
+datasets batch targets by exact source width and height, disable the resolution
+preset controls, and retain the preset selections for later use. See
+[dataset preparation](../README.md#dataset-preparation) for alignment requirements,
+unsupported transforms, and reference-image preprocessing.
+
 Training jobs' **Sample Prompts** use the shared `TextAreaInput` for every
 ordinary prompt and textual tagged field. Enter inserts a newline;
 Ctrl/Cmd+Enter saves the job, as does the existing Save button. Newlines,

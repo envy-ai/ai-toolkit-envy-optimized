@@ -157,9 +157,11 @@ class FileItemDTO(
                 # Release the video capture object immediately
                 video.release()
                 size_database[file_key] = (width, height, file_signature, video_total_frames, video_fps)
-        elif use_db_entry:
+        elif use_db_entry and not self.dataset_config.native_resolution:
             w, h, _ = db_entry[:3]
         else:
+            # Older size databases may contain non-oriented dimensions from
+            # fast_image_size. Native buckets require the EXIF-oriented geometry.
             if self.dataset_config.fast_image_size:
                 # original method is significantly faster, but some images are read sideways. Not sure why. Do slow method by default.
                 try:
