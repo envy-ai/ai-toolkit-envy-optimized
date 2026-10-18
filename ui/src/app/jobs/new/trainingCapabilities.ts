@@ -6,7 +6,22 @@ export const flowTrainingModels: Record<string, { label: string; bucketDivisibil
   krea2: { label: 'Krea 2', bucketDivisibility: 16, editReferences: true },
   anima: { label: 'Anima', bucketDivisibility: 32, editReferences: false },
   ideogram4: { label: 'Ideogram 4', bucketDivisibility: 16, editReferences: false },
+  moss_image: { label: 'MOSS-Image', bucketDivisibility: 16, editReferences: true },
 };
+const mossVariants = ['moss_image', 'moss_image:base', 'moss_image:edit', 'moss_image:base_edit'];
+export const canonicalFlowArch = (arch: string) => mossVariants.includes(arch) ? 'moss_image' : arch;
+export const mossVariantKwargs = (arch: string): Record<string, unknown> => mossVariants.includes(arch)
+  ? { uncond_skip_layers: [22], ...(['moss_image:edit', 'moss_image:base_edit'].includes(arch)
+    ? { edit: true, kv_cache: true, match_target_res: true } : {}) } : {};
+export const effectiveFlowModel = <T extends { arch: string; model_kwargs?: Record<string, any> }>(model: T) => ({
+  ...model, arch: canonicalFlowArch(model.arch), model_kwargs: { ...mossVariantKwargs(model.arch), ...model.model_kwargs },
+});
+export const flowTrainingModelOptions = [
+  ...Object.entries(flowTrainingModels).map(([value, model]) => ({ value, label: value === 'moss_image' ? 'MOSS-Image SFT' : model.label })),
+  { value: 'moss_image:base', label: 'MOSS-Image Base' },
+  { value: 'moss_image:edit', label: 'MOSS-Image SFT [Edit Training]' },
+  { value: 'moss_image:base_edit', label: 'MOSS-Image Base [Edit Training]' },
+];
 export const trainingModeAliases: Record<string, string> = {
   qwen_flow_dpo: 'flow_dpo', qwen_guidance_distillation: 'guidance_distillation',
 };
@@ -16,7 +31,9 @@ export const defaultDiffusionKTOConfig: DiffusionKTOConfig = {
   beta: 1, liked_weight: 1, disliked_weight: 1, reference_estimator: 'batch_mean', score_window_size: 4,
 };
 export const isSpecializedTrainingMode = (mode: string) => specializedTrainingModes.includes(canonicalTrainingMode(mode));
-export const trainingModeSupported = (arch: string, mode: string) => !isSpecializedTrainingMode(mode) || !!flowTrainingModels[arch];
+export const trainingModeSupported = (arch: string, mode: string) => !isSpecializedTrainingMode(mode)
+  || (!!flowTrainingModels[canonicalFlowArch(arch)] && (!['moss_image:edit', 'moss_image:base_edit'].includes(arch)
+    || ['flow_dpo', 'guidance_distillation'].includes(canonicalTrainingMode(mode))));
 export const trainingModeVisible = (arch: string, mode: string, selected: string) => mode === selected
   || (!trainingModeAliases[mode] && trainingModeSupported(arch, mode));
 export const cfgNegativeTextEnabled = (model: { arch: string; model_kwargs?: Record<string, unknown> }) =>
@@ -35,12 +52,19 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
   if (process.logging?.record_training_rng && process.logging?.record_training_examples === false) errors.push('Recording noise RNG state requires per-image loss logging.');
   if (process.model?.arch === 'krea2_edit') errors.push(...validateKrea2Edit(config));
   if (!isSpecializedTrainingMode(mode)) return errors;
-  const model = process.model;
-  if (!model || !trainingModeSupported(model.arch, mode)) return [...errors, `${mode} supports Qwen Image 2.1, Krea 2, Anima and Ideogram 4.`];
+  const model = process.model && effectiveFlowModel(process.model);
+  if (!model || !flowTrainingModels[model.arch]) return [...errors, `${mode} supports Qwen Image 2.1, Krea 2, Anima, Ideogram 4 and MOSS-Image.`];
   const networks = mode.startsWith('fizgig_') ? ['lora', 'dora'] : ['lora'];
   if (!networks.includes(process.network?.type ?? '')) errors.push(`${mode} requires ${networks.length === 1 ? 'LoRA only' : 'LoRA or DoRA'}.`);
   const kwargs = model.model_kwargs ?? {};
-  if (mode.startsWith('fizgig_') && process.train.do_differential_guidance) {
+  if (model.arch === 'moss_image') {
+    if (process.sample?.comfy?.enabled) errors.push('MOSS-Image specialized modes require native previews. Disable the ComfyUI renderer.');
+    if (kwargs.kv_cache && !kwargs.edit) errors.push('MOSS-Image kv_cache requires model_kwargs.edit=true.');
+    if ((kwargs.edit || kwargs.kv_cache) && !['flow_dpo', 'guidance_distillation'].includes(mode)) errors.push(`${mode} is text-to-image. Disable MOSS-Image edit and kv_cache.`);
+    const skipped = kwargs.uncond_skip_layers ?? [22];
+    if (!Array.isArray(skipped) || skipped.some((index: unknown) => !Number.isInteger(index) || Number(index) < 0 || Number(index) > 41)) errors.push('MOSS-Image uncond_skip_layers must contain zero-based block indices in [0, 41].');
+  }
+  if (mode.startsWith('fizgig_') && process.train?.do_differential_guidance) {
     const scale = process.train.differential_guidance_scale ?? 3;
     if (typeof scale !== 'number' || !Number.isFinite(scale) || scale < 0) {
       errors.push('Differential Guidance Scale must be finite and nonnegative.');
@@ -63,7 +87,7 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     if (kwargs.is_distilled || /(?:^|[\W_])(?:turbo|lightning|distilled)(?:$|[\W_])/i.test(model.name_or_path ?? '')) errors.push('Specialized training currently requires a base checkpoint, not a turbo/step-distilled variant.');
     if (model.arch === 'krea2' && (mode.startsWith('fizgig_') || mode === 'sliderspace') && (kwargs.edit || kwargs.kv_cache)) errors.push('Fizgig and SliderSpace are text-to-image objectives. Disable Krea edit and kv_cache.');
   }
-  const hasEditReferences = flowTrainingModels[model.arch].editReferences && (model.arch !== 'krea2' || !!kwargs.edit);
+  const hasEditReferences = flowTrainingModels[model.arch].editReferences && (!['krea2', 'moss_image'].includes(model.arch) || !!kwargs.edit);
   if (process.datasets != null && !Array.isArray(process.datasets)) errors.push('Training datasets must be a list.');
   for (const dataset of Array.isArray(process.datasets) ? process.datasets : []) {
     if (!dataset || typeof dataset !== 'object') { errors.push('Each dataset must be a configuration object.'); continue; }
@@ -71,6 +95,7 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     const references = paired ? [dataset.control_path_2, dataset.control_path_3] :
       [dataset.control_path, dataset.control_path_1, dataset.control_path_2, dataset.control_path_3];
     if (references.some(Boolean) && (mode.startsWith('fizgig_') || !hasEditReferences)) errors.push('This mode/model does not support the configured edit-source images. Control Dataset 1 is a paired target in image sliders/DPO, not an edit reference.');
+    if (model.arch === 'moss_image' && kwargs.edit && !references.some(Boolean)) errors.push('MOSS-Image edit training requires fixed edit-source images for every dataset.');
   }
   if (mode === 'guidance_distillation' && model.arch === 'ideogram4' && process.guidance_distillation?.objective === 'negative_only'
     && (!cfgNegativeTextEnabled(model) || !process.guidance_distillation.negative_prompt?.trim())) errors.push('Ideogram negative-only distillation requires text-negative CFG and a nonempty teacher negative prompt.');
@@ -135,7 +160,8 @@ export function validateDiffusionKTO(config: JobConfig): string[] {
   if (typeof networkOptions !== 'object' || Array.isArray(networkOptions)) errors.push('KTO network_kwargs must be an object.');
   if ([network, networkOptions].some(values => ['dropout', 'rank_dropout', 'module_dropout'].some(key => values[key] != null && values[key] !== 0))) errors.push('KTO requires zero adapter dropout for exact replay.');
   if (network.all_layers || ['full_train_in_out', 'full_if_contains', 'is_ara'].some(key => networkOptions[key])) errors.push('KTO requires ordinary LoRA-only parameters, not full-layer adapters.');
-  if (process.model.model_kwargs?.edit || process.model.model_kwargs?.kv_cache) errors.push('KTO initially supports text-to-image only; disable edit/kv_cache.');
+  const effectiveModel = effectiveFlowModel(process.model);
+  if (effectiveModel.model_kwargs.edit || effectiveModel.model_kwargs.kv_cache) errors.push('KTO initially supports text-to-image only; disable edit/kv_cache.');
   if (!train.cache_text_embeddings || train.unload_text_encoder) errors.push('KTO requires Cache Text Embeddings, not Unload TE.');
   if (train.train_text_encoder || train.train_unet === false || train.noise_scheduler !== 'flowmatch' || (train.timestep_type ?? 'shift') !== 'shift' || (train.loss_type ?? 'mse') !== 'mse') errors.push('KTO requires transformer-only LoRA training with flowmatch, shifted times and MSE.');
   if (['do_cfg', 'do_random_cfg', 'do_guidance_loss', 'do_differential_guidance', 'diff_output_preservation',
@@ -195,15 +221,25 @@ export function activateDiffusionKTO(config: JobConfig, defaultDataset: DatasetC
 export function switchSpecializedArchitecture(config: JobConfig, arch: string): { config: JobConfig; notice: string } {
   const next = structuredClone(config);
   const process = next.config.process[0];
-  if (!isSpecializedTrainingMode(process.type) || !flowTrainingModels[arch]) throw new Error('Unsupported specialized training architecture.');
+  if (!isSpecializedTrainingMode(process.type) || !trainingModeSupported(arch, process.type)) throw new Error('Unsupported specialized training architecture.');
+  const previousArch = canonicalFlowArch(process.model.arch);
   process.model.arch = arch;
   process.model.name_or_path = '';
   delete process.model.text_encoder_path;
+  delete process.model.te_name_or_path;
   delete process.model.vae_path;
   delete process.model.assistant_lora_path;
   delete process.model.unconditional_lora_path;
-  process.model.model_kwargs = {};
+  process.model.model_kwargs = mossVariantKwargs(arch);
   if (process.network) delete process.network.pretrained_lora_path;
+  if (process.network && canonicalFlowArch(arch) === 'moss_image') {
+    process.network.network_kwargs ??= {};
+    const ignored = process.network.network_kwargs.ignore_if_contains ?? [];
+    process.network.network_kwargs.ignore_if_contains = [...new Set([...ignored, 'layers.22.'])];
+  } else if (process.network?.network_kwargs && previousArch === 'moss_image') {
+    const ignored = process.network.network_kwargs.ignore_if_contains;
+    if (Array.isArray(ignored)) process.network.network_kwargs.ignore_if_contains = ignored.filter(value => value !== 'layers.22.');
+  }
   const paired = ['flow_dpo', 'fizgig_image_slider'].includes(canonicalTrainingMode(process.type));
   for (const dataset of process.datasets ?? []) {
     delete dataset.control_path;
@@ -212,5 +248,7 @@ export function switchSpecializedArchitecture(config: JobConfig, arch: string): 
     delete dataset.control_path_3;
     dataset.controls = [];
   }
-  return { config: next, notice: 'Architecture changed. Select compatible base, text encoder and VAE paths; model-specific overrides, pretrained/auxiliary adapters and edit references were cleared. Prompts, paired targets, anchors, ranks and memory settings were retained.' };
+  const source = canonicalFlowArch(arch) === 'moss_image'
+    ? ` For this variant select OpenMOSS-Team/MOSS-Image-${['moss_image:base', 'moss_image:base_edit'].includes(arch) ? 'Base' : 'SFT'} or compatible weights.` : '';
+  return { config: next, notice: 'Architecture changed. Select compatible base, text encoder and VAE paths; model-specific overrides, pretrained/auxiliary adapters and edit references were cleared. Prompts, paired targets, anchors, ranks and memory settings were retained.' + source };
 }

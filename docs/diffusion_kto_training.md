@@ -1,6 +1,6 @@
 # Diffusion-KTO LoRA (experimental)
 
-Available on Qwen Image 2.1, Krea 2, Anima and Ideogram 4. This is a new
+Available on Qwen Image 2.1, Krea 2, Anima, Ideogram 4 and MOSS-Image Base/SFT. This is a new
 binary-feedback workflow, not DPO with a renamed label. The flow-matching
 adaptation is experimental: CPU tests verify objective/replay contracts, not
 actual-checkpoint image quality or VRAM fit.
@@ -90,6 +90,7 @@ previews; KTO scoring itself is conditional CFG 1.
 - `config/examples/train_diffusion_kto_krea2.yaml`
 - `config/examples/train_diffusion_kto_anima.yaml`
 - `config/examples/train_diffusion_kto_ideogram4.yaml`
+- `config/examples/train_diffusion_kto_moss_image.yaml`
 
 Replace component and dataset paths before use. Constructor fixtures check all
 four YAMLs with unequal image sizes/counts/stems. CPU fixtures exercise the real

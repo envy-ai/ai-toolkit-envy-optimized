@@ -20,11 +20,11 @@ Flow convention matches ai-toolkit (sigma 1 = noise, target = noise - clean).
 
 import math
 import os
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import torch.nn.functional as F
-from PIL import Image
 from safetensors import safe_open
 from safetensors.torch import load_file
 from torchvision.transforms.functional import to_tensor
@@ -34,6 +34,7 @@ from toolkit.accelerator import unwrap_model
 from toolkit.advanced_prompt_embeds import AdvancedPromptEmbeds
 from toolkit.basic import flush
 from toolkit.config_modules import GenerateImageConfig, ModelConfig
+from toolkit.control_image import MOSS_EDIT_CONTROL_PRESENTATION, load_control_rgb
 from toolkit.metadata import get_meta_for_safetensors
 from toolkit.models.base_model import BaseModel
 from toolkit.models.v2.text_encoders.qwen35 import (
@@ -299,6 +300,10 @@ class MossImageModel(BaseModel):
             state_dict = convert_diffusers_state_dict(state_dict)
         # config sniffed from the checkpoint (small decoder)
         vae = AutoEncoder.load_from_state_dict(state_dict, self.vae_torch_dtype)
+        # The default is resolved outside ModelConfig. Persistent training
+        # banks must identify the actual loaded weights, including BN stats.
+        vae.aitk_load_source = {'path': os.path.realpath(path)}
+        vae.aitk_load_files = [os.path.realpath(path)]
         return vae.eval().requires_grad_(False)
 
     def load_model(self):
@@ -332,6 +337,24 @@ class MossImageModel(BaseModel):
     def get_generation_pipeline(self):
         return MossImagePipeline(self)
 
+    def validate_sample_config(self, sample_config):
+        # Sample-only edits are allowed while jobs run; recheck the renderer
+        # before allocating sampling state as well as during job creation.
+        if (getattr(self, '_specialized_flow_training', False)
+                and getattr(getattr(sample_config, 'comfy', None), 'enabled', False)):
+            raise ValueError('MOSS-Image specialized modes require native previews; disable the ComfyUI renderer')
+
+    def get_sample_control_image_paths(self, gen_config):
+        if getattr(self, '_specialized_control_presentation', None) != MOSS_EDIT_CONTROL_PRESENTATION:
+            return super().get_sample_control_image_paths(gen_config)
+        paths = (gen_config.ctrl_img_1 or gen_config.ctrl_img, gen_config.ctrl_img_2, gen_config.ctrl_img_3)
+        return list(dict.fromkeys(path for path in paths if path is not None))
+
+    def load_sample_control_image(self, path):
+        if getattr(self, '_specialized_control_presentation', None) != MOSS_EDIT_CONTROL_PRESENTATION:
+            return super().load_sample_control_image(path)
+        return load_control_rgb(path, getattr(self, '_specialized_preview_background', (0, 0, 0)))
+
     def generate_single_image(
         self,
         pipeline: MossImagePipeline,
@@ -361,10 +384,12 @@ class MossImageModel(BaseModel):
             ):
                 if path is not None and path not in ctrl_paths:
                     ctrl_paths.append(path)
+            if getattr(self, '_specialized_control_presentation', None) == MOSS_EDIT_CONTROL_PRESENTATION:
+                ctrl_paths = self.get_sample_control_image_paths(gen_config)
             if ctrl_paths:
                 ref_latents = [
                     self._encode_ref_latents(
-                        [to_tensor(Image.open(p).convert("RGB")) for p in ctrl_paths],
+                        [to_tensor(self.load_sample_control_image(p)) for p in ctrl_paths],
                         target_pixels=gen_config.width * gen_config.height,
                     )
                 ]
@@ -429,17 +454,14 @@ class MossImageModel(BaseModel):
     def _batch_ref_latents(
         self, batch: "DataLoaderBatchDTO", batch_size: int, target_pixels: int
     ) -> Optional[List[List[torch.Tensor]]]:
-        control_list = batch.control_tensor_list
-        if control_list is None and batch.control_tensor is not None:
-            control_list = [batch.control_tensor[b : b + 1] for b in range(batch_size)]
-        if control_list is None:
-            return None
-        if len(control_list) != batch_size:
-            raise ValueError("control tensor list length does not match batch size")
-        return [
-            self._encode_ref_latents(controls, target_pixels=target_pixels)
-            for controls in control_list
-        ]
+        from toolkit.flow_training import batch_training_reference_latents
+        return batch_training_reference_latents(self, batch, batch_size, target_pixels)
+
+    @contextmanager
+    def training_reference_context(self, batch):
+        from toolkit.flow_training import training_reference_context
+        with training_reference_context(self, batch):
+            yield
 
     def _prep_vlm_images(self, images: List[torch.Tensor]) -> List[torch.Tensor]:
         """References for the vision tower: downscaled (never up) to
@@ -497,6 +519,7 @@ class MossImageModel(BaseModel):
             t,
             embeds,
             mask,
+            skip_layers=kwargs.get('skip_layers', ()),
             ref_latents=ref_latents,
             isolate_refs=self.kv_cache,
         )
@@ -555,7 +578,13 @@ class MossImageModel(BaseModel):
                 control_images = control_images * len(prompt)
             if len(control_images) != len(prompt):
                 raise ValueError("number of prompts must match number of control image sets")
-            control_images = [_drop_repeats(c) if c else None for c in control_images]
+            if getattr(self, '_specialized_control_presentation', None) == MOSS_EDIT_CONTROL_PRESENTATION:
+                # Preview aliases are deduplicated by path before loading.
+                # Explicit dataset references retain their order/count, even
+                # when precision conversion makes two images pixel-identical.
+                control_images = [c if c else None for c in control_images]
+            else:
+                control_images = [_drop_repeats(c) if c else None for c in control_images]
         else:
             control_images = [None] * len(prompt)
 
@@ -602,8 +631,9 @@ class MossImageModel(BaseModel):
         batch = torch.stack([img.to(device, dtype=self.vae.dtype) for img in image_list])
         return self.vae.encode(batch).to(device, dtype=dtype)
 
-    @torch.no_grad()
     def decode_latents(self, latents: torch.Tensor, device=None, dtype=None):
+        # Keep latent gradients for SliderSpace's frozen-VAE semantic loss.
+        # Inference callers already establish their own no-grad context.
         if device is None:
             device = self.vae_device_torch
         if dtype is None:

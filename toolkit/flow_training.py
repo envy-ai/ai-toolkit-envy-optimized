@@ -11,7 +11,7 @@ from functools import wraps
 
 import torch
 
-from toolkit.training_capabilities import FLOW_TRAINING_MODELS, cfg_reference_mode
+from toolkit.training_capabilities import FLOW_TRAINING_MODELS, canonical_flow_arch, cfg_reference_mode
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ class FlowTrainingProfile:
 
     @classmethod
     def from_model_config(cls, model):
-        arch = model.get('arch')
+        arch = canonical_flow_arch(model.get('arch'))
         if arch not in FLOW_TRAINING_MODELS:
             raise ValueError(f'Unsupported flow training architecture: {arch}')
         kwargs = model.get('model_kwargs') or {}
@@ -42,7 +42,8 @@ class FlowTrainingProfile:
                         or not isinstance(number, (int, float)) or not math.isfinite(number)):
                     raise ValueError('Krea schedule shifts must be finite numbers')
             return value
-        return cls(arch, math.log(3) if arch == 'anima' else 0 if arch == 'ideogram4' else None)
+        return cls(arch, math.log(5) if arch == 'moss_image' else
+                   math.log(3) if arch == 'anima' else 0 if arch == 'ideogram4' else None)
 
     def shift(self, height, width):
         if self.fixed_mu is not None:
@@ -132,10 +133,18 @@ def resolve_cfg_reference(model, positive, negative):
     return negative
 
 
-def predict_flow_branch(model, noisy, timesteps, embeds, batch=None):
+def flow_reference_prediction_kwargs(model):
+    """Native CFG branch options, passed explicitly through checkpoint replay."""
+    if getattr(model, 'arch', None) == 'moss_image':
+        return {'skip_layers': tuple(getattr(model, 'uncond_skip_layers', (22,)))}
+    return {}
+
+
+def predict_flow_branch(model, noisy, timesteps, embeds, batch=None, *, reference=False):
     return model.predict_noise(latents=noisy, timestep=timesteps, conditional_embeddings=embeds,
                                unconditional_embeddings=None, guidance_scale=1.0,
-                               guidance_embedding_scale=1.0, batch=batch).float()
+                               guidance_embedding_scale=1.0, batch=batch,
+                               **(flow_reference_prediction_kwargs(model) if reference else {})).float()
 
 
 def guided_flow_prediction(model, noisy, timesteps, positive, negative, cfg, batch=None):
@@ -145,20 +154,62 @@ def guided_flow_prediction(model, noisy, timesteps, positive, negative, cfg, bat
     reference = resolve_cfg_reference(model, positive, negative)
     if reference is None:
         raise ValueError('Guided flow prediction requires negative/reference conditioning at CFG > 1')
-    unconditional = predict_flow_branch(model, noisy, timesteps, reference, batch)
+    unconditional = predict_flow_branch(model, noisy, timesteps, reference, batch, reference=True)
     return unconditional + cfg * (conditional - unconditional)
+
+
+@contextmanager
+def training_reference_context(model, batch):
+    """Retain detached reference inputs through sequential forwards/backward."""
+    previous = getattr(model, '_training_reference_scope', None)
+    if previous is not None and previous['batch'] is not batch:
+        raise ValueError('Cannot nest reference replay for different training batches')
+    scope = previous if previous is not None else {'batch': batch, 'latents': {}}
+    model._training_reference_scope = scope
+    try:
+        yield
+    finally:
+        if previous is None:
+            scope['latents'].clear()
+            del model._training_reference_scope
+        else:
+            model._training_reference_scope = previous
+
+
+def batch_training_reference_latents(model, batch, batch_size, target_pixels):
+    """Share clean VAE inputs only; adapted transformer K/V are never cached."""
+    scope = getattr(model, '_training_reference_scope', None)
+    key = (batch_size, target_pixels)
+    if scope is not None:
+        if scope['batch'] is not batch:
+            raise ValueError('Reference replay must use the original training batch')
+        if key in scope['latents']:
+            return scope['latents'][key]
+    control_list = batch.control_tensor_list
+    if control_list is None and batch.control_tensor is not None:
+        control_list = [batch.control_tensor[index:index + 1] for index in range(batch_size)]
+    if control_list is None:
+        return None
+    if len(control_list) != batch_size:
+        raise ValueError('Control tensor list length does not match batch size')
+    with torch.no_grad():
+        result = [[latent.detach() for latent in model._encode_ref_latents(controls, target_pixels=target_pixels)]
+                  for controls in control_list]
+    if scope is not None:
+        scope['latents'][key] = result
+    return result
 
 
 def scoped_training_references(function):
     """Share detached edit inputs across specialized passes, not adapted K/V.
 
-    Qwen/Anima/Ideogram and non-edit Krea keep their existing prediction path.
+    Models without the edit replay protocol keep their existing prediction path.
     The scope includes backward so checkpoint recomputation uses the same refs.
     """
     @wraps(function)
     def wrapped(self, batch, *args, **kwargs):
         model = getattr(self, 'sd', None)
-        if getattr(model, 'arch', None) != 'krea2' or not getattr(model, 'is_edit', False):
+        if getattr(model, 'arch', None) not in ('krea2', 'moss_image') or not getattr(model, 'is_edit', False):
             return function(self, batch, *args, **kwargs)
         with model.training_reference_context(batch):
             return function(self, batch, *args, **kwargs)

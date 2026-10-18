@@ -274,7 +274,7 @@ def discovery_signature(config, model, provided=None):
         payload.update(version=2, provided=scan_discovery_images(config, divisibility) if provided is None else provided,
                        presentation=f'exif_rgb_center_cover_{MITCHELL_RESIZE_VERSION}',
                        feature_presentation='mean_letterbox_v1' if config.discovery_buckets else 'stretch_v1')
-    if model.get('arch') in ('krea2', 'anima', 'ideogram4'):
+    if model.get('arch') in ('krea2', 'anima', 'ideogram4', 'moss_image'):
         from toolkit.flow_training import FlowTrainingProfile
         payload.update(version=3, flow_profile=FlowTrainingProfile.from_model_config(model).identity(),
                        cfg_reference=cfg_reference_mode(model), bucket_divisibility=divisibility,
@@ -283,6 +283,11 @@ def discovery_signature(config, model, provided=None):
             payload['caption_digest'] = _local_identity(str(Path(__file__).parent / 'ideogram_caption.py'))
             payload['latent_norm'] = _local_identity(str(Path(__file__).parent.parent /
                 'extensions_built_in/diffusion_models/ideogram4/src/latent_norm.py'))
+        if model['arch'] == 'moss_image':
+            kwargs = model.get('model_kwargs') or {}
+            payload.update(latent_layout='moss_flux2_packed_bn_v1',
+                           native_generation={'sample_shift': kwargs.get('sample_shift', 5.0),
+                                              'uncond_skip_layers': kwargs.get('uncond_skip_layers', [22])})
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 

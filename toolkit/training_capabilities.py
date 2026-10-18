@@ -27,7 +27,37 @@ FLOW_TRAINING_MODELS = {
     'krea2': FlowTrainingCapability('Krea 2', 16, edit_references=True),
     'anima': FlowTrainingCapability('Anima', 32),
     'ideogram4': FlowTrainingCapability('Ideogram 4', 16, image_only_cfg=True),
+    'moss_image': FlowTrainingCapability('MOSS-Image', 16, edit_references=True),
 }
+
+
+MOSS_TRAINING_VARIANTS = ('moss_image', 'moss_image:base', 'moss_image:edit', 'moss_image:base_edit')
+
+
+def canonical_flow_arch(arch):
+    return 'moss_image' if arch in MOSS_TRAINING_VARIANTS else arch
+
+
+def normalize_moss_training_config(config):
+    """Resolve known UI tags before trainer validation and ModelConfig loading.
+
+    ModelConfig strips tags without applying their defaults. Imported edit/base
+    YAML must retain its semantics even when it omits redundant model_kwargs.
+    Explicit component paths and memory settings always win.
+    """
+    model = config.get('model') or {}
+    variant = model.get('arch')
+    if variant not in MOSS_TRAINING_VARIANTS:
+        return
+    model['arch'] = 'moss_image'
+    model.setdefault('name_or_path', 'OpenMOSS-Team/MOSS-Image-Base'
+                     if variant in ('moss_image:base', 'moss_image:base_edit') else 'OpenMOSS-Team/MOSS-Image-SFT')
+    kwargs = model.get('model_kwargs') or {}
+    model['model_kwargs'] = kwargs
+    if variant in ('moss_image:edit', 'moss_image:base_edit'):
+        for key in ('edit', 'kv_cache', 'match_target_res'):
+            kwargs.setdefault(key, True)
+    kwargs.setdefault('uncond_skip_layers', [22])
 
 
 def canonical_training_mode(mode):
@@ -45,6 +75,7 @@ def cfg_reference_mode(model):
 
 def validate_specialized_model(config, mode=None):
     """Model/network compatibility only; objective-specific validation stays local."""
+    normalize_moss_training_config(config)
     mode = canonical_training_mode(mode or config.get('type'))
     if mode not in SPECIALIZED_MODES:
         raise ValueError(f'Unknown specialized flow training mode: {mode}')
@@ -52,13 +83,23 @@ def validate_specialized_model(config, mode=None):
     arch = model.get('arch')
     capability = FLOW_TRAINING_MODELS.get(arch)
     if capability is None:
-        raise ValueError(f'{mode} supports Qwen Image 2.1, Krea 2, Anima and Ideogram 4')
+        raise ValueError(f'{mode} supports Qwen Image 2.1, Krea 2, Anima, Ideogram 4 and MOSS-Image')
     networks = ('lora', 'dora') if mode.startswith('fizgig_') else ('lora',)
     if (config.get('network') or {}).get('type') not in networks:
         labels = {'lora': 'LoRA', 'dora': 'DoRA'}
         suffix = ' only' if len(networks) == 1 else ''
         raise ValueError(f'{mode} requires {" or ".join(labels[item] for item in networks)}{suffix}')
     kwargs = model.get('model_kwargs') or {}
+    if arch == 'moss_image':
+        if ((config.get('sample') or {}).get('comfy') or {}).get('enabled'):
+            raise ValueError('MOSS-Image specialized modes require native previews; disable the ComfyUI renderer')
+        if kwargs.get('kv_cache') and not kwargs.get('edit'):
+            raise ValueError('MOSS-Image kv_cache requires model_kwargs.edit=true')
+        if (kwargs.get('edit') or kwargs.get('kv_cache')) and mode not in ('flow_dpo', 'guidance_distillation'):
+            raise ValueError(f'{mode} is text-to-image; disable MOSS-Image edit and kv_cache')
+        skipped = kwargs.get('uncond_skip_layers', [22])
+        if not isinstance(skipped, (list, tuple)) or any(type(index) is not int or not 0 <= index < 42 for index in skipped):
+            raise ValueError('MOSS-Image uncond_skip_layers must contain zero-based block indices in [0, 41]')
     if arch == 'anima' and kwargs.get('train_text_conditioner'):
         raise ValueError(f'{mode} requires a frozen Anima text conditioner; disable train_text_conditioner')
     cfg_reference_mode(model)
@@ -95,12 +136,17 @@ def validate_specialized_model(config, mode=None):
 def validate_edit_references(config, datasets, *, paired=False):
     """Control 1 can be a target/rejected image, never an actual edit reference."""
     model = config.get('model') or {}
-    capability = FLOW_TRAINING_MODELS[model['arch']]
+    arch = canonical_flow_arch(model.get('arch'))
+    capability = FLOW_TRAINING_MODELS[arch]
     keys = ('control_path_2', 'control_path_3') if paired else (
         'control_path', 'control_path_1', 'control_path_2', 'control_path_3')
     has_references = any(dataset.get(key) for dataset in datasets for key in keys)
     if has_references and not capability.edit_references:
         raise ValueError(f'{capability.name} does not support edit-source image conditioning')
-    if has_references and model['arch'] == 'krea2' and not (model.get('model_kwargs') or {}).get('edit'):
-        raise ValueError('Krea edit-source images require model_kwargs.edit=true')
+    if has_references and arch in ('krea2', 'moss_image') and not (model.get('model_kwargs') or {}).get('edit'):
+        raise ValueError(f'{capability.name} edit-source images require model_kwargs.edit=true')
+    if arch == 'moss_image' and (model.get('model_kwargs') or {}).get('edit'):
+        for dataset in datasets:
+            if not any(dataset.get(key) for key in keys):
+                raise ValueError('MOSS-Image edit training requires fixed edit-source images for every dataset')
     return has_references

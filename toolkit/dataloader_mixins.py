@@ -1271,9 +1271,9 @@ class ControlFileItemDTOMixin:
         
         for control_path in control_path_list:
             try:
-                from toolkit.control_image import KREA_EDIT_CONTROL_PRESENTATION, load_control_rgb
+                from toolkit.control_image import KREA_EDIT_CONTROL_PRESENTATION, MOSS_EDIT_CONTROL_PRESENTATION, load_control_rgb
                 if (not self.load_rgba and getattr(self, 'text_embedding_control_presentation', None)
-                        == KREA_EDIT_CONTROL_PRESENTATION):
+                        in (KREA_EDIT_CONTROL_PRESENTATION, MOSS_EDIT_CONTROL_PRESENTATION)):
                     img = load_control_rgb(control_path, self.dataset_config.control_transparent_color)
                 else:
                     img = Image.open(control_path)

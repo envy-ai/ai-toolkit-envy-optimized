@@ -254,6 +254,7 @@ export interface ModelConfig {
   layer_offloading_text_encoder_percent?: number;
   assistant_lora_path?: string;
   text_encoder_path?: string;
+  te_name_or_path?: string;
   vae_path?: string;
   inference_lora_path?: string;
   unconditional_lora_path?: string;

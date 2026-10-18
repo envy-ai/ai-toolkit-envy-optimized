@@ -1,8 +1,9 @@
-"""Versioned RGB presentation for specialized Krea edit conditioning only."""
+"""Versioned RGB presentation for specialized edit conditioning."""
 from PIL import Image, ImageOps
 
 
 KREA_EDIT_CONTROL_PRESENTATION = 'krea-edit-rgb-v2'
+MOSS_EDIT_CONTROL_PRESENTATION = 'moss-edit-rgb-v1'
 
 
 def load_control_rgb(path, background=(0, 0, 0)):

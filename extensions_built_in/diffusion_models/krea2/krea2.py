@@ -692,53 +692,18 @@ class Krea2Model(QwenImageVAEHolderMixin, BaseModel):
         Only detached VAE inputs are cached, never transformer activations/K/V.
         The ordinary training/inference path outside the scope stays unchanged.
         """
-        scope = getattr(self, "_training_reference_scope", None)
-        key = (batch_size, target_pixels)
-        if scope is not None:
-            if scope["batch"] is not batch:
-                raise ValueError("Krea reference replay must use the original training batch")
-            if key in scope["latents"]:
-                return scope["latents"][key]
-        control_list = batch.control_tensor_list
-        if control_list is None and batch.control_tensor is not None:
-            control_list = [batch.control_tensor[b : b + 1] for b in range(batch_size)]
-        if control_list is None:
-            return None
-        if len(control_list) != batch_size:
-            raise ValueError("Control tensor list length does not match batch size")
-        with torch.no_grad():
-            result = [
-                [latent.detach() for latent in self._encode_ref_latents(controls, target_pixels=target_pixels)]
-                for controls in control_list
-            ]
-        if scope is not None:
-            scope["latents"][key] = result
-        return result
+        from toolkit.flow_training import batch_training_reference_latents
+        return batch_training_reference_latents(self, batch, batch_size, target_pixels)
 
     @contextmanager
     def training_reference_context(self, batch):
-        """Keep VAE samples identical through teacher/policy/backward passes.
-
-        Qwen's VAE samples its posterior. Encoding refs on every prediction would
-        invalidate DPO's exact replay and perturb distillation's teacher target.
-        The cache lives only for this accumulation, including checkpoint backward.
-        """
+        """Keep sampled VAE inputs identical through teacher/policy/backward."""
         if not self.is_edit:
             yield
             return
-        previous = getattr(self, "_training_reference_scope", None)
-        if previous is not None and previous["batch"] is not batch:
-            raise ValueError("Cannot nest Krea reference replay for different batches")
-        scope = previous if previous is not None else {"batch": batch, "latents": {}}
-        self._training_reference_scope = scope
-        try:
+        from toolkit.flow_training import training_reference_context
+        with training_reference_context(self, batch):
             yield
-        finally:
-            if previous is None:
-                scope["latents"].clear()
-                del self._training_reference_scope
-            else:
-                self._training_reference_scope = previous
 
     # ------------------------------------------------------------------
     # Training hooks

@@ -16,7 +16,7 @@ from torchvision.transforms.functional import to_tensor
 from tqdm.auto import tqdm
 
 from toolkit.flow_training import (FlowTrainingProfile, trainer_flow_profile, image_only_prompt_embeds,
-                                   scoped_training_references)
+                                   scoped_training_references, predict_flow_branch)
 from toolkit.training_capabilities import validate_specialized_model, validate_edit_references, cfg_reference_mode
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 from toolkit.basic import flush
@@ -173,7 +173,7 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
                                         if controls is None and item.control_tensor is not None:
                                             tensor = item.control_tensor
                                             controls = list(tensor) if tensor.dim() == 4 else [tensor]
-                                        if getattr(self.sd, 'arch', None) == 'krea2' and controls is not None:
+                                        if getattr(self.sd, 'arch', None) in ('krea2', 'moss_image') and controls is not None:
                                             # Match the positive disk-cache path's
                                             # device/dtype BEFORE VLM resizing. In
                                             # bf16 even a different pixel rounding
@@ -239,6 +239,11 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
             guidance_embedding_scale=1.0, batch=batch,
         ).float()
 
+    def _predict_reference(self, noisy, timesteps, embeds, batch):
+        if getattr(self.sd, 'arch', None) == 'moss_image':
+            return predict_flow_branch(self.sd, noisy, timesteps, embeds, batch, reference=True)
+        return self._predict(noisy, timesteps, embeds, batch)
+
     @scoped_training_references
     def train_single_accumulation(self, batch, accum_scale=1.0):
         if batch is None or batch.latents is None or batch.prompt_embeds is None:
@@ -276,8 +281,8 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
             self.sd.unet.eval()
             with torch.no_grad():
                 teacher_positive = self._predict(noisy, timesteps, positive_embeds, batch)
-                teacher_negative = self._predict(noisy, timesteps, negative_embeds, batch) if negative_embeds is not None else None
-                teacher_blank = self._predict(noisy, timesteps, blank_embeds, batch) if blank_embeds is not None else None
+                teacher_negative = self._predict_reference(noisy, timesteps, negative_embeds, batch) if negative_embeds is not None else None
+                teacher_blank = self._predict_reference(noisy, timesteps, blank_embeds, batch) if blank_embeds is not None else None
                 target = teacher_positive if teacher_negative is None else guidance_distillation_target(
                     teacher_positive, teacher_negative, self.teacher_cfg_scale, blank=teacher_blank,
                 )

@@ -1,7 +1,7 @@
 # SliderSpace (flow models)
 
 Choose **SliderSpace** in the training-mode selector. Qwen Image 2.1, Krea 2,
-Anima and Ideogram 4 are selectable; the new ports remain experimental pending
+Anima, Ideogram 4 and MOSS-Image Base/SFT are selectable; the new ports remain experimental pending
 actual-checkpoint validation. See [cross-model contracts](cross_model_training_modes.md).
 This experimental
 mode discovers visual variation from provided images, generated images, or both,
@@ -9,7 +9,7 @@ and trains one ordinary LoRA per principal direction. It does not require pairs
 or positive/negative attribute labels. For generated images, start with
 `a spaceship`, or add several descriptions that explore the same concept.
 
-On Krea, Anima and Ideogram, discovery banks additionally record the components
+On Krea, Anima, Ideogram and MOSS, discovery banks additionally record the components
 actually loaded: transformer, VAE, text encoder/tokenizer, Anima conditioner and
 CLIP feature model/processor. This covers implicit default paths and selected
 single-file or sharded checkpoints. Resolved component identities enter the
@@ -107,12 +107,15 @@ datasets remain disabled; discovery folders belong inside the SliderSpace card.
 **Aspect-ratio buckets** is the default provided-image sizing for newly created
 UI jobs. `resolution` is an area budget (`resolution²` pixels), not a requirement
 that both dimensions equal it. Bucket dimensions are multiples of 32 for Qwen/Anima
-and 16 for Krea/Ideogram, retain
+and 16 for Krea/Ideogram/MOSS, retain
 roughly the source aspect ratio and do not deliberately upscale small images.
 EXIF orientation is respected. Mitchell resizing and a centered crop fit each
 bucket; originals are never modified. Each training update uses one image's
 native bucket latent shape, with the selected model's training-time profile
-(Qwen latent-area shift, Krea token-count shift, Anima fixed shift 3, Ideogram fixed shift 1).
+(Qwen latent-area shift, Krea token-count shift, Anima fixed shift 3, Ideogram fixed shift 1,
+MOSS fixed shift 5). MOSS uses native skipped-block negative guidance and a
+differentiable frozen FLUX.2 VAE decode; edit references and Comfy previews are
+unsupported for MOSS SliderSpace.
 Generated discovery images remain square at the selected resolution.
 
 The shared CLIP feature transform proportionally resizes and mean-color pads

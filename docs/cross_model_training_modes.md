@@ -1,11 +1,11 @@
-# Specialized flow training: Qwen 2.1, Krea 2, Anima and Ideogram 4
+# Specialized flow training: Qwen 2.1, Krea 2, Anima, Ideogram 4 and MOSS-Image
 
-The form uses the same workflow cards for these four architectures. Newly created
+The form uses the same workflow cards for these five architectures. Newly created
 jobs use `flow_dpo` and `guidance_distillation`; the earlier `qwen_flow_dpo` and
 `qwen_guidance_distillation` process IDs remain valid aliases. Existing Qwen
 discovery signatures and checkpoint names are retained.
 
-The Krea, Anima and Ideogram ports are **experimental**. CPU contract tests prove
+The Krea, Anima, Ideogram and MOSS ports are **experimental**. CPU contract tests prove
 specific code paths, not image quality or memory fit at production resolutions.
 Separately approved, opt-in GPU smoke tests now exercise local Qwen and Krea
 checkpoints; their configurations and results are recorded in the progress ledger.
@@ -32,7 +32,7 @@ Saved YAML prompt sets remain shared text, not architecture-specific embeddings.
 Both simplified and specific/multipoint prompts, prefixes and anchors retain the
 existing load/search/save/delete behavior.
 
-Diffusion-KTO is a new experimental flow-velocity adaptation on all four models.
+Diffusion-KTO is a new experimental flow-velocity adaptation on all five models.
 Use dataset feedback labels rather than paired controls; see
 [the KTO guide](diffusion_kto_training.md) for its estimator/window configuration,
 restrictions and four examples. Its CPU replay evidence is not actual-model
@@ -57,6 +57,27 @@ the frozen reference or the dataset repeat count.
   patchified 128-channel BCHW tensors; the wrapper alone reverses model time and
   negates velocity. Specialized training uses fixed shift 1, while native
   practice generation keeps the resolution-aware logit-normal schedule.
+- MOSS-Image Base/SFT: 16-pixel alignment, 128-channel packed FLUX.2 latents
+  normalized by the loaded VAE's BatchNorm statistics, and toolkit velocity
+  `noise - clean` at timesteps 0..1000. Specialized training uses fixed shift 5
+  (`mu=log(5)`), matching the toolkit MOSS training scheduler. Practice/discovery
+  and native previews retain MOSS's snapped shift-5 sigma grid. Positive branches
+  use all blocks; CFG negative/reference branches skip block 22 by default
+  (`model_kwargs.uncond_skip_layers`, zero-based). This also applies to the
+  distillation teacher's negative and blank baseline branches. CFG 1 skips the
+  reference prediction. The ordinary MOSS UI default excludes `layers.22.` from
+  adapters; specialized architecture switching retains this exclusion.
+
+The MOSS form offers **SFT**, **Base**, and their experimental **Edit Training**
+variants. All six modes support text-to-image Base/SFT; only Flow-DPO and Guidance
+Distillation support edit references. Imported `moss_image:base`,
+`moss_image:edit`, and `moss_image:base_edit` tags resolve before validation, so
+their Base/SFT choice and edit/isolation flags are preserved. Explicit component
+paths and memory settings take precedence. Architecture switching still asks you
+to select the matching base source explicitly. MOSS text conditioning uses the
+Qwen3.5-9B final hidden states, with one unpadded encoder forward per prompt;
+variable prompt lengths remain separate cached tensors. An optional encoder
+override uses `model.te_name_or_path` (or `model_kwargs.text_encoder_path`).
 
 These objectives use one frozen base with adapters disabled for reference
 predictions, not a second full model. Sequential backward/recomputation, CPU
@@ -95,6 +116,22 @@ with `model_kwargs.edit: true`; DPO reserves Controls 2/3 for these. Krea
 Fizgig/SliderSpace are initially text-to-image and reject `edit`/`kv_cache`.
 Anima and Ideogram do not expose edit-reference conditioning here. Preservation
 images remain independent examples with their own captions.
+
+MOSS edit DPO/distillation follow the same target/source separation: DPO's
+Control Dataset 1 is rejected output, and Controls 2/3 are actual sources.
+Every edit dataset requires fixed source images and `model_kwargs.edit: true`.
+`moss_image:edit` / `moss_image:base_edit` also default `kv_cache` and
+`match_target_res` to true. The upstream Base/SFT checkpoints were trained for
+text-to-image; these edit variants train the toolkit's reference-conditioning
+extension. References contribute both Qwen3.5 vision tokens and clean t=0 VAE
+latents. Cached positive/negative embeddings and live references share the same
+EXIF-aware RGB/alpha presentation. Detached reference latents are retained only
+through one accumulation, including backward; transformer K/V are recomputed for
+each teacher/policy pass. `kv_cache` controls reference attention isolation in
+training and branch-specific K/V caching only during native inference. Fizgig,
+SliderSpace and KTO reject MOSS edit/kv_cache settings explicitly. MOSS specialized
+previews currently require the native renderer; Comfy previews are rejected before
+model loading. No Comfy nodes are installed or patched by this integration.
 
 Specialized modes do not block `model.inference_lora_path` or clear it when
 switching modes. Inference adapters are for previews, not training references.
@@ -200,8 +237,12 @@ Do not install dependencies or restart Comfy during training.
 ## Examples and validation
 
 `config/examples/train_{mode}_{arch}.yaml` covers each of the six modes for
-`krea2`, `anima`, and `ideogram4`. Replace all placeholder data/component paths.
+`krea2`, `anima`, `ideogram4`, and `moss_image`. Replace all placeholder data/component paths.
 Their counts/ranks/steps are engineering examples, not measured quality advice.
+
+MOSS CPU coverage uses contracts and tiny native transformers; no full checkpoint
+or GPU run is performed while the existing training job is active. Full-resolution
+memory fit, learned quality, and external renderer parity remain unverified.
 
 Both form selectors, imports and saves use a shared UI capability table, tested
 against the backend table. Server saves reject unsupported architecture/adapter/

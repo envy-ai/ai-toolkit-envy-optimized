@@ -4,7 +4,7 @@ import Card from '@/components/Card';
 import { Checkbox, NumberInput, SelectInput, TextAreaInput, TextInput } from '@/components/formInputs';
 import type { JobConfig, SliderSpaceConfig } from '@/types';
 import { parseSliderSpaceAutoStrengths, updateSliderSpaceConcepts } from './sliderspace';
-import { cfgNegativeTextEnabled, flowTrainingModels } from './trainingCapabilities';
+import { canonicalFlowArch, cfgNegativeTextEnabled, flowTrainingModels } from './trainingCapabilities';
 
 type Props = {
   jobConfig: JobConfig;
@@ -16,7 +16,7 @@ type Props = {
 export default function SliderSpaceEditor({ jobConfig, setJobConfig, disabled = false, datasetOptions = [] }: Props) {
   const value = jobConfig.config.process[0].sliderspace!;
   const model = jobConfig.config.process[0].model;
-  const bucketDivisibility = flowTrainingModels[model.arch]?.bucketDivisibility ?? 32;
+  const bucketDivisibility = flowTrainingModels[canonicalFlowArch(model.arch)]?.bucketDivisibility ?? 32;
   const prompts = Array.isArray(value.concept_prompts) && value.concept_prompts.length > 0
     ? value.concept_prompts.map(prompt => typeof prompt === 'string' ? prompt : '') : [''];
   const set = (key: keyof SliderSpaceConfig, next: unknown) => setJobConfig(next, `config.process[0].sliderspace.${key}`);

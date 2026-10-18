@@ -39,8 +39,8 @@ import FizgigMultipointEditor, { MultipointStrengths } from './FizgigMultipointE
 import SliderSpaceEditor, { SliderSpacePreview } from './SliderSpaceEditor';
 import DiffusionKTOEditor from './DiffusionKTOEditor';
 import { multipointNeutralPrompt, sortedPoints, strengthLabel, toggleMultipoint, updateMultipointPoints } from './fizgigMultipoint';
-import { canonicalTrainingMode, cfgNegativeTextEnabled, flowTrainingModels, isSpecializedTrainingMode,
-  switchSpecializedArchitecture, trainingModeVisible } from './trainingCapabilities';
+import { canonicalTrainingMode, cfgNegativeTextEnabled, effectiveFlowModel, flowTrainingModels, flowTrainingModelOptions, isSpecializedTrainingMode,
+  switchSpecializedArchitecture, trainingModeVisible, trainingModeSupported } from './trainingCapabilities';
 
 type Props = {
   jobConfig: JobConfig;
@@ -189,8 +189,9 @@ export default function SimpleJob({
   const trainingModel = jobConfig.config.process[0].model;
   const specializedMode = isSpecializedTrainingMode(jobConfig.config.process[0].type);
   const textNegativesEnabled = cfgNegativeTextEnabled(trainingModel);
-  const editSourcesEnabled = !!flowTrainingModels[trainingModel.arch]?.editReferences
-    && (trainingModel.arch !== 'krea2' || !!trainingModel.model_kwargs?.edit);
+  const effectiveTrainingModel = effectiveFlowModel(trainingModel);
+  const editSourcesEnabled = !!flowTrainingModels[effectiveTrainingModel.arch]?.editReferences
+    && (!['krea2', 'moss_image'].includes(effectiveTrainingModel.arch) || !!effectiveTrainingModel.model_kwargs.edit);
   const isPairedImageTraining = isFizgigImageSlider || isQwenFlowDPO;
   const fizgigSlider = jobConfig.config.process[0].fizgig_slider;
   const isMultipoint = fizgigSlider?.multipoint ?? false;
@@ -764,10 +765,10 @@ export default function SimpleJob({
                   setJobConfig,
                 );
               }}
-              options={specializedMode ? Object.entries(flowTrainingModels).map(([value, model]) => ({ value, label: model.label })) : groupedModelOptions}
+              options={specializedMode ? flowTrainingModelOptions.filter(option => trainingModeSupported(option.value, jobConfig.config.process[0].type)) : groupedModelOptions}
             />
             {specializedMode && <p className="my-3 text-xs text-gray-400">
-              Krea 2, Anima and Ideogram 4 ports are experimental until actual-checkpoint validation.
+              Krea 2, Anima, Ideogram 4 and MOSS-Image ports are experimental until actual-checkpoint validation.
               Training uses the model-native flow profile; practice and previews use its native generation schedule.
             </p>}
             {specializedMode && trainingModel.arch === 'ideogram4' && <details className="my-3 rounded border border-gray-700 p-3">

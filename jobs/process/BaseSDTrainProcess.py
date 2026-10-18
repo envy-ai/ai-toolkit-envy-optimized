@@ -1056,7 +1056,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         progress_bar.close()
 
     def _get_krea_preview_control_settings(self, include_ordinary_edit=False):
-        if not (self.model_config.arch == 'krea2_edit' or (
+        specialized_moss = (getattr(self, 'flow_profile', None) is not None
+            and self.model_config.arch == 'moss_image' and self.model_config.model_kwargs.get('edit', False))
+        if not (specialized_moss or self.model_config.arch == 'krea2_edit' or (
                 (getattr(self, 'flow_profile', None) is not None or include_ordinary_edit)
                 and self.model_config.arch == 'krea2' and self.model_config.model_kwargs.get('edit', False))):
             return {}
@@ -1065,10 +1067,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
             colors = {tuple(getattr(ds, 'control_transparent_color', [0, 0, 0]))
                 for ds in getattr(self, 'dataset_configs', [])}
             if len(colors) > 1:
-                raise ValueError('Krea preview datasets use different alpha backgrounds. Set model_kwargs.preview_control_transparent_color explicitly for the sample references.')
+                raise ValueError('Edit preview datasets use different alpha backgrounds. Set model_kwargs.preview_control_transparent_color explicitly for the sample references.')
             background = list(next(iter(colors), (0, 0, 0)))
         if not isinstance(background, (list, tuple)) or len(background) != 3 or any(type(v) is not int or not 0 <= v <= 255 for v in background):
-            raise ValueError('Krea preview alpha background must be three RGB integers from 0 to 255')
+            raise ValueError('Edit preview alpha background must be three RGB integers from 0 to 255')
         sd = getattr(self, 'sd', None)
         if sd is not None and getattr(self, 'flow_profile', None) is not None:
             sd._specialized_preview_background = tuple(background)
@@ -3253,7 +3255,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.sd.load_model()
         profile = getattr(self, 'flow_profile', None)
         kto_cache = self.get_conf('type') == 'diffusion_kto'
-        if profile is not None and (profile.arch in ('krea2', 'anima', 'ideogram4') or kto_cache):
+        if profile is not None and (profile.arch in ('krea2', 'anima', 'ideogram4', 'moss_image') or kto_cache):
             from toolkit.flow_cache_identity import specialized_text_cache_identity, prepare_specialized_conditioning
             prepare_specialized_conditioning(self.sd)
             self.sd._specialized_text_cache_identity = specialized_text_cache_identity(self.sd, include_qwen=kto_cache)

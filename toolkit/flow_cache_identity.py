@@ -6,7 +6,7 @@ File identities use size/mtime; remote components should be pinned to revisions.
 import hashlib
 import json
 from pathlib import Path
-from toolkit.control_image import KREA_EDIT_CONTROL_PRESENTATION
+from toolkit.control_image import KREA_EDIT_CONTROL_PRESENTATION, MOSS_EDIT_CONTROL_PRESENTATION
 
 
 def local_component_identity(value):
@@ -74,7 +74,7 @@ def resolved_semantic_components(model, processor, name_or_path):
 def specialized_text_cache_identity(model, *, include_qwen=False):
     """Call once after loading components, before constructing dataset cache keys."""
     arch = getattr(model, 'arch', None)
-    if arch not in ('krea2', 'anima', 'ideogram4') and not (include_qwen and arch == 'qwen_image_2'):
+    if arch not in ('krea2', 'anima', 'ideogram4', 'moss_image') and not (include_qwen and arch == 'qwen_image_2'):
         return None
     config = model.model_config
     kwargs = getattr(config, 'model_kwargs', {}) or {}
@@ -113,6 +113,13 @@ def specialized_text_cache_identity(model, *, include_qwen=False):
     payload['wrapper'] = local_component_identity(str(source_root / f'extensions_built_in/diffusion_models/{arch}/{arch}.py'))
     if arch == 'ideogram4':
         payload['caption_digest'] = local_component_identity(str(Path(__file__).parent / 'ideogram_caption.py'))
+    if arch == 'moss_image':
+        payload['te_name_or_path'] = getattr(config, 'te_name_or_path', None)
+        payload['te_local'] = local_component_identity(payload['te_name_or_path'])
+        payload['chat_template'] = getattr(getattr(model, 'tokenizer', None), 'chat_template', None)
+        processor = getattr(model, 'image_processor', None)
+        payload['image_processor'] = _component_info(processor)
+        payload['image_processor_config'] = processor.to_dict() if processor is not None and hasattr(processor, 'to_dict') else None
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -123,6 +130,11 @@ def prepare_specialized_conditioning(model):
     the same transparency-composited pixels as the latent-reference loader.
     Ordinary training and legacy Qwen retain their current flags/cache identities.
     """
+    if getattr(model, 'arch', None) == 'moss_image':
+        model._specialized_flow_training = True
     if getattr(model, 'arch', None) == 'krea2' and getattr(model, 'is_edit', False):
         model.cache_processed_control_text_embeddings = True
         model._specialized_control_presentation = KREA_EDIT_CONTROL_PRESENTATION
+    if getattr(model, 'arch', None) == 'moss_image' and getattr(model, 'is_edit', False):
+        model.cache_processed_control_text_embeddings = True
+        model._specialized_control_presentation = MOSS_EDIT_CONTROL_PRESENTATION
