@@ -455,7 +455,10 @@ export default function SimpleJob({
     let sampleArr: any[] = [];
     for (let i = 0; i < jobConfig.config.process[0].sample.samples.length; i++) {
       const taggedPrompt = jobConfig.config.process[0].sample.samples[i].prompt;
-      const tagsObj = tagsToObj(taggedPrompt);
+      const textTags = Object.entries(modelArch.sampleTags)
+        .filter(([, tag]) => tag.type !== 'number')
+        .map(([key]) => key);
+      const tagsObj = tagsToObj(taggedPrompt, textTags);
       sampleArr.push(tagsObj);
     }
     return sampleArr;
@@ -684,6 +687,12 @@ export default function SimpleJob({
     <>
       <form
         onSubmit={handleSubmit}
+        onKeyDown={event => {
+          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.repeat && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            event.currentTarget.requestSubmit();
+          }
+        }}
         className={`space-y-8 relative ${isLoading ? 'pointer-events-none opacity-50' : ''}`}
       >
         {isLoading && (
@@ -3123,6 +3132,7 @@ export default function SimpleJob({
                 </button>
               )}
             </div>
+            <p className="mb-2 text-xs text-gray-500">Enter adds a new line. Ctrl/Cmd+Enter saves the job.</p>
             {jobConfig.config.process[0].sample.samples.map((sample, i) => (
               <div key={i} className="rounded-lg pl-4 pr-1 mb-4 bg-gray-950">
                 <div className="flex items-center space-x-2">
@@ -3135,22 +3145,7 @@ export default function SimpleJob({
                               <div key={sti} className="grid w-full lg:grid-flow-col lg:auto-cols-fr gap-4 mt-2">
                                 {Object.entries(sampleTagSection).map(([tagKey, tag]) => (
                                   <div key={tagKey} className="mb-2">
-                                    {tag.type === 'text' && (
-                                      <TextInput
-                                        label={tag.title}
-                                        value={taggedSampleArr[i][tagKey] ?? ''}
-                                        onChange={value => {
-                                          let taggedSample = { ...taggedSampleArr[i] };
-                                          taggedSample[tagKey] = value;
-                                          setJobConfig(
-                                            objToTags(taggedSample),
-                                            `config.process[0].sample.samples[${i}].prompt`,
-                                          );
-                                        }}
-                                        placeholder={`Enter ${tag.title.toLowerCase()}`}
-                                      />
-                                    )}
-                                    {tag.type === 'multiline' && (
+                                    {(tag.type === 'text' || tag.type === 'multiline') && (
                                       <TextAreaInput
                                         label={tag.title}
                                         value={taggedSampleArr[i][tagKey] ?? ''}
@@ -3186,25 +3181,13 @@ export default function SimpleJob({
                             ))}
                           </>
                         ) : (
-                          <>
-                            {modelArch?.hasMultiLinePrompts ? (
-                              <TextAreaInput
-                                label={`Prompt`}
-                                value={sample.prompt}
-                                onChange={value => setJobConfig(value, `config.process[0].sample.samples[${i}].prompt`)}
-                                placeholder="Enter prompt"
-                                required
-                              />
-                            ) : (
-                              <TextInput
-                                label={`Prompt`}
-                                value={sample.prompt}
-                                onChange={value => setJobConfig(value, `config.process[0].sample.samples[${i}].prompt`)}
-                                placeholder="Enter prompt"
-                                required
-                              />
-                            )}
-                          </>
+                          <TextAreaInput
+                            label="Prompt"
+                            value={sample.prompt}
+                            onChange={value => setJobConfig(value, `config.process[0].sample.samples[${i}].prompt`)}
+                            placeholder="Enter prompt"
+                            required
+                          />
                         )}
 
                         {modelArch?.additionalSections?.includes('ideogram_4_prompt') && (

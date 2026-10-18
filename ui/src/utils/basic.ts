@@ -16,11 +16,16 @@ export const isAudio = (filePath: string) => hasExt(filePath, audioExtensions);
 // text-generating models write their samples as .txt
 export const isText = (filePath: string) => filePath.toLowerCase().endsWith('.txt');
 
-export const tagsToObj = (tagStr: string): Record<string, any> => {
+// Named text tags retain their exact content; other tags retain JSON parsing.
+export const tagsToObj = (tagStr: string, textTags: readonly string[] = []): Record<string, any> => {
   const result: Record<string, any> = {};
   const regex = /<([A-Z_][A-Z0-9_]*)>([\s\S]*?)<\/\1>/g;
   let match;
   while ((match = regex.exec(tagStr)) !== null) {
+    if (textTags.includes(match[1])) {
+      result[match[1]] = match[2];
+      continue;
+    }
     const value = match[2].trim();
     try {
       result[match[1]] = JSON.parse(value);

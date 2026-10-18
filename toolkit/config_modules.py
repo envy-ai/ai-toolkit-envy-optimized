@@ -1295,6 +1295,7 @@ class GenerateImageConfig:
             duration: Optional[float] = None,  # audio models: max seconds
             ctrl_idx: int = 0,
             do_cfg_norm: bool = False,
+            preserve_prompt_whitespace: bool = False,
     ):
         self.width: int = width
         self.height: int = height
@@ -1305,6 +1306,7 @@ class GenerateImageConfig:
         self.prompt_2: str = prompt_2
         self.negative_prompt: str = negative_prompt
         self.negative_prompt_2: str = negative_prompt_2
+        self.preserve_prompt_whitespace = preserve_prompt_whitespace
         self.latents: Union[torch.Tensor | None] = latents
 
         self.output_path: str = output_path
@@ -1567,15 +1569,22 @@ class GenerateImageConfig:
         if self.prompt is not None and len(self.prompt) > 0:
             # process prompt string
             prompt = self.prompt
-            prompt = prompt.strip()
+            if not self.preserve_prompt_whitespace:
+                prompt = prompt.strip()
             p_split = prompt.split('--')
-            self.prompt = p_split[0].strip()
+            self.prompt = p_split[0] if self.preserve_prompt_whitespace else p_split[0].strip()
 
             if len(p_split) > 1:
                 for split in p_split[1:]:
                     # allows multi char flags
                     flag = split.split(' ')[0].strip()
-                    content = split[len(flag):].strip()
+                    raw_content = split[len(flag):]
+                    if self.preserve_prompt_whitespace and flag in ('p2', 'n', 'n2'):
+                        # One space separates the flag from its text value.
+                        # All remaining whitespace belongs to the prompt.
+                        content = raw_content[1:] if raw_content.startswith(' ') else raw_content
+                    else:
+                        content = raw_content.strip()
                     if flag == 'p2':
                         self.prompt_2 = content
                     elif flag == 'n':

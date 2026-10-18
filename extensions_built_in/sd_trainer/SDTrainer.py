@@ -182,6 +182,7 @@ class SDTrainer(BaseSDTrainProcess):
                 # needed so we can autoparse the prompt to handle flags
                 gen_img_config = GenerateImageConfig(
                     prompt=prompt, # it will autoparse the prompt
+                    preserve_prompt_whitespace=True,
                     negative_prompt=sample_item.neg,
                     output_path=output_path,
                     ctrl_img=sample_item.ctrl_img,

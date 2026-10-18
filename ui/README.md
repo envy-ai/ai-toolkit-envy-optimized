@@ -9,6 +9,24 @@ more than zero steps. At step zero it stops immediately without requesting a
 checkpoint or waiting for a training step. **Save Now** remains a separate manual
 checkpoint request.
 
+Training jobs' **Sample Prompts** use the shared `TextAreaInput` for every
+ordinary prompt and textual tagged field. Enter inserts a newline;
+Ctrl/Cmd+Enter saves the job, as does the existing Save button. Newlines,
+including blank first and last lines, survive editing, JSON/YAML config
+serialization, sample prompt caching, and native or ComfyUI sample dispatch.
+Tagged text is read verbatim using `tagsToObj(prompt, textTagNames)`; numeric
+tags retain their JSON value parsing. Editing one tag preserves the other
+text tags' whitespace and JSON-looking text values.
+
+Training sampling and its text-embedding cache opt into
+`GenerateImageConfig(preserve_prompt_whitespace=True)`. Other callers retain
+their existing trimming behavior. Inline `--` sampling flags remain supported:
+text flags (`--n`, `--p2`, `--n2`) consume one separating space after the flag
+name and preserve the remaining text; numeric and path flags retain their
+existing whitespace handling. Newlines before a flag remain part of the
+preceding prompt text. Model-specific tokenization and prompt interpretation
+still apply after sample dispatch.
+
 **Krea 2 Identity/Edit (krea2edit extension)** selects the external `krea2_edit`
 training architecture. Its Model options expose **Fit References to Target**,
 **Train with Two References**, and **Checkpoint Every N Transformer Blocks**.

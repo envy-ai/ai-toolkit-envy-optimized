@@ -1715,6 +1715,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
             gen_img_config_list.append(GenerateImageConfig(
                 prompt=prompt,  # it will autoparse the prompt
+                preserve_prompt_whitespace=True,
                 width=sample_item.width,
                 height=sample_item.height,
                 negative_prompt=sample_item.neg,
