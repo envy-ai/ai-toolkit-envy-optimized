@@ -337,8 +337,10 @@ class MossNativePathTests(unittest.TestCase):
             selected_vae.write_bytes(b"first VAE weights")
             model = object.__new__(MossImageModel)
             model.arch = "moss_image"
+            model.latent_space_version = "moss_image"
             model.model_config = SimpleNamespace(
                 name_or_path="OpenMOSS-Team/MOSS-Image-SFT", vae_path=None,
+                latent_space_version=None,
                 model_kwargs={}, quantize=False, qtype=None,
                 quantize_te=False, qtype_te=None,
             )
@@ -356,9 +358,19 @@ class MossNativePathTests(unittest.TestCase):
                 self.assertEqual(model.vae.aitk_load_source, {"path": str(selected_vae.resolve())})
                 self.assertEqual(model.vae.aitk_load_files, [str(selected_vae.resolve())])
                 self.assertFalse(model.vae.grad_enabled)
+                prepare_specialized_conditioning(model)
+                first_cache_key = model.get_latent_space_version()
+                prepare_specialized_conditioning(model)
+                self.assertEqual(model.get_latent_space_version(), first_cache_key)
+                # Target latent identity stays independent of text/adapter and
+                # guidance settings because they do not affect VAE encoding.
+                model.model_config.model_kwargs.update(rank=32, cfg_scale=7)
+                self.assertEqual(model.get_latent_space_version(), first_cache_key)
 
                 selected_vae.write_bytes(b"different VAE weights, changed stat")
                 second_identity = resolved_flow_components(model)
+                prepare_specialized_conditioning(model)
+                self.assertNotEqual(model.get_latent_space_version(), first_cache_key)
 
             self.assertNotEqual(first_identity["vae"], second_identity["vae"])
 
