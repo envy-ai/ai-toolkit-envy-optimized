@@ -9,6 +9,12 @@ more than zero steps. At step zero it stops immediately without requesting a
 checkpoint or waiting for a training step. **Save Now** remains a separate manual
 checkpoint request.
 
+Stopped, completed and failed training jobs expose **Render Samples** in the
+gear menu to render configured ComfyUI samples from their latest saved LoRA,
+without restarting training. Progress, checkpoint details and errors are
+available from the sample status icon. See [saved-job sampling](../docs/job_samples.md)
+for supported renderers, checkpoint selection and the GPU launch gate.
+
 Dataset **Resolutions** include **Native resolution (no scaling)**. Toggle it by
 clicking its label/switch, or focus the switch with Tab and press Space. Enabled
 datasets batch targets by exact source width and height, disable the resolution

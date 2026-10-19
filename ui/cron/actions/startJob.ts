@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import { TOOLKIT_ROOT, getTrainingFolder, getHFToken, getModelsPath } from '../paths';
 import { resolveDetachedPythonPath } from '../pythonPath';
+import { acquireGpuLocks, gpuKeys, GpuBusyError, SAMPLE_RENDER_GATE } from '../sampleRenderLocks';
 const isWindows = process.platform === 'win32';
 
 const appendJobLog = (logPath: string, message: string) => {
@@ -85,9 +86,7 @@ const readRelayPid = (relay: ChildProcess, pidPath: string): Promise<RelayResult
 
       const pid = Number(contents);
       finish(
-        Number.isInteger(pid) && pid > 0
-          ? { pid }
-          : { pid: null, error: 'Job process did not report a usable pid' },
+        Number.isInteger(pid) && pid > 0 ? { pid } : { pid: null, error: 'Job process did not report a usable pid' },
       );
     });
 
@@ -122,7 +121,10 @@ const readLogTail = (logPath: string): string | null => {
     fd = fs.openSync(logPath, 'r');
     fs.readSync(fd, buffer, 0, length, size - length);
 
-    const lines = buffer.toString('utf8').split(/\r?\n/).filter(line => line.trim() !== '');
+    const lines = buffer
+      .toString('utf8')
+      .split(/\r?\n/)
+      .filter(line => line.trim() !== '');
     const lastLine = lines[lines.length - 1];
     if (!lastLine) return null;
     return lastLine.length > LOG_TAIL_MAX_CHARS ? `${lastLine.slice(-LOG_TAIL_MAX_CHARS)}` : lastLine;
@@ -410,16 +412,30 @@ export default async function startJob(jobID: string) {
     console.error(`Job with ID ${jobID} not found`);
     return;
   }
-  // update job status to 'running', this will run sync so we don't start multiple jobs.
-  await prisma.job.update({
-    where: { id: jobID },
-    data: {
-      status: 'running',
-      stop: false,
-      return_to_queue: false,
-      info: 'Starting job...',
-    },
-  });
-  // start and watch the job asynchronously so the cron can continue
-  startAndWatchJob(job);
+  // Comfy's GPU is configured in that server, independently of this job's
+  // CUDA_VISIBLE_DEVICES. Defer launches until a saved render releases it.
+  let locks: ReturnType<typeof acquireGpuLocks>;
+  try {
+    locks = acquireGpuLocks(TOOLKIT_ROOT, [...gpuKeys(job.gpu_ids), SAMPLE_RENDER_GATE], jobID);
+  } catch (error) {
+    if (error instanceof GpuBusyError) return;
+    throw error;
+  }
+  try {
+    // Commit the running status while still owning the render gate. A saved
+    // render that acquires it next must see this reservation before launching.
+    await prisma.job.update({
+      where: { id: jobID },
+      data: {
+        status: 'running',
+        stop: false,
+        return_to_queue: false,
+        info: 'Starting job...',
+      },
+    });
+    // start and watch the job asynchronously so the cron can continue
+    startAndWatchJob(job);
+  } finally {
+    locks.release();
+  }
 }

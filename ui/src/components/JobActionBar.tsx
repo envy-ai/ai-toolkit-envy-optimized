@@ -18,6 +18,9 @@ import { startQueue } from '@/utils/queue';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 import { redirect } from 'next/navigation';
 import { openCaptionDatasetModal } from '@/components/CaptionDatasetModal';
+import { Modal } from '@/components/Modal';
+import { apiClient } from '@/utils/api';
+import type { SampleRenderState } from '@/server/jobSamples';
 
 interface JobActionBarProps {
   job: Job;
@@ -54,6 +57,46 @@ export default function JobActionBar({
   // and the pending one shows a spinner. It is cleared once the job comes back
   // in a different state (status / stop flag), on error, or after a timeout.
   const [pending, setPending] = useState<PendingAction | null>(null);
+  const [sampleRender, setSampleRender] = useState<SampleRenderState>({ status: 'idle', message: '' });
+  const [samplePollError, setSamplePollError] = useState<{ message: string; stack?: string } | null>(null);
+  const [showSampleRender, setShowSampleRender] = useState(false);
+  const [hasOpenedMenu, setHasOpenedMenu] = useState(false);
+  const sampleRequestVersion = useRef(0);
+  const canRenderSaved = job.job_type === 'train' && ['stopped', 'completed', 'error'].includes(job.status);
+  const renderingSamples = sampleRender.status === 'running';
+
+  useEffect(() => {
+    if ((!canRenderSaved || (!hideView && !hasOpenedMenu)) && !renderingSamples) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      const version = sampleRequestVersion.current;
+      try {
+        const { data } = await apiClient.get<SampleRenderState>(`/api/jobs/${job.id}/render_samples`);
+        if (disposed || version !== sampleRequestVersion.current) return;
+        setSamplePollError(null);
+        setSampleRender(data);
+        if (data.status === 'error' && renderingSamples) setShowSampleRender(true);
+        if (data.status === 'running') timer = setTimeout(poll, 2000);
+        else if (renderingSamples) onRefresh?.();
+      } catch (error: any) {
+        if (!disposed && version === sampleRequestVersion.current) {
+          setSamplePollError({
+            message: error.response?.data?.error || error.message,
+            stack: error.response?.data?.stack || error.stack,
+          });
+          timer = setTimeout(poll, 2000);
+        }
+      }
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+    // Refresh once on mount/job change, then poll only an active render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job.id, canRenderSaved, renderingSamples, hideView, hasOpenedMenu]);
   // Job state key captured when the pending action was fired. null means the
   // action does not change job state and clears as soon as the request resolves.
   const pendingStateKeyRef = useRef<string | null>(null);
@@ -91,7 +134,7 @@ export default function JobActionBar({
     }
   };
 
-  const isBusy = pending !== null;
+  const isBusy = pending !== null || renderingSamples || samplePollError !== null;
   const iconSizeClass = 'w-5 h-5 sm:w-6 sm:h-6';
   const trainEditHref = canEditSamples ? `/jobs/new?id=${job.id}&sampleOnly=1` : `/jobs/new?id=${job.id}`;
   const actionButtonClass = 'ml-1 sm:ml-2 opacity-100 disabled:opacity-40 disabled:cursor-not-allowed';
@@ -144,9 +187,10 @@ export default function JobActionBar({
             if (!canStop || isBusy) return;
             openConfirm({
               title: 'Pause Job',
-              message: job.job_type === 'train'
-                ? `Pause "${job.name}"? The job will save a resumable checkpoint at the next completed training step, then stop.`
-                : `Stop "${job.name}"?`,
+              message:
+                job.job_type === 'train'
+                  ? `Pause "${job.name}"? The job will save a resumable checkpoint at the next completed training step, then stop.`
+                  : `Stop "${job.name}"?`,
               type: 'info',
               confirmText: 'Pause',
               onConfirm: () =>
@@ -220,7 +264,9 @@ export default function JobActionBar({
       </Button>
       <div className="border-r border-1 border-gray-700 ml-1 sm:ml-2 inline"></div>
       <Menu>
-        <MenuButton className={'ml-1 sm:ml-2'}>{menuPending ? spinner : <Cog className={iconSizeClass} />}</MenuButton>
+        <MenuButton aria-label="Job actions" onClick={() => setHasOpenedMenu(true)} className={'ml-1 sm:ml-2'}>
+          {menuPending ? spinner : <Cog className={iconSizeClass} />}
+        </MenuButton>
         <MenuItems
           anchor={{ to: menuAnchor, gap: 16 }}
           className="bg-gray-900 border border-gray-700 rounded shadow-lg w-60 px-2 py-2 z-50"
@@ -280,6 +326,37 @@ export default function JobActionBar({
               </div>
             </MenuItem>
           )}
+          {canRenderSaved && (
+            <MenuItem disabled={isBusy}>
+              <button
+                type="button"
+                className={`${isBusy ? menuItemDisabledClass : menuItemEnabledClass} w-full text-left data-[focus]:bg-gray-800`}
+                disabled={isBusy}
+                onClick={async () => {
+                  if (isBusy) return;
+                  sampleRequestVersion.current++;
+                  setShowSampleRender(true);
+                  setPending('sample');
+                  try {
+                    const { data } = await apiClient.post<SampleRenderState>(`/api/jobs/${job.id}/render_samples`);
+                    setSampleRender(data);
+                  } catch (error: any) {
+                    console.error('Saved sample rendering failed:', error);
+                    setSampleRender({
+                      status: 'error',
+                      message: error.response?.data?.error || error.message,
+                      stack: error.response?.data?.stack || error.stack,
+                    });
+                  } finally {
+                    clearPending();
+                  }
+                }}
+              >
+                {renderingSamples || pending === 'sample' ? menuSpinner : <Image className="w-4 h-4" />}
+                {renderingSamples ? 'Rendering samples…' : 'Render Samples'}
+              </button>
+            </MenuItem>
+          )}
           {job.job_type === 'train' && canStop && (
             <MenuItem disabled={isBusy}>
               <div
@@ -327,6 +404,47 @@ export default function JobActionBar({
           </MenuItem>
         </MenuItems>
       </Menu>
+      {(sampleRender.status !== 'idle' || samplePollError) && (
+        <button
+          type="button"
+          className={`ml-2 ${sampleRender.status === 'error' || samplePollError ? 'text-red-400' : 'text-gray-300'}`}
+          onClick={() => setShowSampleRender(true)}
+          aria-label={`Sample render details: ${samplePollError?.message || sampleRender.message}`}
+          title={samplePollError?.message || sampleRender.message}
+        >
+          {renderingSamples ? spinner : <Image className={iconSizeClass} />}
+          <span className="sr-only" role="status" aria-live="polite">
+            {samplePollError?.message || sampleRender.message}
+          </span>
+        </button>
+      )}
+      <Modal isOpen={showSampleRender} onClose={() => setShowSampleRender(false)} title="Render Samples" size="lg">
+        <p
+          role={sampleRender.status === 'error' ? 'alert' : 'status'}
+          aria-live="polite"
+          className="whitespace-pre-wrap"
+        >
+          {pending === 'sample' ? 'Starting sample render…' : sampleRender.message}
+        </p>
+        {sampleRender.checkpoint && (
+          <p className="mt-3 text-sm text-gray-400 break-all">Checkpoint: {sampleRender.checkpoint}</p>
+        )}
+        {samplePollError && (
+          <p role="alert" className="mt-3 text-red-300">
+            Cannot refresh sample render status: {samplePollError.message}. Retrying…
+          </p>
+        )}
+        {samplePollError?.stack && (
+          <pre className="mt-3 p-3 bg-gray-950 text-red-300 text-xs whitespace-pre-wrap overflow-auto max-h-80">
+            {samplePollError.stack}
+          </pre>
+        )}
+        {sampleRender.stack && (
+          <pre className="mt-3 p-3 bg-gray-950 text-red-300 text-xs whitespace-pre-wrap overflow-auto max-h-80">
+            {sampleRender.stack}
+          </pre>
+        )}
+      </Modal>
     </div>
   );
 }

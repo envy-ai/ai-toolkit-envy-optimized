@@ -3,6 +3,8 @@ import prisma from '@/server/prisma';
 import { getTrainingFolder } from '@/server/settings';
 import path from 'path';
 import fs from 'fs';
+import { hasSampleRenderLease } from '../../../../../../cron/sampleRenderLocks';
+import { TOOLKIT_ROOT } from '@/paths';
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ jobID: string }> }) {
   const { jobID } = await params;
@@ -13,6 +15,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
   if (!job) {
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+  }
+  if (hasSampleRenderLease(TOOLKIT_ROOT, jobID)) {
+    return NextResponse.json(
+      { error: 'Wait for the sample renderer to finish before deleting this job.' },
+      { status: 409 },
+    );
   }
 
   const trainingRoot = await getTrainingFolder();
