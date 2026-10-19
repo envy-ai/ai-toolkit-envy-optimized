@@ -149,6 +149,30 @@ test('saved sample rendering allows queued jobs to wait behind the render gate',
   }
 });
 
+test('completed jobs with stale PIDs do not block saved sample rendering', async () => {
+  const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'aitk-sample-stale-pid-test-'));
+  const job = renderJob('job-a', '0');
+  fs.mkdirSync(path.join(root, job.name));
+  const spawn = () => {
+    const child = new EventEmitter();
+    child.pid = process.pid;
+    child.unref = () => {};
+    process.nextTick(() => child.emit('spawn'));
+    return child;
+  };
+  const execFile = (_python, _args, _options, callback) => callback(null, {
+    stdout: '{"status":"running","checkpoint":"saved.safetensors","step":4}',
+  });
+  const oldJob = { id: 'id-old', name: 'old-job', job_type: 'train', status: 'completed', pid: process.pid };
+  const { startSampleRender } = loadJobSamples({ root, jobRows: [oldJob], childProcess: { spawn, execFile } });
+  try {
+    const state = await startSampleRender(job);
+    assert.equal(state.status, 'running');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('Comfy render gate serializes jobs even when training GPU IDs differ', async () => {
   const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'aitk-sample-gate-test-'));
   fs.mkdirSync(path.join(root, 'job-a'));

@@ -34,11 +34,12 @@ Unrelated, helper and record-index files are excluded. A damaged latest save
 produces an error instead of using an older checkpoint or base-model weights.
 
 ComfyUI configures its own GPU independently of the job's GPU list. Until that
-mapping is available, saved sample rendering requires all toolkit processes to
-be idle: running, stopping, and still-live process owners block it. Queued jobs
-may remain queued. It also requires an empty Comfy queue. A durable gate defers
-all new toolkit queue launches until the render finishes. The renderer does not stop
-jobs, clear queues, cancel someone else's prompts, or restart services. Work
+mapping is available, running and stopping toolkit jobs block saved sample
+rendering. Completed jobs may retain obsolete PIDs, which do not block a render.
+Queued jobs may remain queued. Rendering also requires an empty Comfy queue.
+A durable gate defers new toolkit queue launches until the render finishes. The
+renderer does not stop jobs, clear queues, cancel someone else's prompts, or
+restart services. Work
 submitted by another Comfy client after the empty-queue check remains outside
 the toolkit's launch gate.
 
