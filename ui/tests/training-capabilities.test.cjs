@@ -41,8 +41,12 @@ test('ordinary MOSS jobs reject the bundled Krea preview workflow before saving'
   assert.match(caps.validateTrainingCapabilities(job).join('\n'), /Krea 2 ComfyUI workflows are incompatible/);
   job.config.process[0].sample.comfy.enabled = false;
   assert.deepEqual(caps.validateTrainingCapabilities(job), []);
+  job.config.process[0].sample.comfy = { enabled: true, workflow_path: 'config/comfy_templates/moss_image_lora_sample.json.njk' };
+  assert.deepEqual(caps.validateTrainingCapabilities(job), []);
   job.config.process[0].sample.comfy = { enabled: true, workflow_path: 'custom/moss_sample.json' };
   assert.deepEqual(caps.validateTrainingCapabilities(job), []);
+  const simpleJob = fs.readFileSync(path.resolve(__dirname, '../src/app/jobs/new/SimpleJob.tsx'), 'utf8');
+  assert.match(simpleJob, /value: 'config\/comfy_templates\/moss_image_lora_sample\.json\.njk', label: 'MOSS-Image LoRA image'/);
 });
 
 test('capability matrix agrees with Python and supports all objectives without duplicate legacy choices', () => {
