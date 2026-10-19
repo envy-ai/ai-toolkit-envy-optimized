@@ -356,7 +356,9 @@ class MossImageModel(BaseModel):
         if getattr(comfy, 'enabled', False):
             workflow = os.path.basename(getattr(comfy, 'workflow_path', '') or 'krea2_lora_sample.json.njk')
             if workflow.startswith('krea2_') and workflow.endswith('.json.njk'):
-                raise ValueError('Krea 2 ComfyUI workflows are incompatible with MOSS-Image; disable the ComfyUI renderer to use native MOSS previews')
+                raise ValueError('Krea 2 ComfyUI workflows are incompatible with MOSS-Image; select '
+                                 'config/comfy_templates/moss_image_lora_sample.json.njk for ordinary text-to-image '
+                                 'previews or disable the ComfyUI renderer to use native MOSS previews')
 
     def get_sample_control_image_paths(self, gen_config):
         if getattr(self, '_specialized_control_presentation', None) != MOSS_EDIT_CONTROL_PRESENTATION:

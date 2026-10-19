@@ -101,6 +101,7 @@ from toolkit.comfy_sample import (
     DEFAULT_COMFY_WORKFLOW_PATH,
     DEFAULT_COMFY_ANIMA_WORKFLOW_PATH,
     DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
+    DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH,
     get_workflow_for_samples,
     get_workflow_for_sample,
     load_workflow,
@@ -959,15 +960,22 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # at render time so already-saved jobs do not feed Qwen's VAE through
         # the incompatible Krea custom VAE loader.
         model_arch = getattr(getattr(self, 'model_config', None), 'arch', None)
+        if model_arch and model_arch.split(':')[0] == 'moss_image':
+            model_arch = 'moss_image'
         if model_arch == 'krea2_edit' and workflow_path != DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
             raise ValueError('krea2_edit previews require config/comfy_templates/krea2_edit_lora_sample.json.njk.')
         new_templates = {'anima': DEFAULT_COMFY_ANIMA_WORKFLOW_PATH,
-                         'ideogram4': DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH}
+                         'ideogram4': DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
+                         'moss_image': DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH}
         known_templates = {DEFAULT_COMFY_WORKFLOW_PATH: 'krea2', DEFAULT_COMFY_BATCH_WORKFLOW_PATH: 'krea2',
                            DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH: 'krea2',
                            DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH: 'krea2',
                            DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH: 'qwen_image_2',
                            DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH: 'qwen_image_2',
+                           DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH: 'qwen_image_edit',
+                           DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH: 'qwen_image_edit',
+                           DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH: 'qwen_image_edit_plus',
+                           DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH: 'qwen_image_edit_plus',
                            **{path: arch for arch, path in new_templates.items()}}
         if model_arch in new_templates and workflow_path in known_templates and known_templates[workflow_path] != model_arch:
             raise ValueError(f'Comfy preview workflow is for {known_templates[workflow_path]}, not {model_arch}. '
@@ -1261,7 +1269,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     )
                     patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)
                     client.begin_live_progress()
-                    if is_krea_ostris_edit_workflow or self.model_config.arch == 'krea2_edit' or request.specialized_flow and workflow_path in (
+                    if workflow_path == DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH or is_krea_ostris_edit_workflow or self.model_config.arch == 'krea2_edit' or request.specialized_flow and workflow_path in (
                         DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
                         DEFAULT_COMFY_ANIMA_WORKFLOW_PATH, DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
                     ):
@@ -1328,6 +1336,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         return self._run_with_models_offloaded_for_comfy(render)
 
     def _render_comfy_sample_batch(self, gen_img_config_list: List[GenerateImageConfig], sample_config: SampleConfig, step=None):
+        if getattr(self.model_config, 'arch', '').split(':')[0] == 'moss_image':
+            print_acc('MOSS-Image ComfyUI previews use individual prompts; no batch workflow is provided.')
+            return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
         if (getattr(self, 'flow_profile', None) is not None and self.model_config.arch == 'krea2'
                 and self.model_config.model_kwargs.get('edit', False)):
             return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)

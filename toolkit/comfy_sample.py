@@ -48,6 +48,7 @@ DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH = (
 )
 DEFAULT_COMFY_ANIMA_WORKFLOW_PATH = 'config/comfy_templates/anima_lora_sample.json.njk'
 DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH = 'config/comfy_templates/ideogram4_lora_sample.json.njk'
+DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH = 'config/comfy_templates/moss_image_lora_sample.json.njk'
 NUNJUCKS_RENDERER_PATH = "ui/scripts/render_comfy_template.mjs"
 
 
@@ -473,6 +474,11 @@ def get_workflow_for_sample(
     request: ComfySampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if workflow_path == DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH:
+        if request.model_arch.split(':')[0] != 'moss_image':
+            raise ValueError('The MOSS-Image workflow requires a MOSS-Image model.')
+        if request.control_image or request.control_image_2 or request.control_image_3:
+            raise ValueError('The MOSS-Image workflow is text-to-image only; use native previews for edit references.')
     if request.model_arch == 'krea2_edit' and workflow_path != DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:
         raise ValueError('krea2_edit previews require the source-graph Krea 2 edit workflow.')
     if workflow_path == DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH:
@@ -537,6 +543,12 @@ def patch_krea_edit_preview(workflow, request):
 
 def validate_model_workflow(workflow, request):
     """Reject incompatible CFG references and specialized native schedules."""
+    if request.model_arch.split(':')[0] == 'moss_image':
+        if request.specialized_flow:
+            raise ValueError('MOSS-Image specialized modes require native previews; disable the ComfyUI renderer')
+        if not any(node.get('class_type') == 'CLIPLoader' and node.get('inputs', {}).get('type') == 'moss_image'
+                   for node in workflow.values()):
+            raise ValueError('MOSS-Image previews require a MOSS-Image text encoder workflow (CLIPLoader type moss_image).')
     if request.model_arch == 'krea2' and request.specialized_flow:
         if not any(node.get('class_type') == 'CLIPLoader' and node.get('inputs', {}).get('type') == 'krea2'
                    for node in workflow.values()):
@@ -622,6 +634,8 @@ def get_workflow_for_samples(
     request: ComfyBatchSampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if workflow_path == DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH:
+        raise ValueError('The MOSS-Image workflow requires individual requests; no batch workflow is provided.')
     if workflow_path == DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH:
         raise ValueError('Experimental Krea 2 edit previews require individual requests with one to three references each.')
     if workflow_path == DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH:

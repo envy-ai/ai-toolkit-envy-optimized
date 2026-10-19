@@ -55,7 +55,7 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     const workflow = (process.sample.comfy.workflow_path ?? 'config/comfy_templates/krea2_lora_sample.json.njk')
       .replaceAll('\\', '/').split('/').pop() ?? '';
     if (workflow.startsWith('krea2_') && workflow.endsWith('.json.njk')) {
-      errors.push('Krea 2 ComfyUI workflows are incompatible with MOSS-Image. Disable Use ComfyUI Renderer to use native MOSS previews.');
+      errors.push('Krea 2 ComfyUI workflows are incompatible with MOSS-Image. Select MOSS-Image LoRA image for ordinary text-to-image previews, or disable Use ComfyUI Renderer to use native MOSS previews.');
     }
   }
   if (!isSpecializedTrainingMode(mode)) return errors;
@@ -81,7 +81,8 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     const workflow = (process.sample.comfy.workflow_path ?? '').replaceAll('\\', '/').split('/').pop() ?? '';
     const known: Record<string, string> = { 'krea2_lora_sample.json.njk': 'krea2', 'krea2_lora_sample_batch_easy_use.json.njk': 'krea2',
       'qwen_image_2_lora_sample.json.njk': 'qwen_image_2', 'qwen_image_2_lora_sample_batch_easy_use.json.njk': 'qwen_image_2',
-      'anima_lora_sample.json.njk': 'anima', 'ideogram4_lora_sample.json.njk': 'ideogram4' };
+      'anima_lora_sample.json.njk': 'anima', 'ideogram4_lora_sample.json.njk': 'ideogram4',
+      'moss_image_lora_sample.json.njk': 'moss_image' };
     if (known[workflow] && known[workflow] !== model.arch) errors.push(`Select ${model.arch}_lora_sample.json.njk and compatible model/VAE/text encoder files for Comfy previews.`);
   }
   if (model.arch === 'anima' && kwargs.train_text_conditioner) errors.push('Specialized training requires a frozen Anima text conditioner. Disable train_text_conditioner.');

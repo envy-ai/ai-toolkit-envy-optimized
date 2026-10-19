@@ -1,0 +1,20 @@
+{
+  "1": {"class_type": "UNETLoader", "inputs": {"unet_name": {{ model | json }}, "weight_dtype": "default"}},
+  "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": {{ text_encoder | json }}, "type": "moss_image", "device": "default"}},
+  "3": {"class_type": "VAELoader", "inputs": {"vae_name": {{ vae | json }}}},
+  "4": {"class_type": "load_lora_from_absolute_path", "inputs": {
+    "absolute_path": {{ training_lora_path | json }}, "lora_strength": {{ training_lora_strength }}, "model": ["1", 0], "clip": ["2", 0]}},
+  {% if inference_lora_enabled %}
+  "5": {"class_type": "LoraLoaderModelOnly", "inputs": {"lora_name": {{ inference_lora | json }}, "strength_model": {{ inference_lora_strength }}, "model": ["4", 0]}},
+  {% endif %}
+  "6": {"class_type": "CLIPTextEncode", "inputs": {"text": {{ prompt | json }}, "clip": ["4", 1]}},
+  {% if negative_prompt %}
+  "7": {"class_type": "CLIPTextEncode", "inputs": {"text": {{ negative_prompt | json }}, "clip": ["4", 1]}},
+  {% else %}
+  "7": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["6", 0]}},
+  {% endif %}
+  "8": {"class_type": "EmptyLatentImage", "inputs": {"width": {{ width }}, "height": {{ height }}, "batch_size": 1}},
+  "9": {"class_type": "KSampler", "inputs": {"model": [{% if inference_lora_enabled %}"5"{% else %}"4"{% endif %}, 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["8", 0], "seed": {{ seed_literal }}, "steps": {{ steps }}, "cfg": {{ cfg }}, "sampler_name": {{ sampler | json }}, "scheduler": {{ scheduler | json }}, "denoise": 1}},
+  "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
+  "11": {"class_type": "SaveImage", "inputs": {"images": ["10", 0], "filename_prefix": {{ filename_prefix | json }}}}
+}

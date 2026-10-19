@@ -109,7 +109,8 @@ def validate_specialized_model(config, mode=None):
         known = {'krea2_lora_sample.json.njk': 'krea2', 'krea2_lora_sample_batch_easy_use.json.njk': 'krea2',
                  'qwen_image_2_lora_sample.json.njk': 'qwen_image_2',
                  'qwen_image_2_lora_sample_batch_easy_use.json.njk': 'qwen_image_2',
-                 'anima_lora_sample.json.njk': 'anima', 'ideogram4_lora_sample.json.njk': 'ideogram4'}
+                 'anima_lora_sample.json.njk': 'anima', 'ideogram4_lora_sample.json.njk': 'ideogram4',
+                 'moss_image_lora_sample.json.njk': 'moss_image'}
         if workflow in known and known[workflow] != arch:
             raise ValueError(f'Select {arch}_lora_sample.json.njk for {capability.name} Comfy previews, not {known[workflow]}')
     # Do not introduce new restrictions on old Qwen jobs during the port.

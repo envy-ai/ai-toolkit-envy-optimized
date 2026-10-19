@@ -93,6 +93,7 @@ const comfyWorkflowOptions: SelectOption[] = [
   { value: 'config/comfy_templates/iris_lora_sample.json.njk', label: 'Iris 3B LoRA image' },
   { value: 'config/comfy_templates/anima_lora_sample.json.njk', label: 'Anima LoRA image' },
   { value: 'config/comfy_templates/ideogram4_lora_sample.json.njk', label: 'Ideogram 4 LoRA image' },
+  { value: 'config/comfy_templates/moss_image_lora_sample.json.njk', label: 'MOSS-Image LoRA image' },
   {
     value: 'config/comfy_templates/krea2_lora_sample.json.njk',
     label: 'Krea 2 LoRA image',

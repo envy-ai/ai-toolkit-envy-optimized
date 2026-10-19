@@ -181,11 +181,14 @@ on CPU during setup to avoid a temporary full-model GPU allocation.
 Practice/discovery generation remains native even when previews use Comfy.
 Select a compatible workflow and component files explicitly:
 
-Ordinary MOSS-Image training can use native previews. The bundled Krea 2 ComfyUI
-workflows are incompatible with MOSS's Qwen3.5 encoder, sampling graph and VAE;
-selecting one for a MOSS job is rejected before sampling. No bundled MOSS ComfyUI
-workflow is provided. Existing custom workflows remain selectable for ordinary
-MOSS jobs.
+Ordinary MOSS-Image training can use native previews or the dedicated
+[`moss_image_lora_sample.json.njk` workflow](moss_image_comfy_samples.md).
+It uses MOSS's Qwen3.5 encoder type, standard VAE loader, `KSampler` and PNG
+`SaveImage`, with model-only inference LoRA. Its prompts render individually
+even when batch submission is enabled. The bundled Krea 2 workflows are
+incompatible with MOSS's encoder, sampling graph and VAE and are rejected before
+sampling. Existing compatible custom workflows remain selectable for ordinary
+MOSS jobs. Specialized MOSS modes still require native previews.
 
 - Krea: `config/comfy_templates/krea2_lora_sample.json.njk` or its Easy Use batch
   variant. Specialized modes send the native, resolution-aware sigma grid through
