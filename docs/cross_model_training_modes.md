@@ -96,8 +96,10 @@ MOSS specialized target-latent caches also include the actual resolved VAE file
 identity, precision and packed/normalized layout. Unchanged VAE inputs retain
 their cache keys; replacing the VAE or its BatchNorm statistics invalidates
 them. The first specialized run builds these versioned target caches instead
-of trusting ordinary MOSS caches that have no VAE provenance. Other models and
-ordinary MOSS keep their existing latent-cache contracts.
+of trusting ordinary MOSS caches that have no VAE provenance. Ordinary MOSS
+jobs with an explicit text encoder path also key cached text embeddings by
+that path and local file identity, so changing the encoder rebuilds them.
+Other ordinary MOSS latent caches and other models keep their existing contracts.
 
 These objectives use one frozen base with adapters disabled for reference
 predictions, not a second full model. Sequential backward/recomputation, CPU

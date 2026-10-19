@@ -379,6 +379,27 @@ class MossNativePathTests(unittest.TestCase):
 
 
 class MossUiContractTests(unittest.TestCase):
+    def test_ordinary_moss_explicit_encoder_invalidates_text_cache(self):
+        model = object.__new__(MossImageModel)
+        model.arch = "moss_image"
+        model.model_config = SimpleNamespace(
+            te_name_or_path=None, text_encoder_path=None, model_kwargs={})
+        self.assertEqual(model.get_text_embedding_space_version(), "moss_image")
+
+        with tempfile.TemporaryDirectory() as directory:
+            encoder = Path(directory) / "encoder.safetensors"
+            encoder.write_bytes(b"first encoder")
+            model.model_config.text_encoder_path = str(encoder)
+            first_key = model.get_text_embedding_space_version()
+            self.assertNotEqual(first_key, "moss_image")
+            self.assertEqual(first_key, model.get_text_embedding_space_version())
+            encoder.write_bytes(b"replaced encoder weights")
+            self.assertNotEqual(first_key, model.get_text_embedding_space_version())
+
+        model._specialized_text_cache_identity = "specialized"
+        self.assertEqual(model.get_text_embedding_space_version(),
+                         "moss_image_flow_components_v1_specialized")
+
     def test_specialized_moss_rechecks_native_preview_renderer_for_live_samples(self):
         comfy_sample = SimpleNamespace(comfy=SimpleNamespace(enabled=True))
         specialized = object.__new__(MossImageModel)

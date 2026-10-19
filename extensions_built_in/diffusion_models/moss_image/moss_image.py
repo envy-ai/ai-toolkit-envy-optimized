@@ -18,6 +18,8 @@ stock Qwen3.5-9B from a comfy file.
 Flow convention matches ai-toolkit (sigma 1 = noise, target = noise - clean).
 """
 
+import hashlib
+import json
 import math
 import os
 from contextlib import contextmanager
@@ -35,6 +37,7 @@ from toolkit.advanced_prompt_embeds import AdvancedPromptEmbeds
 from toolkit.basic import flush
 from toolkit.config_modules import GenerateImageConfig, ModelConfig
 from toolkit.control_image import MOSS_EDIT_CONTROL_PRESENTATION, load_control_rgb
+from toolkit.flow_cache_identity import local_component_identity
 from toolkit.metadata import get_meta_for_safetensors
 from toolkit.models.base_model import BaseModel
 from toolkit.models.v2.text_encoders.qwen35 import (
@@ -190,6 +193,20 @@ class MossImageModel(BaseModel):
         if identity is not None:
             return f'{version}_flow_vae_v1_{identity}'
         return version
+
+    def get_text_embedding_space_version(self):
+        version = super().get_text_embedding_space_version()
+        # Specialized jobs already identify their loaded text components.
+        if getattr(self, '_specialized_text_cache_identity', None):
+            return version
+        config = self.model_config
+        explicit_encoder = (config.te_name_or_path or config.text_encoder_path
+                            or config.model_kwargs.get('text_encoder_path'))
+        if not explicit_encoder:
+            return version
+        identity = [explicit_encoder, local_component_identity(explicit_encoder)]
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        return f'{version}_explicit_te_v1_{digest}'
 
     # ------------------------------------------------------------------
     # Loading

@@ -35,6 +35,8 @@ not hardcoded template defaults. Qwen3-VL is a different encoder and must not
 be selected for this graph. Training/native generation chooses its encoder
 independently using `model.text_encoder_path` or the other documented MOSS
 encoder settings; a local training file must have a valid filesystem path.
+For ordinary MOSS training, changing an explicit training encoder path or its
+local file invalidates cached text embeddings before the next run.
 
 The supplied graph's optional distillation LoRA was
 `d/kromoss-8-steps-dmd-lora.safetensors` at strength 1, with 8 steps, CFG 1,
