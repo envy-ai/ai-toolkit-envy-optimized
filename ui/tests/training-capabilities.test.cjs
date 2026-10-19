@@ -35,6 +35,16 @@ function config(arch, type, network = 'lora') {
   return job;
 }
 
+test('ordinary MOSS jobs reject the bundled Krea preview workflow before saving', () => {
+  const job = config('moss_image:base', 'diffusion_trainer', 'dora');
+  job.config.process[0].sample = { comfy: { enabled: true, workflow_path: 'config/comfy_templates/krea2_lora_sample.json.njk' } };
+  assert.match(caps.validateTrainingCapabilities(job).join('\n'), /Krea 2 ComfyUI workflows are incompatible/);
+  job.config.process[0].sample.comfy.enabled = false;
+  assert.deepEqual(caps.validateTrainingCapabilities(job), []);
+  job.config.process[0].sample.comfy = { enabled: true, workflow_path: 'custom/moss_sample.json' };
+  assert.deepEqual(caps.validateTrainingCapabilities(job), []);
+});
+
 test('capability matrix agrees with Python and supports all objectives without duplicate legacy choices', () => {
   const backend = fs.readFileSync(path.resolve(__dirname, '../../toolkit/training_capabilities.py'), 'utf8');
   const declarations = [...backend.matchAll(/'([^']+)': FlowTrainingCapability\('([^']+)', (\d+)([^\n]*)/g)];

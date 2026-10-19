@@ -51,6 +51,13 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
   }
   if (process.logging?.record_training_rng && process.logging?.record_training_examples === false) errors.push('Recording noise RNG state requires per-image loss logging.');
   if (process.model?.arch === 'krea2_edit') errors.push(...validateKrea2Edit(config));
+  if (canonicalFlowArch(process.model?.arch ?? '') === 'moss_image' && process.sample?.comfy?.enabled) {
+    const workflow = (process.sample.comfy.workflow_path ?? 'config/comfy_templates/krea2_lora_sample.json.njk')
+      .replaceAll('\\', '/').split('/').pop() ?? '';
+    if (workflow.startsWith('krea2_') && workflow.endsWith('.json.njk')) {
+      errors.push('Krea 2 ComfyUI workflows are incompatible with MOSS-Image. Disable Use ComfyUI Renderer to use native MOSS previews.');
+    }
+  }
   if (!isSpecializedTrainingMode(mode)) return errors;
   const model = process.model && effectiveFlowModel(process.model);
   if (!model || !flowTrainingModels[model.arch]) return [...errors, `${mode} supports Qwen Image 2.1, Krea 2, Anima, Ideogram 4 and MOSS-Image.`];

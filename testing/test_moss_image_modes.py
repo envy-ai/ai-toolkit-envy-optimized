@@ -389,7 +389,12 @@ class MossUiContractTests(unittest.TestCase):
 
         ordinary = object.__new__(MossImageModel)
         ordinary.arch = "moss_image"
-        ordinary.validate_sample_config(comfy_sample)
+        custom_sample = SimpleNamespace(comfy=SimpleNamespace(
+            enabled=True, workflow_path="custom/moss_sample.json"))
+        ordinary.validate_sample_config(custom_sample)
+        with self.assertRaisesRegex(ValueError, "Krea 2 ComfyUI workflows are incompatible"):
+            ordinary.validate_sample_config(SimpleNamespace(comfy=SimpleNamespace(
+                enabled=True, workflow_path="config/comfy_templates/krea2_lora_sample.json.njk")))
 
     def test_ui_capability_table_and_variant_options_include_moss_modes(self):
         root = Path(__file__).resolve().parents[1]
