@@ -424,8 +424,10 @@ export default async function startJob(jobID: string) {
   try {
     // Commit the running status while still owning the render gate. A saved
     // render that acquires it next must see this reservation before launching.
-    await prisma.job.update({
-      where: { id: jobID },
+    const claimed = await prisma.job.updateMany({
+      // Another queue worker may have read this job as queued before this
+      // worker acquired the GPU gate. Only the first worker may launch it.
+      where: { id: jobID, status: 'queued' },
       data: {
         status: 'running',
         stop: false,
@@ -433,6 +435,7 @@ export default async function startJob(jobID: string) {
         info: 'Starting job...',
       },
     });
+    if (claimed.count !== 1) return;
     // start and watch the job asynchronously so the cron can continue
     startAndWatchJob(job);
   } finally {
