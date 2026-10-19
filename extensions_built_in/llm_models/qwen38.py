@@ -49,8 +49,6 @@ from toolkit.models.base_model import BaseModel
 from toolkit.models.v2.resolver import resolve_component_file
 from toolkit.print import print_acc
 
-from .src.qwen38_model import Qwen38Generator, build_sequence_embeds
-
 BASE_REPO = "Qwen/Qwen3.8-27B"
 DEFAULT_CHECKPOINT = "Comfy-Org/Qwen3.8-27B/text_encoders/qwen3.8_27b_w4a8.safetensors"
 DEFAULT_INSTRUCTION = "Describe this in detail."
@@ -110,6 +108,10 @@ class Qwen38LLM(BaseModel):
         return BASE_REPO
 
     def load_model(self):
+        # Flash Linear Attention is needed only by Qwen3.8. Importing it during
+        # extension discovery would prevent unrelated training jobs from starting.
+        from .src.qwen38_model import Qwen38Generator
+
         dtype = self.torch_dtype
         device = self.device_torch
         name_or_path = self.model_config.name_or_path or DEFAULT_CHECKPOINT
@@ -296,6 +298,8 @@ class Qwen38LLM(BaseModel):
 
     def _lm_loss(self, ids, types, start: int, media: torch.Tensor, kind: int, grid):
         model = self.model
+        from .src.qwen38_model import build_sequence_embeds
+
         embeds = build_sequence_embeds(model, ids, media, [self._placeholder[kind]])
         grid_t = torch.tensor([list(grid)], device=ids.device)
         position_ids, _ = model.get_rope_index(
@@ -393,6 +397,8 @@ class Qwen38LLM(BaseModel):
         elif kind == KIND_VIDEO:
             video_grid = inputs["video_grid_thw"].to(self.device_torch)
             media = model.get_image_features(inputs["pixel_values_videos"].to(self.device_torch), video_grid)
+        from .src.qwen38_model import build_sequence_embeds
+
         embeds = build_sequence_embeds(model, ids, media, [self._placeholder[KIND_IMAGE], self._placeholder[KIND_VIDEO]])
         position_ids, delta = model.get_rope_index(ids, types, image_grid_thw=image_grid, video_grid_thw=video_grid)
         t0 = time.perf_counter()
