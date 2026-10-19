@@ -23,8 +23,6 @@ config:
         type: lora
         linear: 16
         linear_alpha: 16
-        network_kwargs:
-          ignore_if_contains: ["layers.22."]
       flow_dpo:
         beta: 1
         sft_weight: 0 # Optional preferred-image SFT contribution.

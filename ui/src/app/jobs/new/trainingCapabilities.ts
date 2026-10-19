@@ -222,7 +222,6 @@ export function switchSpecializedArchitecture(config: JobConfig, arch: string): 
   const next = structuredClone(config);
   const process = next.config.process[0];
   if (!isSpecializedTrainingMode(process.type) || !trainingModeSupported(arch, process.type)) throw new Error('Unsupported specialized training architecture.');
-  const previousArch = canonicalFlowArch(process.model.arch);
   process.model.arch = arch;
   process.model.name_or_path = '';
   delete process.model.text_encoder_path;
@@ -232,14 +231,6 @@ export function switchSpecializedArchitecture(config: JobConfig, arch: string): 
   delete process.model.unconditional_lora_path;
   process.model.model_kwargs = mossVariantKwargs(arch);
   if (process.network) delete process.network.pretrained_lora_path;
-  if (process.network && canonicalFlowArch(arch) === 'moss_image') {
-    process.network.network_kwargs ??= {};
-    const ignored = process.network.network_kwargs.ignore_if_contains ?? [];
-    process.network.network_kwargs.ignore_if_contains = [...new Set([...ignored, 'layers.22.'])];
-  } else if (process.network?.network_kwargs && previousArch === 'moss_image') {
-    const ignored = process.network.network_kwargs.ignore_if_contains;
-    if (Array.isArray(ignored)) process.network.network_kwargs.ignore_if_contains = ignored.filter(value => value !== 'layers.22.');
-  }
   const paired = ['flow_dpo', 'fizgig_image_slider'].includes(canonicalTrainingMode(process.type));
   for (const dataset of process.datasets ?? []) {
     delete dataset.control_path;

@@ -24,8 +24,6 @@ config:
         type: lora
         linear: 16
         linear_alpha: 16
-        network_kwargs:
-          ignore_if_contains: ["layers.22."]
       diffusion_kto:
         beta: 1 # Unweighted flow-MSE surrogate: do not copy SD 1.5 beta.
         liked_weight: 1

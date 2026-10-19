@@ -65,8 +65,12 @@ the frozen reference or the dataset repeat count.
   use all blocks; CFG negative/reference branches skip block 22 by default
   (`model_kwargs.uncond_skip_layers`, zero-based). This also applies to the
   distillation teacher's negative and blank baseline branches. CFG 1 skips the
-  reference prediction. The ordinary MOSS UI default excludes `layers.22.` from
-  adapters; specialized architecture switching retains this exclusion.
+  reference prediction. LoRA training includes block 22 by default in ordinary
+  and specialized modes; the native negative CFG skip does not exclude blocks
+  from the adapter. Existing saved jobs that explicitly set
+  `network.network_kwargs.ignore_if_contains: ["layers.22."]` must remove that
+  entry to train block 22. Architecture switching preserves explicit adapter
+  filters without adding a MOSS-specific exclusion.
 
 The MOSS form offers **SFT**, **Base**, and their experimental **Edit Training**
 variants. All six modes support text-to-image Base/SFT; only Flow-DPO and Guidance

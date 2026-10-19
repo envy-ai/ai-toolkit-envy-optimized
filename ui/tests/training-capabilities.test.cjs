@@ -5,12 +5,21 @@ const Module = require('node:module');
 const ts = require('typescript');
 const test = require('node:test');
 
-function load(file) {
+function load(file, overrides = {}, jsx = false) {
   const filename = path.resolve(__dirname, file);
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    fileName: filename,
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      jsx: jsx ? ts.JsxEmit.ReactJSX : undefined,
+    },
   }).outputText;
   const result = new Module(filename, module);
+  result.filename = filename;
+  result.paths = Module._nodeModulePaths(path.dirname(filename));
+  const originalRequire = result.require.bind(result);
+  result.require = id => Object.hasOwn(overrides, id) ? overrides[id] : originalRequire(id);
   result._compile(compiled, filename);
   return result.exports;
 }
@@ -143,6 +152,48 @@ test('MOSS variants normalize correctly and architecture switching retains share
   assert.equal(process.model.name_or_path, '');
   assert.equal(process.datasets[0].control_path_1, '/rejected');
   assert.equal(process.datasets[0].control_path_2, undefined);
+});
+
+test('MOSS form defaults keep negative CFG block skip and omit LoRA block-22 exclusions', () => {
+  const modelUi = load('../../extensions_built_in/diffusion_models/ui.tsx', {
+    'next/link': { __esModule: true, default: () => null },
+    '@/helpers/defaultSamples': {
+      defaultComfySampleConfig: { workflow_path: 'workflow.json' },
+      defaultSampleConfig: {},
+      defaultIdeogramSamplesConfig: {},
+    },
+    react: { __esModule: true, default: { Fragment: Symbol.for('react.fragment') } },
+    'react/jsx-runtime': {
+      jsx: () => null,
+      jsxs: () => null,
+      Fragment: Symbol.for('react.fragment'),
+    },
+  }, true);
+  const variants = ['moss_image', 'moss_image:base', 'moss_image:edit', 'moss_image:base_edit'];
+  const entries = modelUi.AI_TOOLKIT_UI_MODELS.filter(model => variants.includes(model.name));
+  assert.deepEqual(entries.map(model => model.name).sort(), [...variants].sort());
+  for (const entry of entries) {
+    assert.equal(entry.defaults['config.process[0].network.network_kwargs.ignore_if_contains'], undefined,
+      `${entry.name} should not set LoRA ignore filters`);
+    assert.deepEqual(entry.defaults['config.process[0].model.model_kwargs'][0].uncond_skip_layers, [22]);
+  }
+});
+
+test('switching MOSS architecture does not inject LoRA exclusions and preserves explicit user filters', () => {
+  const variants = ['moss_image', 'moss_image:base', 'moss_image:edit', 'moss_image:base_edit'];
+  for (const arch of variants) {
+    const job = config('moss_image', 'flow_dpo');
+    const process = job.config.process[0];
+    process.network.network_kwargs = { alpha: 3 };
+    const { config: switched } = caps.switchSpecializedArchitecture(job, arch);
+    assert.deepEqual(switched.config.process[0].network.network_kwargs, { alpha: 3 }, arch);
+    assert.deepEqual(switched.config.process[0].model.model_kwargs.uncond_skip_layers, [22], arch);
+
+    process.network.network_kwargs.ignore_if_contains = ['layers.22.', 'user.custom'];
+    const { config: explicit } = caps.switchSpecializedArchitecture(job, arch);
+    assert.deepEqual(explicit.config.process[0].network.network_kwargs.ignore_if_contains,
+      ['layers.22.', 'user.custom'], arch);
+  }
 });
 
 test('architecture switching preserves pairs, prompts and memory options but never swaps in a checkpoint', () => {

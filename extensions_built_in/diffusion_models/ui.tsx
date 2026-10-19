@@ -1872,12 +1872,6 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
         },
         {},
       ],
-      // keep the LoRA off the block the negative branch skips, so CFG's
-      // skipped-block contrast stays the base model's
-      "config.process[0].network.network_kwargs.ignore_if_contains": [
-        ["layers.22."],
-        [],
-      ],
     },
     disableSections: ["network.conv"],
     additionalSections: ["model.layer_offloading", "model.low_vram"],
@@ -1915,12 +1909,6 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
           uncond_skip_layers: [22],
         },
         {},
-      ],
-      // keep the LoRA off the block the negative branch skips, so CFG's
-      // skipped-block contrast stays the base model's
-      "config.process[0].network.network_kwargs.ignore_if_contains": [
-        ["layers.22."],
-        [],
       ],
     },
     disableSections: ["network.conv"],
@@ -1964,10 +1952,6 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
           uncond_skip_layers: [22],
         },
         {},
-      ],
-      "config.process[0].network.network_kwargs.ignore_if_contains": [
-        ["layers.22."],
-        [],
       ],
     },
     disableSections: ["network.conv", "train.unload_text_encoder"],
@@ -2018,10 +2002,6 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
           uncond_skip_layers: [22],
         },
         {},
-      ],
-      "config.process[0].network.network_kwargs.ignore_if_contains": [
-        ["layers.22."],
-        [],
       ],
     },
     disableSections: ["network.conv", "train.unload_text_encoder"],

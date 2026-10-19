@@ -23,8 +23,6 @@ config:
         type: lora
         linear: 4
         linear_alpha: 4
-        network_kwargs:
-          ignore_if_contains: ["layers.22."]
       sliderspace:
         discovery_mode: both # generated | provided | both
         discovery_datasets:

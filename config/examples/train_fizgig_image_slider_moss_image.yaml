@@ -23,8 +23,6 @@ config:
         type: lora # dora also supported (signed slider strength).
         linear: 16
         linear_alpha: 16
-        network_kwargs:
-          ignore_if_contains: ["layers.22."]
       fizgig_slider:
         diff_weight: 1
         preservation_weight: 1

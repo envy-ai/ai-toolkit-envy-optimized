@@ -148,6 +148,9 @@ class MossTrainingModeTests(unittest.TestCase):
                 capability = validate_specialized_model(process)
                 self.assertEqual(capability, FLOW_TRAINING_MODELS["moss_image"])
                 self.assertEqual(process["model"]["arch"], "moss_image")
+                network_kwargs = process.get("network", {}).get("network_kwargs", {})
+                self.assertNotIn("layers.22.", network_kwargs.get("ignore_if_contains", []))
+                self.assertEqual(process["model"]["model_kwargs"].get("uncond_skip_layers"), [22])
 
     def test_fixed_shift_five_and_reference_branch_skips_block_22(self):
         profile = FlowTrainingProfile.from_model_config({"arch": "moss_image:base"})
