@@ -1874,7 +1874,7 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
       ],
     },
     disableSections: ["network.conv"],
-    additionalSections: ["model.layer_offloading", "model.low_vram"],
+    additionalSections: ["model.layer_offloading", "model.low_vram", "model.text_encoder_path"],
   },
   {
     name: "moss_image:base",
@@ -1912,7 +1912,7 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
       ],
     },
     disableSections: ["network.conv"],
-    additionalSections: ["model.layer_offloading", "model.low_vram"],
+    additionalSections: ["model.layer_offloading", "model.low_vram", "model.text_encoder_path"],
   },
   {
     name: "moss_image:edit",
@@ -1960,6 +1960,7 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
       "sample.multi_ctrl_imgs",
       "model.low_vram",
       "model.layer_offloading",
+      "model.text_encoder_path",
       "model.qie.match_target_res",
       "model.model_kwargs.kv_cache",
     ],
@@ -2010,6 +2011,7 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
       "sample.multi_ctrl_imgs",
       "model.low_vram",
       "model.layer_offloading",
+      "model.text_encoder_path",
       "model.qie.match_target_res",
       "model.model_kwargs.kv_cache",
     ],

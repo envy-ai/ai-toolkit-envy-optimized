@@ -129,9 +129,11 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'Text Encoder Safetensors Path',
     description: (
       <>
-        Optional full path to a compatible Qwen3-VL-8B ComfyUI text encoder safetensors file, including files outside
-        the ComfyUI models folder. Leave empty to use the default encoder. The processor and model config still
-        come from the base model source.
+        Optional full path to a compatible ComfyUI text encoder safetensors file, including files outside the
+        ComfyUI models folder. MOSS-Image uses Qwen3.5-9B; Qwen Image 2.1 uses Qwen3-VL-8B. Leave empty to use the
+        default encoder. MOSS-Image keeps its Qwen3.5-9B config and vendor tokenizer; an explicit
+        model.te_name_or_path takes precedence. Other models keep their base model config and processor.
+        This controls the training encoder and native previews; ComfyUI sample rendering has its own Text Encoder setting.
       </>
     ),
   },

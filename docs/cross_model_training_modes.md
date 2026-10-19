@@ -80,8 +80,18 @@ their Base/SFT choice and edit/isolation flags are preserved. Explicit component
 paths and memory settings take precedence. Architecture switching still asks you
 to select the matching base source explicitly. MOSS text conditioning uses the
 Qwen3.5-9B final hidden states, with one unpadded encoder forward per prompt;
-variable prompt lengths remain separate cached tensors. An optional encoder
-override uses `model.te_name_or_path` (or `model_kwargs.text_encoder_path`).
+variable prompt lengths remain separate cached tensors. All four MOSS variants
+expose **Text Encoder Safetensors Path** in the training form, stored as
+`model.text_encoder_path`. Encoder selection checks `model.te_name_or_path`
+first, then `model.text_encoder_path`, then `model.model_kwargs.text_encoder_path`,
+then the default Qwen3.5-9B encoder. A compatible local Comfy-format `.safetensors`
+file (including outside the ComfyUI models folder) or
+`org/repo/path/file.safetensors` reference uses the existing single-file loader,
+with the Qwen3.5-9B config and vendor tokenizer. Explicit files also work with
+`model.model_kwargs.use_comfy_weights: false`. Edit variants require an encoder
+that includes the vision tower. This is the encoder used for training and native
+previews; the separate ComfyUI sample **Text Encoder** setting
+(`sample.comfy.text_encoder`) selects weights for ComfyUI sample rendering.
 MOSS specialized target-latent caches also include the actual resolved VAE file
 identity, precision and packed/normalized layout. Unchanged VAE inputs retain
 their cache keys; replacing the VAE or its BatchNorm statistics invalidates

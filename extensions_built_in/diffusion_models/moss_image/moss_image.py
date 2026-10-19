@@ -230,6 +230,8 @@ class MossImageModel(BaseModel):
     def _load_text_encoder(self):
         te_path = self.model_config.te_name_or_path
         if te_path is None:
+            te_path = self.model_config.text_encoder_path
+        if te_path is None:
             te_path = self.model_config.model_kwargs.get(
                 "text_encoder_path", QWEN35_9B_REPO
             )

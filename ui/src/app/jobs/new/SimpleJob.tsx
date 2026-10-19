@@ -831,7 +831,9 @@ export default function SimpleJob({
                 onChange={(value: string | undefined) => {
                   setJobConfig(value?.trim() || undefined, 'config.process[0].model.text_encoder_path');
                 }}
-                placeholder="/absolute/path/to/qwen3vl_8b.safetensors"
+                placeholder={effectiveTrainingModel.arch === 'moss_image'
+                  ? '/absolute/path/to/qwen3.5_9b.safetensors'
+                  : '/absolute/path/to/qwen3vl_8b.safetensors'}
               />
             )}
             {modelArch?.additionalSections?.includes('model.vae_path') && (
