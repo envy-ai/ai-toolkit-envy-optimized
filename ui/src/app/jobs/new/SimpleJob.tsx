@@ -2821,6 +2821,13 @@ export default function SimpleJob({
               onChange={value => setJobConfig(value, 'config.process[0].save.sample_on_record_low')}
               docKey="config.process[0].save.sample_on_record_low"
             />}
+            <Checkbox
+              label="Prepend Trigger Word to Sample Prompts"
+              className="pt-2"
+              checked={jobConfig.config.process[0].sample.prepend_trigger_word ?? false}
+              onChange={value => setJobConfig(value, 'config.process[0].sample.prepend_trigger_word')}
+              docKey="config.process[0].sample.prepend_trigger_word"
+            />
             <div className={sampleTopStyleClass}>
               <div>
                 <NumberInput

@@ -311,6 +311,7 @@ export interface SampleConfig {
   sampler: string;
   sample_every: number;
   sample_start_step: number;
+  prepend_trigger_word?: boolean;
   width: number;
   height: number;
   prompts?: string[];

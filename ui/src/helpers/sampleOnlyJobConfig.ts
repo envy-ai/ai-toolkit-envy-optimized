@@ -7,6 +7,20 @@ export function mergeSampleOnlyJobConfig(existingConfig: any, incomingConfig: an
   const mergedConfig = cloneJson(existingConfig);
   const existingProcess = mergedConfig.config.process[0];
   const incomingProcess = incomingConfig.config.process[0];
+  const hasCachedSamplePrompts = existingProcess.train?.unload_text_encoder
+    || existingProcess.train?.cache_text_embeddings
+    || existingProcess.datasets?.some((dataset: { cache_text_embeddings?: boolean }) => dataset.cache_text_embeddings);
+  if (hasCachedSamplePrompts && !incomingProcess.sample?.comfy?.enabled) {
+    const prefixChanged = Boolean(existingProcess.sample?.prepend_trigger_word)
+      !== Boolean(incomingProcess.sample?.prepend_trigger_word);
+    if (prefixChanged || existingProcess.sample?.comfy?.enabled) {
+      throw new Error(
+        'Native sample prompt embeddings are cached while the text encoder is unloaded. '
+        + 'Stop the job, update its sample settings, and restart training to change the trigger prefix or resume native sampling. '
+        + 'Use the ComfyUI renderer to change the trigger prefix during training.',
+      );
+    }
+  }
   mergeSliderSpacePreview(mergedConfig, incomingConfig);
   existingProcess.sample = cloneJson(incomingProcess.sample);
 

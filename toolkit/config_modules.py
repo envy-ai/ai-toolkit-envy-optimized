@@ -130,6 +130,7 @@ class SampleConfig:
         self.sampler: str = kwargs.get('sampler', 'ddpm')
         self.sample_every: int = kwargs.get('sample_every', 100)
         self.sample_start_step: int = kwargs.get('sample_start_step', 0)
+        self.prepend_trigger_word: bool = kwargs.get('prepend_trigger_word', False)
         self.width: int = kwargs.get('width', 512)
         self.height: int = kwargs.get('height', 512)
         self.neg = kwargs.get('neg', False)
@@ -168,6 +169,12 @@ class SampleConfig:
     def prompts(self):
         # for backwards compatibility as this is checked for length frequently
         return [sample.prompt for sample in self.samples if sample.prompt is not None]
+
+    def format_prompt(self, prompt: str, trigger_word: Optional[str]) -> str:
+        """Apply the sampling-only prefix without modifying stored sample text."""
+        if self.prepend_trigger_word and trigger_word:
+            return f"{trigger_word}\n\n{prompt}"
+        return prompt
 
 
 

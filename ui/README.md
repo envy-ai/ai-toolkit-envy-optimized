@@ -40,6 +40,22 @@ existing whitespace handling. Newlines before a flag remain part of the
 preceding prompt text. Model-specific tokenization and prompt interpretation
 still apply after sample dispatch.
 
+The job-wide **Prepend Trigger Word to Sample Prompts** switch in **Sample** is off
+by default (`sample.prepend_trigger_word: false`). When enabled, sampling adds
+the job's `trigger_word` or phrase, then exactly `\n\n`, before each prompt.
+Stored prompt text, its whitespace, and negative prompts stay unchanged. An
+absent or empty trigger adds nothing. Existing `[trigger]` and `[name]`
+replacement still applies; the prefix is added even if the prompt already
+contains the trigger. Native sampling, its text-embedding cache, and ComfyUI
+(including saved-job **Render Samples**) use the same prefix setting.
+
+Click the switch or its label, or focus it with Tab and press Space/Enter.
+Running jobs using native sampling and cached text embeddings (**Unload TE**,
+**Cache Text Embeddings**, or dataset text caching) require stopping, editing,
+and restarting to change the prefix or switch from ComfyUI back to native
+sampling. The sample-settings save rejects those changes with a restart message;
+live ComfyUI prefix edits remain available.
+
 **Krea 2 Identity/Edit (krea2edit extension)** selects the external `krea2_edit`
 training architecture. Its Model options expose **Fit References to Target**,
 **Train with Two References**, and **Checkpoint Every N Transformer Blocks**.

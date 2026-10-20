@@ -19,6 +19,17 @@ the same sample builder and workflow renderer as training. Configured batching
 and Comfy path replacements still apply. Comfy's background setting is ignored
 for this subprocess so completion and errors cover the entire request.
 
+The job-wide `sample.prepend_trigger_word` setting defaults to `false`. When
+enabled, training and saved-job rendering prepend the job's `trigger_word` or
+phrase followed by exactly `\n\n` to each positive sample prompt. An absent or
+empty trigger leaves the prompt unchanged. Stored prompts and negative prompts
+are unchanged, including their whitespace. Existing `[trigger]` and `[name]`
+replacement still runs, and enabling the prefix adds it even when the prompt
+already contains the trigger. Training's sample embedding cache uses the same
+prefixed text as rendering. Live ComfyUI sampling accepts prefix edits; native
+sampling with cached/unloaded text encoders requires stopping and restarting
+training to change the prefix or return from ComfyUI to native sampling.
+
 Native internal sampling, shared models, specialized training previews, trained
 adapters, embeddings and decorators are rejected with an explanation. Those
 paths depend on trainer-owned model/network attachment, architecture-specific

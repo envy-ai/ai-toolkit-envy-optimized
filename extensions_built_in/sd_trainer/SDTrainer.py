@@ -178,6 +178,7 @@ class SDTrainer(BaseSDTrainProcess):
                     prompt = self.sd.inject_trigger_into_prompt(
                         prompt, self.trigger_word, add_if_not_present=False
                     )
+                prompt = self.sample_config.format_prompt(prompt, self.trigger_word)
 
                 # needed so we can autoparse the prompt to handle flags
                 gen_img_config = GenerateImageConfig(

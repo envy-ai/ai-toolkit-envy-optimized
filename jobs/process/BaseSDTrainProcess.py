@@ -1715,6 +1715,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 prompt = self.sd.inject_trigger_into_prompt(
                     prompt, self.trigger_word, add_if_not_present=False
                 )
+            prompt = sample_config.format_prompt(prompt, self.trigger_word)
 
             extra_args = {}
             if self.adapter_config is not None and self.adapter_config.test_img_path is not None:

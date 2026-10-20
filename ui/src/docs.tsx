@@ -52,6 +52,19 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'config.process[0].sample.prepend_trigger_word': {
+    title: 'Prepend Trigger Word to Sample Prompts',
+    description: (
+      <>
+        Off by default. Add the job&apos;s trigger word or phrase followed by a blank line to each positive sample
+        prompt at generation time. Stored prompt text and negative prompts stay unchanged. An empty trigger adds
+        nothing. Existing [trigger] and [name] placeholders still work; enabling this also adds the prefix when the
+        prompt already contains the trigger. During training, native sampling with cached text embeddings requires
+        stopping and restarting the job to change this setting or switch back from ComfyUI. ComfyUI samples can use
+        live changes.
+      </>
+    ),
+  },
   'config.name': {
     title: 'Training Name',
     description: (
@@ -85,9 +98,9 @@ const docs: { [key: string]: ConfigDoc } = {
         word.
         <br />
         <br />
-        Trigger words will not automatically be added to your test prompts, so you will need to either add your trigger
-        word manually or use the
-        <code>{'[trigger]'}</code> placeholder in your test prompts as well.
+        Enable Prepend Trigger Word to Sample Prompts in Sample settings to automatically add your trigger word or
+        phrase followed by a blank line. Otherwise, add the trigger manually or use the{' '}
+        <code>{'[trigger]'}</code> placeholder in your test prompts.
       </>
     ),
   },
