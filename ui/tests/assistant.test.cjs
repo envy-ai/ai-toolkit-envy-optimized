@@ -7,6 +7,8 @@ const os = require('node:os');
 const Module = require('node:module');
 const ts = require('typescript');
 const { randomUUID } = require('node:crypto');
+const React = require('react');
+const { renderToStaticMarkup } = require('react-dom/server');
 
 const sourceRoot = path.resolve(__dirname, '../src');
 const cache = new Map();
@@ -51,9 +53,75 @@ function load(filename) {
   );
   return mod.exports;
 }
+function loadStandaloneTypeScript(filename) {
+  const absolute = path.resolve(__dirname, filename);
+  const mod = new Module(absolute, module);
+  mod.filename = absolute;
+  mod.paths = Module._nodeModulePaths(path.dirname(absolute));
+  mod._compile(
+    ts.transpileModule(fs.readFileSync(absolute, 'utf8'), {
+      fileName: absolute,
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+    }).outputText,
+    absolute,
+  );
+  return mod.exports;
+}
+function loadAssistantSessionsHook(apiClient) {
+  const slots = [];
+  let index = 0;
+  const react = {
+    useRef(initial) {
+      const slot = index++;
+      if (!slots[slot]) slots[slot] = { current: initial };
+      return slots[slot];
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      const slot = index++;
+      if (!slots[slot]) slots[slot] = { unsubscribe: subscribe(() => {}) };
+      return getSnapshot();
+    },
+    useEffect(effect, dependencies) {
+      const slot = index++;
+      const previous = slots[slot];
+      if (!previous || dependencies.some((dependency, position) => dependency !== previous.dependencies[position])) {
+        previous?.cleanup?.();
+        slots[slot] = { dependencies: [...dependencies], cleanup: effect() };
+      }
+    },
+  };
+  const filename = path.resolve(__dirname, '../src/hooks/useAssistantSessions.ts');
+  const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+    fileName: filename,
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+  }).outputText;
+  const instance = new Module(filename, module);
+  instance.filename = filename;
+  instance.paths = Module._nodeModulePaths(path.dirname(filename));
+  const originalRequire = instance.require.bind(instance);
+  instance.require = id => {
+    if (id === 'react') return react;
+    if (id === '@/utils/api') return { apiClient };
+    if (id.startsWith('@/')) return load(id.slice(2));
+    return originalRequire(id);
+  };
+  instance._compile(compiled, filename);
+  return () => {
+    index = 0;
+    return instance.exports.default();
+  };
+}
 const { DEFAULT_ASSISTANT_CONFIGURATION, assistantEndpoint, assistantConfigurationSchema } =
   load('assistant/AssistantProvider');
 const { NodeAssistantConfiguration } = load('server/assistant/NodeAssistantConfiguration');
+const { AssistantSessionStore, SessionStoreError } = load('server/assistant/AssistantSessionStore');
+const { AssistantSessionController } = load('assistant/AssistantSessionController');
+const { POST: postAssistantSessions, GET: getAssistantSessions } = load('app/api/assistant/sessions/route');
+const assistantSessionItemRoute = load('app/api/assistant/sessions/[id]/route');
+const { sessionContentSchema } = load('assistant/sessions');
+const { isAssistantSessionPath } = loadStandaloneTypeScript('../cron/assistantSessionPaths.ts');
+const { browserSessionHost } = load('hooks/useAssistantSessions');
+const AssistantHistory = load('components/assistant/AssistantHistory').default;
 const { NodeAssistantProvider, parseAssistantResponse, readAssistantSse } = load(
   'server/assistant/NodeAssistantProvider',
 );
@@ -115,6 +183,49 @@ const context = async (options = {}) => ({
   ...options,
 });
 const call = (name, args) => ({ name, arguments: args, callId: randomUUID() });
+const sessionContent = text => ({
+  entries: [{ id: randomUUID(), role: 'user', text }],
+  draft: '',
+  attachments: [],
+});
+const makeSession = (id, content, revision = 1, title = content.entries[0]?.text || 'Recovered draft') => ({
+  version: 1,
+  id,
+  title,
+  titleSource: 'auto',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: `2026-01-01T00:00:0${Math.min(revision, 9)}.000Z`,
+  revision,
+  entryCount: content.entries.length,
+  content,
+});
+function memorySessionHost({ legacy = null, legacyId = null, recovery = null, lastId = null } = {}) {
+  return {
+    rememberedId: lastId,
+    importedId: legacyId,
+    legacyValue: legacy,
+    recoveryValue: recovery,
+    completedLegacy: false,
+    lastId() { return this.rememberedId; },
+    remember(id) { this.rememberedId = id; },
+    legacy() { return this.legacyValue; },
+    legacyId() { return this.importedId; },
+    rememberLegacy(id) { this.importedId = id; },
+    completeLegacy() { this.completedLegacy = true; this.legacyValue = null; this.importedId = null; },
+    recovery() { return this.recoveryValue; },
+    recover(value) { this.recoveryValue = value; },
+  };
+}
+async function withSessionDirectory(callback) {
+  const parent = path.join(__dirname, '../../tmp');
+  await fsp.mkdir(parent, { recursive: true });
+  const directory = await fsp.mkdtemp(path.join(parent, 'assistant-sessions-test-'));
+  try {
+    return await callback(directory);
+  } finally {
+    await fsp.rm(directory, { recursive: true, force: true });
+  }
+}
 
 test('configuration validates budgets and URL prefixes without selecting guessed models', () => {
   assert.equal(DEFAULT_ASSISTANT_CONFIGURATION.model, '');
@@ -143,6 +254,520 @@ test('stored credentials remain private and outside configuration responses', as
   await reloaded.update({ config: DEFAULT_ASSISTANT_CONFIGURATION, clearCredential: true });
   assert.equal(reloaded.state().credentialPresent, false);
   assert.equal(fs.existsSync(path.join(directory, 'assistant-credential.json')), false);
+});
+test('saved chats persist across reopen, allow duplicate titles, and keep manual renames', async () => {
+  await withSessionDirectory(async directory => {
+    const store = await AssistantSessionStore.create(directory);
+    const firstId = randomUUID();
+    const secondId = randomUUID();
+    const first = await store.create(firstId, sessionContent('Same request title'));
+    const second = await store.create(secondId, sessionContent('Same request title'));
+    assert.equal(first.title, second.title);
+    assert.notEqual(first.id, second.id);
+    assert.equal(first.titleSource, 'auto');
+
+    const renamed = await store.update(firstId, { revision: first.revision, title: 'Pinned title' });
+    const changedContent = await store.update(firstId, {
+      revision: renamed.revision,
+      content: sessionContent('A different follow-up prompt'),
+    });
+    assert.equal(changedContent.title, 'Pinned title');
+    assert.equal(changedContent.titleSource, 'manual');
+    assert.equal(changedContent.revision, 3);
+
+    const reopened = await AssistantSessionStore.create(directory);
+    assert.equal((await reopened.get(firstId)).content.entries[0].text, 'A different follow-up prompt');
+    const summaries = await reopened.list();
+    assert.equal(summaries.length, 2);
+    assert.ok(summaries.every(summary => !('content' in summary)));
+    assert.equal(summaries.find(summary => summary.id === firstId).title, 'Pinned title');
+  });
+});
+test('saved-chat writes validate revisions and tombstone deletes against stale retries', async () => {
+  await withSessionDirectory(async directory => {
+    const store = await AssistantSessionStore.create(directory);
+    const id = randomUUID();
+    const initial = await store.create(id, sessionContent('First prompt'));
+    await assert.rejects(
+      store.update(id, { revision: initial.revision - 1, title: 'stale rename' }),
+      error => error instanceof SessionStoreError && error.status === 409,
+    );
+    const renamed = await store.update(id, { revision: initial.revision, title: 'Current title' });
+    await assert.rejects(
+      store.delete(id, initial.revision),
+      error => error instanceof SessionStoreError && error.status === 409,
+    );
+    await store.delete(id, renamed.revision);
+    await assert.rejects(store.get(id), error => error instanceof SessionStoreError && error.status === 404);
+    await assert.rejects(
+      store.create(id, sessionContent('late autosave')),
+      error => error instanceof SessionStoreError && error.status === 410,
+    );
+
+    const reopened = await AssistantSessionStore.create(directory);
+    await assert.rejects(
+      reopened.create(id, sessionContent('late autosave after restart')),
+      error => error instanceof SessionStoreError && error.status === 410,
+    );
+    assert.equal((await reopened.list()).length, 0);
+  });
+});
+test('concurrent saved-chat edits accept one revision and reject the stale writer', async () => {
+  await withSessionDirectory(async directory => {
+    const store = await AssistantSessionStore.create(directory);
+    const id = randomUUID();
+    const initial = await store.create(id, sessionContent('Concurrent edits'));
+    const edits = await Promise.allSettled([
+      store.update(id, { revision: initial.revision, title: 'Tab A title' }),
+      store.update(id, { revision: initial.revision, title: 'Tab B title' }),
+    ]);
+    assert.equal(edits.filter(result => result.status === 'fulfilled').length, 1);
+    const rejected = edits.find(result => result.status === 'rejected');
+    assert.ok(rejected.reason instanceof SessionStoreError);
+    assert.equal(rejected.reason.status, 409);
+    const current = await store.get(id);
+    assert.equal(current.revision, initial.revision + 1);
+    assert.ok(['Tab A title', 'Tab B title'].includes(current.title));
+  });
+});
+test('saved-chat retry with the same ID is idempotent and private files reject unsafe modes', async () => {
+  await withSessionDirectory(async directory => {
+    const store = await AssistantSessionStore.create(directory);
+    const id = randomUUID();
+    const original = sessionContent('Original content');
+    const saved = await store.create(id, original);
+    const retry = await store.create(id, sessionContent('Retry payload must not overwrite saved content'));
+    assert.equal(retry.revision, saved.revision);
+    assert.deepEqual(retry.content, original);
+    assert.equal((await fsp.stat(directory)).mode & 0o777, 0o700);
+    const filename = path.join(directory, `${id}.json`);
+    assert.equal((await fsp.stat(filename)).mode & 0o777, 0o600);
+
+    if (process.platform !== 'win32') {
+      await fsp.chmod(filename, 0o644);
+      await assert.rejects(AssistantSessionStore.create(directory), /owner-only permissions/);
+    }
+    assert.throws(() => sessionContentSchema.parse({
+      ...original,
+      entries: [{ ...original.entries[0], preview: { path: '/secret', url: 'https://evil.invalid/image' } }],
+    }));
+  });
+});
+test('saved-chat storage paths stay private through direct and symlinked file access paths', async () => {
+  await withSessionDirectory(async directory => {
+    const priorDirectory = process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR;
+    process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR = directory;
+    const sessions = path.join(directory, 'sessions');
+    await fsp.mkdir(sessions);
+    const privateFile = path.join(sessions, `${randomUUID()}.json`);
+    const publicFile = path.join(directory, 'ordinary.json');
+    await fsp.writeFile(privateFile, '{}');
+    await fsp.writeFile(publicFile, '{}');
+    const alias = path.join(directory, 'session-alias.json');
+    try {
+      await fsp.symlink(privateFile, alias);
+      assert.equal(await isAssistantSessionPath(privateFile, root), true);
+      assert.equal(await isAssistantSessionPath(alias, root), true);
+      assert.equal(await isAssistantSessionPath(publicFile, root), false);
+    } finally {
+      if (priorDirectory === undefined) delete process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR;
+      else process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR = priorDirectory;
+    }
+  });
+});
+test('saved-chat HTTP routes validate input and preserve same-ID retry, conflict, and delete semantics', async () => {
+  await withSessionDirectory(async directory => {
+    const priorDirectory = process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR;
+    const priorStore = globalThis.toolkitAssistantSessions;
+    process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR = directory;
+    globalThis.toolkitAssistantSessions = undefined;
+    const loggedErrors = [];
+    const priorConsoleError = console.error;
+    console.error = (...args) => loggedErrors.push(args);
+    const request = body => ({ json: async () => body });
+    const params = id => ({ params: Promise.resolve({ id }) });
+    try {
+      const invalid = await postAssistantSessions(request({ id: 'not-a-uuid', content: sessionContent('x') }));
+      assert.equal(invalid.status, 400);
+      const invalidContent = await postAssistantSessions(request({ id: randomUUID(), content: { entries: [], draft: '', attachments: [], unexpected: true } }));
+      assert.equal(invalidContent.status, 400);
+
+      const id = randomUUID();
+      const content = sessionContent('Persist through the route');
+      const createdResponse = await postAssistantSessions(request({ id, content }));
+      assert.equal(createdResponse.status, 200);
+      const created = await createdResponse.json();
+      const retriedResponse = await postAssistantSessions(request({ id, content: sessionContent('late retry') }));
+      assert.equal(retriedResponse.status, 200);
+      assert.equal((await retriedResponse.json()).content.entries[0].text, 'Persist through the route');
+
+      const conflict = await assistantSessionItemRoute.PATCH(request({ revision: created.revision - 1, title: 'stale' }), params(id));
+      assert.equal(conflict.status, 409);
+      const renamedResponse = await assistantSessionItemRoute.PATCH(request({ revision: created.revision, title: 'Manual title' }), params(id));
+      assert.equal(renamedResponse.status, 200);
+      const renamed = await renamedResponse.json();
+      assert.equal(renamed.title, 'Manual title');
+      assert.equal((await (await getAssistantSessions({ nextUrl: new URL('http://fixture.local/api/assistant/sessions') })).json()).sessions.length, 1);
+
+      const deleted = await assistantSessionItemRoute.DELETE(request({ revision: renamed.revision }), params(id));
+      assert.equal(deleted.status, 200);
+      const staleWrite = await assistantSessionItemRoute.PATCH(request({ revision: renamed.revision, content }), params(id));
+      assert.equal(staleWrite.status, 404);
+      const lateRetry = await postAssistantSessions(request({ id, content }));
+      assert.equal(lateRetry.status, 410);
+      assert.equal((await (await getAssistantSessions({ nextUrl: new URL('http://fixture.local/api/assistant/sessions') })).json()).sessions.length, 0);
+    } finally {
+      globalThis.toolkitAssistantSessions = priorStore;
+      console.error = priorConsoleError;
+      if (priorDirectory === undefined) delete process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR;
+      else process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR = priorDirectory;
+    }
+    assert.equal(loggedErrors.length, 5);
+  });
+});
+test('session controller serializes autosaves and flushes edits made during an earlier write', async () => {
+  let releaseCreate;
+  let signalCreateStarted;
+  const createPending = new Promise(resolve => (releaseCreate = resolve));
+  const createStarted = new Promise(resolve => (signalCreateStarted = resolve));
+  const calls = [];
+  const id = randomUUID();
+  const api = {
+    list: async () => [],
+    get: async () => { throw new Error('not used'); },
+    create: async (sessionId, content) => {
+      calls.push({ method: 'create', sessionId, content: structuredClone(content) });
+      signalCreateStarted();
+      return createPending;
+    },
+    update: async (sessionId, value) => {
+      calls.push({ method: 'update', sessionId, revision: value.revision, content: structuredClone(value.content) });
+      return makeSession(sessionId, value.content, value.revision + 1);
+    },
+    delete: async () => {},
+  };
+  const controller = new AssistantSessionController(api, memorySessionHost(), () => id);
+  await controller.initialize();
+  const firstContent = sessionContent('First saved version');
+  controller.updateContent(() => firstContent);
+  const pendingFlush = controller.flush();
+  await createStarted;
+  controller.updateContent(previous => ({
+    ...previous,
+    entries: [...previous.entries, { id: randomUUID(), role: 'assistant', text: 'Reply arrived during save' }],
+  }));
+  const latestContent = controller.snapshot().content;
+  releaseCreate(makeSession(id, firstContent, 1));
+  assert.equal(await pendingFlush, true, JSON.stringify(controller.snapshot()));
+  assert.deepEqual(calls.map(call => call.method), ['create', 'update']);
+  assert.equal(calls[1].revision, 1);
+  assert.deepEqual(calls[1].content, latestContent);
+  assert.equal(controller.snapshot().metadata.revision, 2);
+  assert.deepEqual(controller.snapshot().content, latestContent);
+  assert.equal(controller.snapshot().saveState, 'saved');
+});
+test('a clean flush does not leave a resolved save promise latched across later edits', async () => {
+  const id = randomUUID();
+  const calls = [];
+  const api = {
+    list: async () => [],
+    get: async () => { throw new Error('not used'); },
+    create: async (sessionId, content) => {
+      calls.push({ method: 'create', content: structuredClone(content) });
+      return makeSession(sessionId, content);
+    },
+    update: async (sessionId, value) => {
+      calls.push({ method: 'update', revision: value.revision, content: structuredClone(value.content) });
+      return makeSession(sessionId, value.content, value.revision + 1);
+    },
+    delete: async () => {},
+  };
+  const controller = new AssistantSessionController(api, memorySessionHost(), () => id);
+  await controller.initialize();
+  controller.updateContent(() => sessionContent('Persist first entry'));
+  assert.equal(await controller.flush(), true);
+  assert.equal(await controller.flush(), true, 'the clean boundary is the latch regression');
+  controller.updateContent(previous => ({
+    ...previous,
+    entries: [...previous.entries, { id: randomUUID(), role: 'assistant', text: 'Persist later reply' }],
+  }));
+  assert.equal(await controller.flush(), true);
+  assert.deepEqual(calls.map(call => call.method), ['create', 'update']);
+  assert.equal(controller.snapshot().metadata.revision, 2);
+  assert.equal(controller.snapshot().saveState, 'saved');
+});
+test('failed session flush preserves conversation text and recovery snapshot for retry', async () => {
+  const id = randomUUID();
+  const content = sessionContent('Keep this text after storage failure');
+  let attempts = 0;
+  const host = memorySessionHost();
+  const api = {
+    list: async () => [],
+    get: async () => { throw new Error('not used'); },
+    create: async (sessionId, value) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('fixture disk failure');
+      return makeSession(sessionId, value);
+    },
+    update: async () => { throw new Error('not used'); },
+    delete: async () => {},
+  };
+  const controller = new AssistantSessionController(api, host, () => id);
+  await controller.initialize();
+  controller.updateContent(() => content);
+  assert.equal(await controller.flush(), false);
+  assert.deepEqual(controller.snapshot().content, content);
+  assert.equal(controller.snapshot().error.message, 'fixture disk failure');
+  assert.equal(host.recoveryValue.id, id);
+  assert.deepEqual(host.recoveryValue.content, content);
+  assert.equal(await controller.retry(), true);
+  assert.equal(attempts, 2);
+  assert.deepEqual(controller.snapshot().content, content);
+  assert.equal(controller.snapshot().saveState, 'saved');
+  assert.equal(host.recoveryValue, null);
+});
+test('legacy session migration retains a stable ID and source until an idempotent retry is acknowledged', async () => {
+  const legacy = sessionContent('Legacy conversation text');
+  const host = memorySessionHost({ legacy });
+  const serverSessions = new Map();
+  const createdIds = [];
+  let loseFirstResponse = true;
+  const api = {
+    list: async () => [],
+    get: async id => serverSessions.get(id),
+    create: async (id, content) => {
+      createdIds.push(id);
+      if (!serverSessions.has(id)) serverSessions.set(id, makeSession(id, content));
+      if (loseFirstResponse) {
+        loseFirstResponse = false;
+        throw new Error('simulated response loss after commit');
+      }
+      return serverSessions.get(id);
+    },
+    update: async () => { throw new Error('not used'); },
+    delete: async () => {},
+  };
+  const controller = new AssistantSessionController(api, host, () => randomUUID());
+  await controller.initialize();
+  const stableId = host.importedId;
+  assert.ok(stableId);
+  assert.equal(host.legacyValue, legacy);
+  assert.equal(controller.snapshot().saveState, 'error');
+  assert.equal(await controller.retry(), true);
+  assert.deepEqual(createdIds, [stableId, stableId]);
+  assert.equal(host.completedLegacy, true);
+  assert.equal(host.legacyValue, null);
+  assert.deepEqual(controller.snapshot().content, legacy);
+  assert.equal(controller.snapshot().metadata.revision, 1);
+});
+test('a changed-content migration retry surfaces a conflict and preserves both local copies', async () => {
+  const legacy = sessionContent('Original legacy conversation');
+  const localLatest = {
+    ...legacy,
+    entries: [...legacy.entries, { id: randomUUID(), role: 'assistant', text: 'Unsaved follow-up' }],
+  };
+  const id = randomUUID();
+  const host = memorySessionHost({ legacy });
+  let remoteSnapshot;
+  const updates = [];
+  let loseFirstResponse = true;
+  const api = {
+    list: async () => [],
+    get: async () => remoteSnapshot,
+    create: async (sessionId, content) => {
+      if (!remoteSnapshot) remoteSnapshot = makeSession(sessionId, content);
+      if (loseFirstResponse) {
+        loseFirstResponse = false;
+        throw new Error('simulated lost create response');
+      }
+      return remoteSnapshot;
+    },
+    update: async (sessionId, value) => {
+      updates.push({ sessionId, value });
+      return makeSession(sessionId, value.content, value.revision + 1);
+    },
+    delete: async () => {},
+  };
+  const controller = new AssistantSessionController(api, host, () => id);
+  await controller.initialize();
+  controller.updateContent(() => localLatest);
+  assert.equal(await controller.retry(), false);
+  assert.equal(updates.length, 0, 'an idempotent create mismatch must not be overwritten with a newly acquired revision');
+  assert.deepEqual(remoteSnapshot.content, legacy);
+  assert.deepEqual(controller.snapshot().content, localLatest);
+  assert.deepEqual(host.legacyValue, legacy);
+  assert.deepEqual(host.recoveryValue.content, localLatest);
+  assert.equal(host.recoveryValue.id, id);
+  assert.equal(host.completedLegacy, false);
+});
+test('missing recovery target keeps local entries ready for an explicit save copy', async () => {
+  const recoveryContent = sessionContent('Only recoverable local copy');
+  const missingId = randomUUID();
+  const copyId = randomUUID();
+  const host = memorySessionHost({ recovery: { id: missingId, revision: 4, content: recoveryContent } });
+  const creates = [];
+  const api = {
+    list: async () => [],
+    get: async () => { throw { response: { status: 404, data: { error: 'Chat was deleted.' } } }; },
+    create: async (id, content) => {
+      creates.push({ id, content });
+      return makeSession(id, content);
+    },
+    update: async () => { throw new Error('not used'); },
+    delete: async () => {},
+  };
+  const generatedIds = [randomUUID(), copyId];
+  const controller = new AssistantSessionController(api, host, () => generatedIds.shift());
+  await controller.initialize();
+  assert.equal(controller.snapshot().ready, true);
+  assert.deepEqual(controller.snapshot().content, recoveryContent);
+  assert.match(controller.snapshot().error.message, /deleted/i);
+  assert.equal(await controller.saveCopy(), true);
+  assert.deepEqual(creates, [{ id: copyId, content: recoveryContent }]);
+  assert.equal(controller.snapshot().id, copyId);
+  assert.equal(controller.snapshot().metadata.revision, 1);
+  assert.equal(host.recoveryValue, null);
+});
+test('history-list failure does not hide a recovery snapshot or block save copy', async () => {
+  const recoveryContent = sessionContent('Recovered when history endpoint is offline');
+  const recoveryId = randomUUID();
+  const copyId = randomUUID();
+  const host = memorySessionHost({ recovery: { id: recoveryId, revision: 0, content: recoveryContent } });
+  const api = {
+    list: async () => { throw new Error('history service unavailable'); },
+    get: async () => { throw new Error('not used'); },
+    create: async (id, content) => makeSession(id, content),
+    update: async () => { throw new Error('not used'); },
+    delete: async () => {},
+  };
+  const ids = [randomUUID(), copyId];
+  const controller = new AssistantSessionController(api, host, () => ids.shift());
+  await controller.initialize();
+  assert.equal(controller.snapshot().ready, true);
+  assert.deepEqual(controller.snapshot().content, recoveryContent);
+  assert.match(controller.snapshot().historyError.message, /history service unavailable/);
+  assert.equal(await controller.saveCopy(), true);
+  assert.equal(controller.snapshot().metadata.id, copyId);
+});
+test('browser session host reads legacy entries and persists migration and recovery markers', () => {
+  const oldLocal = globalThis.localStorage;
+  const oldSession = globalThis.sessionStorage;
+  const makeStorage = () => {
+    const values = new Map();
+    return {
+      getItem: key => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, String(value)),
+      removeItem: key => values.delete(key),
+      values,
+    };
+  };
+  globalThis.localStorage = makeStorage();
+  globalThis.sessionStorage = makeStorage();
+  const legacy = sessionContent('Legacy browser entry');
+  try {
+    globalThis.sessionStorage.setItem('toolkit:assistant:messages', JSON.stringify(legacy.entries));
+    assert.deepEqual(browserSessionHost.legacy(), legacy);
+    browserSessionHost.rememberLegacy('migration-id');
+    assert.equal(browserSessionHost.legacyId(), 'migration-id');
+    browserSessionHost.remember('saved-id');
+    assert.equal(browserSessionHost.lastId(), 'saved-id');
+    const recovery = { id: randomUUID(), revision: 4, content: legacy };
+    browserSessionHost.recover(recovery);
+    assert.deepEqual(browserSessionHost.recovery(), recovery);
+    browserSessionHost.completeLegacy();
+    assert.equal(browserSessionHost.legacy(), null);
+    assert.equal(browserSessionHost.legacyId(), null);
+    assert.deepEqual(browserSessionHost.recovery(), recovery, 'legacy cleanup must not discard a separate recovery snapshot');
+  } finally {
+    if (oldLocal === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = oldLocal;
+    if (oldSession === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = oldSession;
+  }
+});
+test('session hook does not schedule autosave while a recovery snapshot is hydrating', async () => {
+  const oldLocal = globalThis.localStorage;
+  const oldSession = globalThis.sessionStorage;
+  const oldSetTimeout = globalThis.setTimeout;
+  const oldClearTimeout = globalThis.clearTimeout;
+  const makeStorage = () => {
+    const values = new Map();
+    return {
+      getItem: key => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, String(value)),
+      removeItem: key => values.delete(key),
+      values,
+    };
+  };
+  globalThis.localStorage = makeStorage();
+  globalThis.sessionStorage = makeStorage();
+  const content = sessionContent('Hydrating recovery conversation');
+  const id = randomUUID();
+  const saved = makeSession(id, content, 4);
+  const { version: _version, content: _content, ...metadata } = saved;
+  globalThis.sessionStorage.setItem('toolkit:assistant:recovery', JSON.stringify({ id, revision: 4, content }));
+  let resolveSession;
+  let signalGetStarted;
+  const sessionPending = new Promise(resolve => (resolveSession = resolve));
+  const getStarted = new Promise(resolve => (signalGetStarted = resolve));
+  const requests = [];
+  const timers = [];
+  globalThis.setTimeout = (callback, delay) => { timers.push({ callback, delay }); return timers.length; };
+  globalThis.clearTimeout = () => {};
+  const render = loadAssistantSessionsHook({
+    get: async url => {
+      requests.push(url);
+      if (url === '/api/assistant/sessions') return { data: { sessions: [metadata] } };
+      signalGetStarted();
+      return sessionPending;
+    },
+    post: async () => { throw new Error('autosave must not run during hydration'); },
+    patch: async () => { throw new Error('autosave must not run during hydration'); },
+    delete: async () => {},
+  });
+  try {
+    let state = render();
+    const controller = state.controller;
+    const initialization = controller.initialize();
+    await getStarted;
+    state = render();
+    assert.equal(state.ready, true);
+    assert.equal(state.loading, true);
+    assert.equal(state.saveState, 'unsaved');
+    assert.deepEqual(state.content, content);
+    assert.equal(timers.length, 0, 'recovery must not trigger the debounce save before its saved version is checked');
+
+    resolveSession({ data: saved });
+    await initialization;
+    await new Promise(resolve => setImmediate(resolve));
+    state = render();
+    assert.equal(state.loading, false, JSON.stringify(state.controller.snapshot()));
+    assert.equal(state.saveState, 'saved');
+    assert.equal(requests.length, 2);
+    assert.equal(timers.length, 0);
+  } finally {
+    globalThis.localStorage = oldLocal;
+    globalThis.sessionStorage = oldSession;
+    globalThis.setTimeout = oldSetTimeout;
+    globalThis.clearTimeout = oldClearTimeout;
+  }
+});
+test('saved-history actions are all disabled while an assistant run is active', () => {
+  const callbacks = {
+    onOpen: () => {}, onNew: () => {}, onRename: () => {}, onDelete: () => {}, onRefresh: () => {},
+  };
+  const sessions = [{
+    id: randomUUID(), title: 'Fixture conversation', titleSource: 'auto',
+    createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    revision: 1, entryCount: 2,
+  }];
+  const render = disabled => renderToStaticMarkup(React.createElement(AssistantHistory, {
+    sessions, activeId: sessions[0].id, disabled, refreshing: false, error: null, ...callbacks,
+  }));
+  const activeRunMarkup = render(true);
+  const idleMarkup = render(false);
+  assert.equal((activeRunMarkup.match(/<button[^>]*disabled=""/g) || []).length, 4);
+  assert.equal((idleMarkup.match(/<button[^>]*disabled=""/g) || []).length, 0);
 });
 test('assistant diagnostics explain preflight rejection and log only safe metadata', async () => {
   const directory = path.join(root, 'assistant-diagnostics');

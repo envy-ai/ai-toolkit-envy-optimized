@@ -8,6 +8,8 @@ import type { AssistantImageInput, AssistantToolCall } from '@/assistant/Assista
 import { API_CATALOG, getAssistantTools, isReadOnlyTool } from '@/assistant/tools';
 import { defaultJobConfig } from '@/app/jobs/new/jobConfig';
 import { NodeAssistantProvider } from './NodeAssistantProvider';
+import { TOOLKIT_ROOT } from '@/paths';
+import { isAssistantSessionPath } from '../../../cron/assistantSessionPaths';
 
 const text = z.string().min(1).max(4096);
 const dimensions = z.number().int().min(1).max(4096);
@@ -129,6 +131,7 @@ export async function scopedPath(filename: string, roots: string[], write = fals
     ancestor = parent;
   }
   const actual = path.join(await fs.realpath(ancestor), path.relative(ancestor, resolved));
+  if (await isAssistantSessionPath(actual, TOOLKIT_ROOT)) throw new Error('Saved conversations are private and unavailable to file tools.');
   const realRoot = await fs.realpath(lexical);
   if (!under(actual, realRoot) || (write && actual === realRoot))
     throw new Error('Path escapes its folder through a symbolic link.');

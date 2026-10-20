@@ -10,8 +10,56 @@ and press Enter/Space, to expand its details and any image preview.
 Drag the handle on the drawer's left edge to resize it; the width is remembered
 in this browser. Arrow keys also adjust width, and double-click resets it.
 On small screens the drawer uses the full screen width.
-Conversation text is kept in this browser tab's session storage, bounded to the
-last 100 entries. Provider credentials never enter that storage.
+Chats autosave on the toolkit server. **Chat history** opens a compact saved-chat
+list above the conversation, with title search, newest activity first, and
+rename/delete controls. **New conversation** starts an empty chat without
+discarding the old one. Empty chats do not create history entries until they
+contain a message, draft, or attachment. A title is derived locally from the
+first message (or draft until then), excluding the appended attachment paths;
+there is no model request for titles. Titles can repeat because each chat has
+its own UUID. Manual renames survive later autosaves.
+
+Drafts, attachment paths, complete displayed messages, and tool preview
+references are saved; tool entries retain their existing bounded activity
+detail. Reopening a chat restores its text, not active provider runs, approvals,
+encoded images, credentials, or tool execution. The existing last-40-non-tool
+message context policy and per-run token budgets are unchanged. A preview can
+be unavailable if its source file was moved or deleted.
+
+New/load/rename/delete controls wait while a reply, upload, or session operation
+is active; use **Stop assistant** before switching a running conversation.
+History selection and new-chat actions flush pending saves first. **Saving…**,
+**Saved**, and persistent error details show storage state. Failed saves retain
+the current content and offer **Retry save**. Revision conflicts never silently
+overwrite another tab's changes: **Save a copy** keeps the local version under
+a new UUID, or **Reload saved chat** asks before replacing local text. Open
+history or use its refresh control to see changes from another browser tab.
+
+History buttons support Tab and Enter/Space. Opening history focuses its search;
+Escape closes history and returns focus to its toggle. Rename uses the shared
+prefilled title dialog; delete names the selected chat and asks for confirmation.
+The same compact history layout works on narrow drawers.
+
+Saved records live in `data/assistant/sessions/<UUID>.json`, respecting
+`AI_TOOLKIT_ASSISTANT_SETTINGS_DIR`. Versioned files use atomic writes and POSIX
+owner-only permissions, with an 8 MiB per-chat limit reported as an error rather
+than silently truncating messages. A metadata-only in-memory index serves the
+history list. Writes and revision checks are serialized by the current single
+Next.js writer process. Deleted UUIDs retain small `.deleted.json` tombstones,
+preventing delayed saves or create retries from resurrecting them. No training
+database schema change is required. Session APIs share the toolkit's existing
+authentication and history is shared by authorized users of this toolkit
+instance. Public file/media endpoints and assistant file tools block session
+files, including canonical symlink aliases.
+
+The last active UUID is remembered in this browser. This tab also keeps an
+unsaved recovery snapshot, so storage/network failures do not discard its local
+draft on reload. The former single `toolkit:assistant:messages` transcript is
+imported once with a stable migration UUID and retained until its actual content
+is confirmed saved. Recovery content takes priority over an older legacy copy.
+Browser storage contains conversation data and references, never provider
+credentials. Session files contain ordinary unencrypted chat text; provider
+credentials remain in their separate configuration store.
 
 The settings button opens the connection panel. It follows the RPG Creator
 assistant's configuration and reuses its provider transport: API base URL,
@@ -168,5 +216,15 @@ The production build passed, followed by production-mode image inspection and
 live proxy model discovery. The normal UI/worker and temporary test servers were
 stopped afterward. Building the main checkout required a fresh webpack cache and
 `NODE_OPTIONS=--max-old-space-size=8192`; this override was used only for the build.
+
+Saved-chat verification passed 42 assistant checks and two thumbnail/file-access
+checks, plus source and worker TypeScript checks. The production build passed
+with a temporary `NODE_OPTIONS=--max-old-space-size=16384`; two attempts at
+8192 MiB exhausted Node's heap, including one with a fresh webpack cache. This
+override was used only for the build. The UI alone was restarted, the session
+history API returned HTTP 200, and generic file/media access to session storage
+returned HTTP 403. The training worker remained running. Browser interaction
+checks were unavailable because no browser was connected; no live model calls
+were needed for saved-chat verification.
 
 Protocol details follow the [OpenAI Responses API](https://developers.openai.com/api/reference/python/resources/responses/methods/create).

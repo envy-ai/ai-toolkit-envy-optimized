@@ -15,6 +15,10 @@ export interface ConfirmState {
   confirmText?: string;
   type?: 'danger' | 'warning' | 'info';
   inputTitle?: string;
+  inputLabel?: string;
+  initialInputValue?: string;
+  inputRequired?: boolean;
+  layer?: 'overlay';
   onConfirm?: (value?: string) => void | Promise<void>;
   onCancel?: () => void;
 }
@@ -42,7 +46,7 @@ export default function ConfirmModal() {
   useEffect(() => {
     if (confirm) {
       setIsOpen(true);
-      setInputValue('');
+      setInputValue(confirm.initialInputValue ?? '');
     }
   }, [confirm]);
 
@@ -63,6 +67,7 @@ export default function ConfirmModal() {
   };
 
   const onConfirm = () => {
+    if (confirm?.inputRequired && !inputValue.trim()) return;
     if (confirm?.onConfirm) {
       confirm.onConfirm(inputValue);
     }
@@ -134,7 +139,11 @@ export default function ConfirmModal() {
   };
 
   return (
-    <Dialog open={isOpen} onClose={onCancel} className="relative z-10">
+    <Dialog
+      open={isOpen}
+      onClose={onCancel}
+      className={classNames('relative', confirm?.layer === 'overlay' ? 'z-[60]' : 'z-10')}
+    >
       <DialogBackdrop
         transition
         className="fixed inset-0 bg-gray-900/75 transition-opacity data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in"
@@ -160,15 +169,19 @@ export default function ConfirmModal() {
                   <div className="mt-2">
                     <p className="text-sm text-gray-200">{confirm?.message}</p>
                     <div className={classNames('mt-4 w-full', { hidden: !confirm?.inputTitle })}>
-                      <form onSubmit={(e) => {
-                        e.preventDefault()
-                        onConfirm()
-                      }}>
+                      <form
+                        onSubmit={e => {
+                          e.preventDefault();
+                          onConfirm();
+                        }}
+                      >
                         <TextInput
                           value={inputValue}
                           ref={inputRef}
                           onChange={setInputValue}
                           placeholder={confirm?.inputTitle}
+                          label={confirm?.inputLabel}
+                          required={confirm?.inputRequired}
                         />
                       </form>
                     </div>
@@ -180,6 +193,7 @@ export default function ConfirmModal() {
               <button
                 type="button"
                 onClick={onConfirm}
+                disabled={Boolean(confirm?.inputRequired && !inputValue.trim())}
                 className={`inline-flex w-full justify-center rounded-md ${getButtonBgColor()} px-3 py-2 text-sm font-semibold text-white shadow-xs sm:ml-3 sm:w-auto`}
               >
                 {confirm?.confirmText || 'Confirm'}

@@ -33,6 +33,7 @@ import { pipeline } from 'stream';
 import prisma from './prisma';
 import { defaultDatasetsFolder, defaultTrainFolder, defaultDataRoot, TOOLKIT_ROOT } from './paths';
 import { getThumbnailCacheBasename, getThumbnailVariant, type ThumbnailVariant } from './thumbnailVariant';
+import { isAssistantSessionPath } from './assistantSessionPaths';
 
 const isDev = process.argv.includes('dev');
 
@@ -301,6 +302,11 @@ async function serveFile(req: http.IncomingMessage, res: http.ServerResponse, pr
       .join('/');
 
     let resolvedFilePath = path.resolve(decodedFilePath);
+    if (await isAssistantSessionPath(resolvedFilePath, TOOLKIT_ROOT)) {
+      res.writeHead(403);
+      res.end('Access denied');
+      return true;
+    }
     const checkAllowed = (roots: Roots) => {
       const dirs = isImg ? [roots.datasets, roots.training, roots.data] : [roots.datasets, roots.training];
       return {
@@ -363,6 +369,11 @@ async function serveFile(req: http.IncomingMessage, res: http.ServerResponse, pr
       }
     }
 
+    if (await isAssistantSessionPath(resolvedFilePath, TOOLKIT_ROOT)) {
+      res.writeHead(403);
+      res.end('Access denied');
+      return true;
+    }
     let stat: fs.Stats;
     try {
       stat = await fs.promises.stat(resolvedFilePath);

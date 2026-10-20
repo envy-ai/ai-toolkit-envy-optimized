@@ -5,6 +5,8 @@ import path from 'path';
 import { Readable } from 'stream';
 import { getDatasetsRoot, getTrainingFolder } from '@/server/settings';
 import { catchAllToFilePath } from '@/server/catchAllPath';
+import { TOOLKIT_ROOT } from '@/paths';
+import { isAssistantSessionPath } from '../../../../../cron/assistantSessionPaths';
 
 export async function GET(
   request: NextRequest,
@@ -25,6 +27,7 @@ export async function GET(
     // an allowed root. Substring `.includes('..')` false-positives on filenames
     // containing `..` as text (e.g. an ellipsis in a filename).
     const resolvedFilePath = path.resolve(decodedFilePath);
+    if (await isAssistantSessionPath(resolvedFilePath, TOOLKIT_ROOT)) return new NextResponse('Access denied', { status: 403 });
     const isAllowed = allowedDirs.some(
       allowedDir => resolvedFilePath === allowedDir || resolvedFilePath.startsWith(allowedDir + path.sep),
     );

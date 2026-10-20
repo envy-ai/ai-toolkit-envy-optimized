@@ -6,6 +6,8 @@ import { Readable } from 'stream';
 import { getDatasetsRoot, getTrainingFolder, getDataRoot } from '@/server/settings';
 import { catchAllToFilePath } from '@/server/catchAllPath';
 import { getThumbnailCacheBasename, getThumbnailVariant } from '../../../../../cron/thumbnailVariant';
+import { TOOLKIT_ROOT } from '@/paths';
+import { isAssistantSessionPath } from '../../../../../cron/assistantSessionPaths';
 
 const contentTypeMap: { [key: string]: string } = {
   // Images
@@ -52,6 +54,7 @@ export async function GET(
     // then ensure it's still under an allowed root. (Plain `.includes('..')`
     // false-positives on filenames that contain `..` as text, e.g. an ellipsis.)
     let resolved = path.resolve(filepath);
+    if (await isAssistantSessionPath(resolved, TOOLKIT_ROOT)) return new NextResponse('Access denied', { status: 403 });
     const isAllowed = allowedDirs.some(
       allowedDir => resolved === allowedDir || resolved.startsWith(allowedDir + path.sep),
     );
@@ -79,6 +82,8 @@ export async function GET(
         }
       }
     }
+
+    if (await isAssistantSessionPath(resolved, TOOLKIT_ROOT)) return new NextResponse('Access denied', { status: 403 });
 
     // Bail out early if the client already gave up
     if (request.signal.aborted) {

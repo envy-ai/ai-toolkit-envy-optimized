@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type SetStateAction } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -12,6 +12,9 @@ import {
   MdAttachFile,
   MdDeleteOutline,
   MdChevronRight,
+  MdHistory,
+  MdAdd,
+  MdEdit,
 } from 'react-icons/md';
 import { apiClient } from '@/utils/api';
 import type {
@@ -22,8 +25,12 @@ import type {
 import { isReadOnlyTool } from '@/assistant/tools';
 import AssistantSettings from './AssistantSettings';
 import { useAssistant } from './AssistantContext';
+import useAssistantSessions from '@/hooks/useAssistantSessions';
+import type { AssistantEntry, SessionMetadata } from '@/assistant/sessions';
+import AssistantHistory from './AssistantHistory';
+import { openConfirm } from '@/components/ConfirmModal';
 
-type Entry = { id: string; role: 'user' | 'assistant' | 'tool'; text: string; preview?: { path: string; url: string } };
+type Entry = AssistantEntry;
 type Review = { call: AssistantToolCall; resolve: (approved: boolean) => void };
 const errorText = (error: any) => error.response?.data?.error || error.message || 'Assistant request failed.';
 const action =
@@ -85,10 +92,22 @@ export default function AssistantPanel() {
   const panelWidth = Math.min(preferredWidth, maxPanelWidth);
   const [settings, setSettings] = useState(false);
   const [configuration, setConfiguration] = useState<AssistantConfigurationState | null>(null);
-  const [entries, setEntries] = useState<Entry[]>([]);
-  const [input, setInput] = useState('');
+  const sessions = useAssistantSessions();
+  const { entries, draft: input, attachments } = sessions.content;
+  const setEntries = (update: SetStateAction<Entry[]>) =>
+    sessions.controller.updateContent(content => ({
+      ...content,
+      entries: typeof update === 'function' ? update(content.entries) : update,
+    }));
+  const setInput = (draft: string) => sessions.controller.updateContent(content => ({ ...content, draft }));
+  const setAttachments = (update: SetStateAction<string[]>) =>
+    sessions.controller.updateContent(content => ({
+      ...content,
+      attachments: typeof update === 'function' ? update(content.attachments) : update,
+    }));
   const [uploading, setUploading] = useState(false);
-  const [attachments, setAttachments] = useState<string[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const historyTrigger = useRef<HTMLButtonElement>(null);
   const [reviewChanges, setReviewChanges] = useState(true);
   const reviewPreference = useRef(true);
   const [review, setReview] = useState<Review | null>(null);
@@ -102,6 +121,10 @@ export default function AssistantPanel() {
   const composer = useRef<HTMLTextAreaElement>(null);
   const router = useRouter();
   const pathname = usePathname();
+  const navigationBlocked = busy || uploading || sessions.loading || sessions.saveState === 'saving' || !sessions.ready;
+  const editingBlocked = busy || sessions.loading || !sessions.ready;
+  const sessionActionBlocked = useRef(false);
+  sessionActionBlocked.current = busy || uploading || sessions.loading || !sessions.ready;
   const append = (role: Entry['role'], text: string, preview?: Entry['preview']) =>
     setEntries(current => [...current, { id: uuidv4(), role, text, preview }]);
   useEffect(() => {
@@ -141,11 +164,6 @@ export default function AssistantPanel() {
   }
   useEffect(() => {
     try {
-      const stored = sessionStorage.getItem('toolkit:assistant:messages');
-      if (stored) {
-        const value = JSON.parse(stored);
-        if (Array.isArray(value)) setEntries(value.slice(-100));
-      }
       setOpen(localStorage.getItem('toolkit:assistant:open') === 'true');
     } catch {
       /* Storage is optional. */
@@ -160,9 +178,6 @@ export default function AssistantPanel() {
     };
   }, []);
   useEffect(() => {
-    try {
-      sessionStorage.setItem('toolkit:assistant:messages', JSON.stringify(entries.slice(-100)));
-    } catch {}
     end.current?.scrollIntoView({ block: 'nearest' });
   }, [entries, review, status]);
   useEffect(() => {
@@ -198,11 +213,91 @@ export default function AssistantPanel() {
     reviewRef.current = null;
     setReview(null);
   }
+  function clearTransient() {
+    setError('');
+    setUsage(null);
+    setStatus('');
+  }
+  async function newChat() {
+    if (navigationBlocked) return;
+    if (await sessions.controller.newChat()) {
+      clearTransient();
+      setHistoryOpen(false);
+      composer.current?.focus();
+    }
+  }
+  async function openChat(id: string) {
+    if (navigationBlocked) return;
+    if (await sessions.controller.open(id)) {
+      clearTransient();
+      setHistoryOpen(false);
+      composer.current?.focus();
+    }
+  }
+  function renameChat(session: SessionMetadata) {
+    if (navigationBlocked) return;
+    openConfirm({
+      title: 'Rename chat',
+      type: 'info',
+      layer: 'overlay',
+      inputTitle: 'Chat title',
+      inputLabel: 'Chat title',
+      initialInputValue: session.title,
+      inputRequired: true,
+      confirmText: 'Save title',
+      onConfirm: async value => {
+        if (!sessionActionBlocked.current) await sessions.controller.rename(session.id, value ?? '');
+      },
+    });
+  }
+  function deleteChat(session: SessionMetadata) {
+    if (navigationBlocked) return;
+    openConfirm({
+      title: 'Delete chat?',
+      message: `Delete “${session.title}”? This removes its saved conversation.`,
+      type: 'danger',
+      layer: 'overlay',
+      confirmText: 'Delete chat',
+      onConfirm: async () => {
+        if (sessionActionBlocked.current) return;
+        if (await sessions.controller.delete(session.id)) {
+          clearTransient();
+          composer.current?.focus();
+        }
+      },
+    });
+  }
+  function reloadChat() {
+    if (navigationBlocked) return;
+    openConfirm({
+      title: 'Reload saved chat?',
+      message:
+        'This replaces your local unsaved text with the saved version. Use Save a copy to retain it in another chat.',
+      type: 'warning',
+      layer: 'overlay',
+      confirmText: 'Reload saved chat',
+      onConfirm: async () => {
+        if (sessionActionBlocked.current) return;
+        if (await sessions.controller.open(sessions.id, true)) {
+          clearTransient();
+          composer.current?.focus();
+        }
+      },
+    });
+  }
   async function send() {
-    if (!input.trim() || busy || !configuration) return;
+    if (!input.trim() || editingBlocked || uploading || sessions.error || !configuration) return;
     if (!configuration.config.model) {
       setError('Choose a model in Assistant Settings first.');
       setSettings(true);
+      return;
+    }
+    const active = { id: uuidv4(), controller: new AbortController() };
+    run.current = active;
+    setBusy(true);
+    if (!(await sessions.controller.flush()) || active.controller.signal.aborted) {
+      if (run.current === active) run.current = null;
+      setBusy(false);
       return;
     }
     const prompt =
@@ -212,14 +307,13 @@ export default function AssistantPanel() {
       .slice(-40)
       .map(({ role, text }) => ({ role, content: text }));
     messages.push({ role: 'user', content: prompt });
-    append('user', prompt);
-    setInput('');
-    setAttachments([]);
-    setBusy(true);
+    sessions.controller.updateContent(content => ({
+      entries: [...content.entries, { id: uuidv4(), role: 'user', text: prompt }],
+      draft: '',
+      attachments: [],
+    }));
     setError('');
     setUsage(null);
-    const active = { id: uuidv4(), controller: new AbortController() };
-    run.current = active;
     let spent = 0,
       estimated = false;
     let turn: any = {
@@ -314,10 +408,11 @@ export default function AssistantPanel() {
       setReview(null);
       setBusy(false);
       setStatus('');
+      await sessions.controller.flush();
     }
   }
   async function upload(files: FileList | null) {
-    if (!files?.length) return;
+    if (!files?.length || editingBlocked) return;
     if (files.length + attachments.length > 4 || Array.from(files).some(file => file.size > 32 * 1024 * 1024)) {
       setError('Attach at most four images, each up to 32 MiB.');
       if (fileInput.current) fileInput.current.value = '';
@@ -348,7 +443,10 @@ export default function AssistantPanel() {
         onKeyDown={event => {
           if (event.key === 'Escape') {
             event.stopPropagation();
-            settings ? setSettings(false) : close();
+            if (historyOpen) {
+              setHistoryOpen(false);
+              historyTrigger.current?.focus();
+            } else settings ? setSettings(false) : close();
           }
         }}
         style={{ '--assistant-width': `${preferredWidth}px` } as CSSProperties}
@@ -398,20 +496,33 @@ export default function AssistantPanel() {
           <MdSmartToy className="h-5 w-5 text-blue-300" />
           <h2 className="flex-1 font-semibold">{settings ? 'Assistant settings' : 'AI assistant'}</h2>
           {!settings && (
-            <button
-              type="button"
-              title="New conversation"
-              aria-label="New conversation"
-              disabled={busy}
-              className={action}
-              onClick={() => {
-                setEntries([]);
-                setError('');
-                setUsage(null);
-              }}
-            >
-              <MdDeleteOutline className="h-5 w-5" />
-            </button>
+            <>
+              <button
+                ref={historyTrigger}
+                type="button"
+                title="Chat history"
+                aria-label="Chat history"
+                aria-controls="assistant-history"
+                aria-expanded={historyOpen}
+                className={action}
+                onClick={() => {
+                  if (!historyOpen) void sessions.controller.refreshHistory();
+                  setHistoryOpen(current => !current);
+                }}
+              >
+                <MdHistory className="h-5 w-5" />
+              </button>
+              <button
+                type="button"
+                title="New conversation"
+                aria-label="New conversation"
+                disabled={navigationBlocked}
+                className={action}
+                onClick={() => void newChat()}
+              >
+                <MdAdd className="h-5 w-5" />
+              </button>
+            </>
           )}
           <button
             type="button"
@@ -427,6 +538,53 @@ export default function AssistantPanel() {
             <MdClose className="h-5 w-5" />
           </button>
         </header>
+        {!settings && (
+          <>
+            <div className="flex shrink-0 items-center gap-2 border-b border-gray-800 px-4 py-2">
+              <h3 className="min-w-0 flex-1 truncate text-sm text-gray-300" title={sessions.title}>
+                {sessions.title}
+              </h3>
+              {sessions.metadata && (
+                <>
+                  <button
+                    type="button"
+                    aria-label="Rename current chat"
+                    title="Rename chat"
+                    disabled={navigationBlocked}
+                    className={action}
+                    onClick={() => renameChat(sessions.metadata!)}
+                  >
+                    <MdEdit />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Delete current chat"
+                    title="Delete chat"
+                    disabled={navigationBlocked}
+                    className={action}
+                    onClick={() => deleteChat(sessions.metadata!)}
+                  >
+                    <MdDeleteOutline />
+                  </button>
+                </>
+              )}
+            </div>
+            {historyOpen && (
+              <AssistantHistory
+                sessions={sessions.sessions}
+                activeId={sessions.id}
+                disabled={navigationBlocked}
+                refreshing={sessions.refreshingHistory}
+                error={sessions.historyError}
+                onOpen={id => void openChat(id)}
+                onNew={() => void newChat()}
+                onRename={renameChat}
+                onDelete={deleteChat}
+                onRefresh={() => void sessions.controller.refreshHistory()}
+              />
+            )}
+          </>
+        )}
         {settings && configuration ? (
           <AssistantSettings state={configuration} onSaved={setConfiguration} onClose={() => setSettings(false)} />
         ) : (
@@ -447,6 +605,7 @@ export default function AssistantPanel() {
                       <button
                         key={prompt}
                         type="button"
+                        disabled={editingBlocked}
                         className="rounded-lg border border-gray-700 px-3 py-2 text-left text-sm hover:bg-gray-800"
                         onClick={() => {
                           setInput(prompt);
@@ -525,6 +684,58 @@ export default function AssistantPanel() {
               <div ref={end} />
             </div>
             <footer className="shrink-0 space-y-2 border-t border-gray-700 p-3">
+              <div role="status" className="text-xs text-gray-500">
+                {!sessions.ready || sessions.loading
+                  ? 'Loading chats…'
+                  : sessions.saveState === 'saving'
+                    ? 'Saving…'
+                    : sessions.saveState === 'saved'
+                      ? 'Saved'
+                      : sessions.saveState === 'unsaved'
+                        ? 'Unsaved changes'
+                        : sessions.saveState === 'error'
+                          ? 'Chat not saved'
+                          : 'New chat'}
+              </div>
+              {sessions.error && (
+                <div role="alert" className="max-h-48 overflow-auto rounded-md bg-red-950 p-3 text-xs text-red-200">
+                  <p>{sessions.error.message}</p>
+                  <details className="mt-1">
+                    <summary>Error details</summary>
+                    <pre className="overflow-auto whitespace-pre-wrap">{sessions.error.stack}</pre>
+                  </details>
+                  <div className="mt-2 flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      disabled={busy || uploading || sessions.loading}
+                      className="underline disabled:opacity-40"
+                      onClick={() => void sessions.controller.retry()}
+                    >
+                      Retry save
+                    </button>
+                    {sessions.error.conflict && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={navigationBlocked}
+                          className="underline disabled:opacity-40"
+                          onClick={() => void sessions.controller.saveCopy()}
+                        >
+                          Save a copy
+                        </button>
+                        <button
+                          type="button"
+                          disabled={navigationBlocked}
+                          className="underline disabled:opacity-40"
+                          onClick={reloadChat}
+                        >
+                          Reload saved chat
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="flex items-center justify-between gap-2 text-xs text-gray-400">
                 <label className="flex items-center gap-2">
                   <input
@@ -550,6 +761,7 @@ export default function AssistantPanel() {
                   <button
                     type="button"
                     aria-label={`Remove attachment ${filename}`}
+                    disabled={editingBlocked || uploading}
                     className={action}
                     onClick={() => setAttachments(current => current.filter(item => item !== filename))}
                   >
@@ -576,7 +788,7 @@ export default function AssistantPanel() {
                   type="button"
                   aria-label="Attach images"
                   title="Attach images"
-                  disabled={busy || uploading}
+                  disabled={editingBlocked || uploading}
                   className={action}
                   onClick={() => fileInput.current?.click()}
                 >
@@ -586,7 +798,7 @@ export default function AssistantPanel() {
                   ref={composer}
                   aria-label="Message AI assistant"
                   value={input}
-                  disabled={busy}
+                  disabled={editingBlocked}
                   onChange={event => setInput(event.target.value)}
                   onKeyDown={event => {
                     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -613,7 +825,7 @@ export default function AssistantPanel() {
                     type="submit"
                     aria-label="Send message"
                     title="Send message"
-                    disabled={!input.trim() || !configuration || uploading}
+                    disabled={!input.trim() || !configuration || uploading || editingBlocked || Boolean(sessions.error)}
                     className={action}
                   >
                     <MdSend className="h-5 w-5 text-blue-300" />

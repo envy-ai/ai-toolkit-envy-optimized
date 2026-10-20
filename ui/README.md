@@ -4,6 +4,15 @@ The eye icon beside a training job on the dashboard, queue, or jobs list opens
 its **Samples** tab directly (`/jobs/<id>?tab=samples`). Click it or focus it with
 Tab and press Enter. Job-name links still open the overview.
 
+The AI assistant drawer autosaves titled chats on this toolkit server. Open
+**Chat history** to search recent sessions, resume one, rename it, or delete it.
+**New conversation** preserves the previous chat. Titles are generated locally
+and can be renamed; duplicate titles remain separate sessions. Drafts and image
+references survive reopening. Stop a running reply before changing sessions.
+Save failures keep the local text and expose retry/error details; concurrent
+edits offer saving a copy or confirmed reload. See [assistant sessions and
+storage](../docs/ai_assistant.md) for migration, shared history, and limits.
+
 Dataset cards show the entire first image inside their square preview area,
 keeping its aspect ratio and transparency; any extra space uses the card's dark
 background. They request an uncropped thumbnail bounded to 300 pixels per axis

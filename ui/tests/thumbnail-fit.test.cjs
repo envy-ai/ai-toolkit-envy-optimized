@@ -16,6 +16,7 @@ const tempRoot = path.join(projectRoot, 'tmp');
 fs.mkdirSync(tempRoot, { recursive: true });
 const root = fs.mkdtempSync(path.join(tempRoot, 'thumbnail-fit-test-'));
 const variantPath = path.resolve(__dirname, '../cron/thumbnailVariant.ts');
+const sessionPathsPath = path.resolve(__dirname, '../cron/assistantSessionPaths.ts');
 
 function compileModule(filename, source, customRequire) {
   const compiled = ts.transpileModule(source, {
@@ -37,6 +38,11 @@ function compileModule(filename, source, customRequire) {
 }
 
 const thumbnailVariant = compileModule(variantPath, fs.readFileSync(variantPath, 'utf8'), (_id, originalRequire) => originalRequire(_id));
+const assistantSessionPaths = compileModule(
+  sessionPathsPath,
+  fs.readFileSync(sessionPathsPath, 'utf8'),
+  (_id, originalRequire) => originalRequire(_id),
+);
 
 function loadFileServer() {
   const filename = path.resolve(__dirname, '../cron/fileServer.ts');
@@ -67,6 +73,7 @@ function loadFileServer() {
       TOOLKIT_ROOT: root,
     };
     if (id === './thumbnailVariant') return thumbnailVariant;
+    if (id === './assistantSessionPaths') return assistantSessionPaths;
     return originalRequire(id);
   });
 }
@@ -80,10 +87,12 @@ function loadImageRoute() {
       getTrainingFolder: async () => root,
       getDataRoot: async () => root,
     };
+    if (id === '@/paths') return { TOOLKIT_ROOT: root };
     if (id === '@/server/catchAllPath') return {
       catchAllToFilePath: value => (Array.isArray(value) ? path.join(...value) : value),
     };
     if (id === '../../../../../cron/thumbnailVariant') return thumbnailVariant;
+    if (id === '../../../../../cron/assistantSessionPaths') return assistantSessionPaths;
     return originalRequire(id);
   });
 }
@@ -195,6 +204,43 @@ test('fit thumbnails preserve whole non-square images and alpha in a distinct ca
   const legacyResponse = await getThumbnail('1');
   assert.equal(legacyResponse.status, 200);
   assert.deepEqual(Buffer.from(await legacyResponse.arrayBuffer()), await fs.promises.readFile(squarePath), 'legacy thumb=1 still serves square crop');
+
+  if (process.platform !== 'win32') {
+    const priorSettingsDir = process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR;
+    const settingsDir = path.join(root, 'assistant-settings');
+    const sessionDirectory = path.join(settingsDir, 'sessions');
+    await fs.promises.mkdir(sessionDirectory, { recursive: true });
+    const privateContent = Buffer.from('private saved conversation fixture');
+    const privateFile = path.join(sessionDirectory, 'session.json');
+    await fs.promises.writeFile(privateFile, privateContent);
+    const guardedSource = path.join(root, 'guard-source.png');
+    await sharp({ create: { width: 3, height: 2, channels: 3, background: '#ff00ff' } }).png().toFile(guardedSource);
+    const guardedThumbBase = path.join(
+      root,
+      '.thumbs',
+      thumbnailVariant.getThumbnailCacheBasename(path.basename(guardedSource), 'fit'),
+    );
+    const guardedThumbPath = `${guardedThumbBase}.png`;
+    await fs.promises.symlink(privateFile, guardedThumbPath);
+    process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR = settingsDir;
+    try {
+      const fastResponse = await fetch(
+        `http://127.0.0.1:${port}/api/img/${encodeURIComponent(guardedSource)}?thumb=fit`,
+      );
+      assert.equal(fastResponse.status, 403, 'fast server blocks a selected thumbnail symlink into saved sessions');
+      assert.notEqual(await fastResponse.text(), privateContent.toString());
+
+      const nextResponse = await route.GET(
+        new NextRequest(`http://localhost/api/img/guard-source.png?thumb=fit`),
+        { params: Promise.resolve({ imagePath: guardedSource }) },
+      );
+      assert.equal(nextResponse.status, 403, 'Next fallback blocks a selected thumbnail symlink into saved sessions');
+      assert.notEqual(await nextResponse.text(), privateContent.toString());
+    } finally {
+      if (priorSettingsDir === undefined) delete process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR;
+      else process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR = priorSettingsDir;
+    }
+  }
 });
 
 test.after(async () => {
