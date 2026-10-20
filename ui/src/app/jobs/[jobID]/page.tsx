@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, use } from 'react';
+import { useState, useEffect, use } from 'react';
 import { FaChevronLeft } from 'react-icons/fa';
 import { MdDashboard, MdImage, MdShowChart, MdAssessment, MdCode, MdExtension, MdNotes } from 'react-icons/md';
 import { Button } from '@headlessui/react';
@@ -9,7 +9,7 @@ import useJob from '@/hooks/useJob';
 import usePollLoop from '@/hooks/usePollLoop';
 import SampleImages, { SampleImagesMenu } from '@/components/SampleImages';
 import JobOverview from '@/components/JobOverview';
-import { redirect } from 'next/navigation';
+import { redirect, useSearchParams } from 'next/navigation';
 import JobActionBar from '@/components/JobActionBar';
 import JobConfigViewer from '@/components/JobConfigViewer';
 import JobLossGraph from '@/components/JobLossGraph';
@@ -90,10 +90,15 @@ const pages: Page[] = [
 export default function JobPage({ params }: { params: Promise<{ jobID: string }> }) {
   const usableParams = use(params as any) as { jobID: string };
   const jobID = usableParams.jobID;
+  const requestedTab = useSearchParams().get('tab');
   const { job, status, refreshJob } = useJob(jobID, 5000);
-  const [pageKey, setPageKey] = useState<PageKey>('overview');
+  const [pageKey, setPageKey] = useState<PageKey>(requestedTab === 'samples' ? 'samples' : 'overview');
   const [hasPlugin, setHasPlugin] = useState(false);
   const [graphFocusStep, setGraphFocusStep] = useState<number>();
+
+  useEffect(() => {
+    setPageKey(requestedTab === 'samples' ? 'samples' : 'overview');
+  }, [jobID, requestedTab]);
 
   // poll for plugin.html in the job folder; show the Plugin tab if it exists
   usePollLoop(

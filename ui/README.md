@@ -1,5 +1,9 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+The eye icon beside a training job on the dashboard, queue, or jobs list opens
+its **Samples** tab directly (`/jobs/<id>?tab=samples`). Click it or focus it with
+Tab and press Enter. Job-name links still open the overview.
+
 Training jobs support **Fork this job** from their gear menu. It opens the job
 form and creates an independent, stopped job from the latest complete checkpoint
 and optimizer state. See [the fork workflow and supported layouts](../docs/job_fork.md).

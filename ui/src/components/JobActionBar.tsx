@@ -206,7 +206,11 @@ export default function JobActionBar({
         </Button>
       )}
       {!hideView && (
-        <Link href={`/jobs/${job.id}`} className="ml-1 sm:ml-2 text-gray-200 hover:text-gray-100 inline-block">
+        <Link
+          href={`/jobs/${job.id}${job.job_type === 'train' ? '?tab=samples' : ''}`}
+          aria-label={job.job_type === 'train' ? `View samples for ${job.name}` : `View ${job.name}`}
+          className="ml-1 sm:ml-2 text-gray-200 hover:text-gray-100 inline-block"
+        >
           <Eye className={iconSizeClass} />
         </Link>
       )}
