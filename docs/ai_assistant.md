@@ -46,6 +46,18 @@ ID/name/creation-time metadata for candidates and fetches full configurations
 for the selected page. Omitting `limit` preserves the existing complete-list
 API behavior; the Queue UI explicitly requests 100 results per page.
 
+`PATCH /api/queue/{queueID}/reorder` accepts
+`{orderedJobIds: [visible queued job IDs in desired order]}`. The server merges
+that subset into its existing slots in the complete queued order using only
+ID/position metadata. Hidden queued jobs retain their relative order and slots;
+numeric positions are normalized to 1000-step ranks. Running/stopping jobs are
+excluded. Validation and conditional queued/GPU/previous-rank updates share one
+transaction, so a conflicting worker claim or reorder rolls back rather than
+partially changing the queue. Invalid IDs return 400; detected concurrent
+changes return 409. Successful responses include `success: true` and authoritative
+`positions: [{id, queue_position}]` for the queued jobs. Complete queue-order
+submissions remain supported.
+
 Additional tools inspect dataset and sample images, read and write text sidecars
 and text sample outputs, copy/rename/delete dataset files, import local files,
 and create or edit training images with CPU operations. Image edits support

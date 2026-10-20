@@ -24,10 +24,15 @@ the list; polling refreshes the number of results already loaded. Selection and
 bulk deletion apply to the loaded matching rows. Failed loads retain existing
 rows and expose **Retry** controls.
 
-Queue drag handles are disabled while results are incomplete or a search is
-active, because reordering requires the complete queued-job order. Load all jobs
-and clear search to reorder from this page. The dashboard continues to load and
-poll its complete active queue and supports its existing drag behavior.
+Queued jobs can be reordered from the Queue page or dashboard, including while
+a job is running and while pagination or search hides other queued jobs. Drag
+the handle, or focus it and press Space, use arrow keys, then press Space again
+to drop (Escape cancels). Running and stopping jobs stay pinned above the queued
+rows and cannot be dragged. Hidden queued jobs retain their slots relative to
+the visible jobs; reordering reads only queue IDs/positions on the server, so
+the page does not fetch the rest of the training history. Handles pause while
+an order is being saved. Failed saves show a persistent error and refresh the
+current results without losing the loaded page depth.
 
 Training jobs support **Fork this job** from their gear menu. It opens the job
 form and creates an independent, stopped job from the latest complete checkpoint

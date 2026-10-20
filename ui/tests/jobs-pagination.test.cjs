@@ -267,3 +267,56 @@ test('paged job hook aborts and ignores a stale search response', async () => {
   state = render({ pageSize: 100, search: 'second' });
   assert.deepEqual(state.jobs.map(job => job.id), ['current']);
 });
+
+test('forced refresh cancels an older poll while preserving query and loaded depth', async () => {
+  const requests = [];
+  const render = loadJobsHook((_url, options) => new Promise(resolve => requests.push({ options, resolve })));
+  const props = { pageSize: 100, search: '  qwen   portrait ' };
+  let state = render(props);
+
+  const firstPage = state.refreshJobs();
+  assert.equal(requests[0].options.params.limit, '100');
+  assert.equal(requests[0].options.params.search, 'qwen portrait');
+  requests[0].resolve({
+    data: {
+      jobs: Array.from({ length: 100 }, (_, index) => ({ id: `page-one-${index}` })),
+      hasMore: true,
+      nextCursor: 'cursor-100',
+    },
+  });
+  await firstPage;
+
+  state = render(props);
+  const secondPage = state.loadMore();
+  assert.equal(requests[1].options.params.limit, '100');
+  assert.equal(requests[1].options.params.cursor, 'cursor-100');
+  requests[1].resolve({
+    data: {
+      jobs: Array.from({ length: 100 }, (_, index) => ({ id: `page-two-${index}` })),
+      hasMore: true,
+      nextCursor: 'cursor-200',
+    },
+  });
+  await secondPage;
+
+  state = render(props);
+  const olderPoll = state.refreshJobs();
+  assert.equal(requests[2].options.params.limit, '200');
+  assert.equal(requests[2].options.params.search, 'qwen portrait');
+
+  state = render(props);
+  const forcedRefresh = state.refreshJobs({ cancelPending: true });
+  assert.equal(requests[2].options.signal.aborted, true);
+  assert.equal(requests.length, 4);
+  assert.equal(requests[3].options.params.limit, '200');
+  assert.equal(requests[3].options.params.search, 'qwen portrait');
+  const authoritative = Array.from({ length: 200 }, (_, index) => ({ id: `fresh-${index}` }));
+  requests[3].resolve({ data: { jobs: authoritative, hasMore: false, nextCursor: null } });
+  await forcedRefresh;
+
+  requests[2].resolve({ data: { jobs: [{ id: 'stale-poll-result' }], hasMore: false, nextCursor: null } });
+  await olderPoll;
+  state = render(props);
+  assert.deepEqual(state.jobs, authoritative);
+  assert.equal(state.hasMore, false);
+});

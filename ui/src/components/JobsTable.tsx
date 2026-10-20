@@ -233,6 +233,8 @@ export default function JobsTable({
     pageSize,
     search: pageSize ? search : '',
   });
+  const latestRefreshJobs = useRef(refreshJobs);
+  latestRefreshJobs.current = refreshJobs;
   const { queues, status: queueStatus, refreshQueues } = useQueueList();
   const { gpuList, isGPUInfoLoaded } = useGPUInfo();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -242,10 +244,10 @@ export default function JobsTable({
   );
   const sentinel = useRef<HTMLDivElement>(null);
   const [scrollRequested, setScrollRequested] = useState(false);
-  const reorderDisabledReason =
-    pageSize && (hasMore || search.trim() || status !== 'success')
-      ? 'Load all jobs and clear search to reorder the complete queue.'
-      : undefined;
+  const reorderInFlight = useRef(false);
+  const [reorderSaving, setReorderSaving] = useState(false);
+  const [reorderError, setReorderError] = useState<{ message: string; stack?: string } | null>(null);
+  const reorderDisabledReason = reorderSaving ? 'Saving queue order…' : undefined;
 
   useEffect(() => {
     const root = scrollRoot?.current;
@@ -332,25 +334,35 @@ export default function JobsTable({
     setDatasetLightboxJob({ jobId, imagePath: imagePath ?? null });
   };
 
-  const onReorderQueue = (queueID: string, orderedJobIds: string[]) => {
-    if (reorderDisabledReason) return;
-    // Reorder matching rows within their existing slots, preserving hidden jobs.
-    const movedIds = new Set(orderedJobIds);
-    let nextVisible = 0;
-    orderedJobIds = jobs
-      .filter(job => job.status === 'queued' && job.gpu_ids === queueID)
-      .sort((a, b) => (a.queue_position ?? Infinity) - (b.queue_position ?? Infinity))
-      .map(job => (movedIds.has(job.id) ? orderedJobIds[nextVisible++] : job.id));
-    const nextPositionById = new Map(orderedJobIds.map((id, index) => [id, (index + 1) * 1000]));
-    setJobs(prevJobs =>
-      prevJobs.map(job =>
-        nextPositionById.has(job.id) ? { ...job, queue_position: nextPositionById.get(job.id) as number } : job,
-      ),
-    );
-
-    reorderQueueJobs(queueID, orderedJobIds)
-      .then(() => refreshJobs())
-      .catch(() => refreshJobs());
+  const onReorderQueue = async (queueID: string, orderedJobIds: string[]) => {
+    if (reorderInFlight.current) return;
+    reorderInFlight.current = true;
+    setReorderSaving(true);
+    setReorderError(null);
+    try {
+      // Submit exactly the visible queued IDs. Only the server owns the full
+      // queue ordering, including jobs omitted by pagination or search.
+      const positions = await reorderQueueJobs(queueID, orderedJobIds);
+      const positionById = new Map(positions.map(position => [position.id, position.queue_position]));
+      setJobs(previous =>
+        previous.map(job =>
+          job.status === 'queued' && job.gpu_ids === queueID && positionById.has(job.id)
+            ? { ...job, queue_position: positionById.get(job.id)! }
+            : job,
+        ),
+      );
+    } catch (cause: any) {
+      console.error('Could not save queue order:', cause);
+      setReorderError({
+        message: cause.response?.data?.error || cause.message || 'Could not save queue order.',
+        stack: cause.response?.data?.stack || cause.stack,
+      });
+    } finally {
+      // Cancel an older poll so its pre-save ranks cannot overwrite this save.
+      await latestRefreshJobs.current({ cancelPending: true });
+      reorderInFlight.current = false;
+      setReorderSaving(false);
+    }
   };
 
   const onMassDelete = () => {
@@ -625,6 +637,22 @@ export default function JobsTable({
           </button>
         </div>
       )}
+      {reorderSaving && (
+        <p role="status" className="mb-3 text-sm text-gray-300">
+          Saving queue order…
+        </p>
+      )}
+      {reorderError && (
+        <div role="alert" className="mb-4 rounded-md border border-red-700 bg-red-950 p-3 text-sm text-red-200">
+          <p>Could not save queue order: {reorderError.message}</p>
+          {reorderError.stack && (
+            <details className="mt-2">
+              <summary>Error details</summary>
+              <pre className="mt-2 overflow-auto whitespace-pre-wrap">{reorderError.stack}</pre>
+            </details>
+          )}
+        </div>
+      )}
       {!isLoading && !error && visibleJobs.length === 0 && search.trim() && (
         <p role="status" className="p-6 text-center text-sm text-gray-400">
           No jobs match your search.
@@ -739,7 +767,6 @@ export default function JobsTable({
               {isLoadingMore ? 'Loading more…' : loadMoreError ? 'Retry loading more' : 'Load more'}
             </button>
           )}
-          {reorderDisabledReason && <p>{reorderDisabledReason}</p>}
         </div>
       )}
     </div>

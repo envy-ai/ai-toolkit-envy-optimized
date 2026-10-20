@@ -25,7 +25,11 @@ export const API_CATALOG = [
   ['GET', '/api/jobs/{jobID}/plugin', 'Read job plugin output.'],
   ['GET', '/api/queue', 'List GPU queues.'],
   ['GET', '/api/queue/{queueID}/{start|stop}', 'Mutating GPU queue controls, despite GET.'],
-  ['PATCH', '/api/queue/{queueID}/reorder', 'Reorder GPU queue: {orderedJobIds: [ids in desired order]}.'],
+  [
+    'PATCH',
+    '/api/queue/{queueID}/reorder',
+    'Reorder queued jobs: {orderedJobIds: [visible queued IDs in desired order]}. Omitted queued jobs retain their slots; running/stopping jobs never move.',
+  ],
   ['GET', '/api/datasets/list', 'List dataset names; query previews=1 for first image paths.'],
   ['POST', '/api/datasets/listImages', 'List images and shared absolute root: {datasetName}.'],
   ['POST', '/api/datasets/create', 'Create dataset folder: {name}; returns sanitized name.'],

@@ -110,7 +110,13 @@ export default function useJobsList({
     }
     return true;
   };
-  const refreshJobs = () => fetchJobs(false);
+  const refreshJobs = (options?: { cancelPending?: boolean }) => {
+    if (options?.cancelPending && activeRequest.current) {
+      activeRequest.current.abort();
+      activeRequest.current = null;
+    }
+    return fetchJobs(false);
+  };
   const loadMore = () => fetchJobs(true);
   usePollLoop(refreshJobs, reloadInterval, [queryKey]);
 
