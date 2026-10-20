@@ -3,15 +3,16 @@ import { NodeAssistantConfiguration } from './NodeAssistantConfiguration';
 import { NodeAssistantProvider } from './NodeAssistantProvider';
 import { assistantConfigurationSchema, DEFAULT_ASSISTANT_CONFIGURATION } from '@/assistant/AssistantProvider';
 import { TOOLKIT_ROOT } from '@/paths';
+import { createAssistantDiagnosticSink } from './diagnostics';
 
 const shared = globalThis as typeof globalThis & { toolkitAssistant?: Promise<NodeAssistantProvider> };
 
 export function getAssistantService() {
   shared.toolkitAssistant ??= (async () => {
     // Deliberately separate from general settings, dataset roots, and browser storage.
-    const configuration = await NodeAssistantConfiguration.create(
-      process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR || path.join(TOOLKIT_ROOT, 'data', 'assistant'),
-    );
+    const settingsDirectory =
+      process.env.AI_TOOLKIT_ASSISTANT_SETTINGS_DIR || path.join(TOOLKIT_ROOT, 'data', 'assistant');
+    const configuration = await NodeAssistantConfiguration.create(settingsDirectory);
     if (process.env.AI_TOOLKIT_ASSISTANT_BASE_URL) {
       await configuration.update({
         config: assistantConfigurationSchema.parse({
@@ -24,7 +25,7 @@ export function getAssistantService() {
         }),
       });
     }
-    return new NodeAssistantProvider({ configuration });
+    return new NodeAssistantProvider({ configuration, diagnostics: createAssistantDiagnosticSink(settingsDirectory) });
   })().catch(error => {
     shared.toolkitAssistant = undefined;
     throw error;

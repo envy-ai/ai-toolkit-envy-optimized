@@ -11,6 +11,7 @@ const { randomUUID } = require('node:crypto');
 const sourceRoot = path.resolve(__dirname, '../src');
 const cache = new Map();
 let root;
+let assistantRouteService;
 const settings = {
   getDatasetsRoot: async () => path.join(root, 'datasets'),
   getTrainingFolder: async () => path.join(root, 'output'),
@@ -30,6 +31,8 @@ function load(filename) {
   mod.require = id =>
     id === '@/server/settings'
       ? settings
+      : id === '@/server/assistant/service'
+        ? { getAssistantService: async () => assistantRouteService }
       : id.startsWith('@/')
         ? load(id.slice(2))
         : id.startsWith('.')
@@ -54,8 +57,10 @@ const { NodeAssistantConfiguration } = load('server/assistant/NodeAssistantConfi
 const { NodeAssistantProvider, parseAssistantResponse, readAssistantSse } = load(
   'server/assistant/NodeAssistantProvider',
 );
+const { createAssistantDiagnosticSink } = load('server/assistant/diagnostics');
 const { executeAssistantTool, scopedPath, validateApiOperation } = load('server/assistant/toolExecutor');
 const { ASSISTANT_TOOLS, isReadOnlyTool } = load('assistant/tools');
+const { POST: postAssistantTurn } = load('app/api/assistant/turn/route');
 const sharp = require(require.resolve('sharp', { paths: [path.dirname(require.resolve('next/package.json'))] }));
 before(async () => {
   root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aitk-assistant-test-'));
@@ -77,7 +82,12 @@ const jsonResponse = value => ({
     yield Buffer.from(JSON.stringify(value));
   })(),
 });
-async function provider(options = {}, transport = async () => jsonResponse(completed([message('Done')]))) {
+async function provider(
+  options = {},
+  transport = async () => jsonResponse(completed([message('Done')])),
+  diagnostics,
+  apiKey,
+) {
   const configuration = new NodeAssistantConfiguration();
   await configuration.update({
     config: {
@@ -87,8 +97,9 @@ async function provider(options = {}, transport = async () => jsonResponse(compl
       model: 'fixture',
       ...options,
     },
+    ...(apiKey === undefined ? {} : { apiKey }),
   });
-  return { service: new NodeAssistantProvider({ configuration, transport }), configuration };
+  return { service: new NodeAssistantProvider({ configuration, transport, diagnostics }), configuration };
 }
 const turn = revision => ({
   runId: randomUUID(),
@@ -132,6 +143,232 @@ test('stored credentials remain private and outside configuration responses', as
   await reloaded.update({ config: DEFAULT_ASSISTANT_CONFIGURATION, clearCredential: true });
   assert.equal(reloaded.state().credentialPresent, false);
   assert.equal(fs.existsSync(path.join(directory, 'assistant-credential.json')), false);
+});
+test('assistant diagnostics explain preflight rejection and log only safe metadata', async () => {
+  const directory = path.join(root, 'assistant-diagnostics');
+  await fsp.mkdir(directory);
+  const diagnostics = createAssistantDiagnosticSink(directory);
+  const credential = 'DIAGNOSTIC_CREDENTIAL_MARKER';
+  const promptSecret = 'PROMPT_TEXT_MARKER';
+  const argsSecret = 'FUNCTION_ARGUMENT_MARKER';
+  const ciphertextSecret = 'SYNTHETIC_CIPHERTEXT_MARKER_'.repeat(10_000);
+  const imageBytes = await sharp({ create: { width: 2, height: 2, channels: 3, background: '#00ff00' } })
+    .png()
+    .toBuffer();
+  const imageBase64 = imageBytes.toString('base64');
+  const requests = [];
+  const { service, configuration } = await provider(
+    { authMode: 'api-key', vision: true },
+    async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return jsonResponse({
+        status: 'completed',
+        output: [
+          { type: 'reasoning', encrypted_content: ciphertextSecret },
+          {
+            type: 'function_call',
+            call_id: 'diagnostic-call',
+            name: 'fixture_tool',
+            arguments: JSON.stringify({ value: argsSecret }),
+          },
+        ],
+        usage: {
+          input_tokens: 12,
+          output_tokens: 4,
+          total_tokens: 16,
+          input_tokens_details: { cached_tokens: 3 },
+          output_tokens_details: { reasoning_tokens: 2 },
+        },
+      });
+    },
+    diagnostics,
+    credential,
+  );
+  const request = {
+    runId: randomUUID(),
+    requestId: randomUUID(),
+    configurationRevision: configuration.state().revision,
+    messages: [
+      {
+        role: 'user',
+        content: promptSecret,
+        images: [
+          {
+            artifactId: 'diagnostic-image',
+            source: 'visible-image',
+            mimeType: 'image/png',
+            width: 2,
+            height: 2,
+            dataBase64: imageBase64,
+          },
+        ],
+      },
+    ],
+    tools: [
+      {
+        name: 'fixture_tool',
+        description: 'Fixture tool.',
+        parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] },
+        strict: false,
+      },
+    ],
+  };
+  const first = await service.createTurn(request);
+  assert.equal(first.usage.totalTokens, 16);
+  assert.equal(first.remainingTokens, 63_984);
+  await assert.rejects(
+    () =>
+      service.createTurn({
+        runId: request.runId,
+        requestId: randomUUID(),
+        configurationRevision: request.configurationRevision,
+        toolResults: [{ callId: 'diagnostic-call', output: 'small result' }],
+      }),
+    { message: 'Assistant token budget is exhausted; no request was sent.' },
+  );
+  assert.equal(requests.length, 1);
+
+  const filename = path.join(directory, 'assistant-diagnostics.jsonl');
+  const rows = (await fsp.readFile(filename, 'utf8'))
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line));
+  const firstBudget = rows.find(event => event.event === 'request_budget' && event.phase === 'initial');
+  const rejectedBudget = rows.find(event => event.event === 'request_budget' && event.phase === 'continuation');
+  const rejection = rows.find(event => event.event === 'request_rejected' && event.phase === 'continuation');
+  assert.equal(firstBudget.admitted, true);
+  assert.equal(rejectedBudget.admitted, false);
+  assert.equal(rejectedBudget.characters.encryptedReasoning, ciphertextSecret.length);
+  assert.ok(rejectedBudget.contextTokensWithoutEncryptedEstimate < rejectedBudget.contextEstimate);
+  assert.equal(rejection.reason, 'token_budget');
+  assert.equal(rejection.remainingTokens, 63_984);
+  assert.equal(rejection.images.count, 1);
+  assert.equal(rejection.images.bytes, imageBytes.length);
+  const received = rows.find(event => event.event === 'provider_usage' && event.stage === 'received');
+  const accounted = rows.find(event => event.event === 'provider_usage' && event.stage === 'accounted');
+  assert.deepEqual(received.providerUsage, {
+    inputTokens: 12,
+    outputTokens: 4,
+    totalTokens: 16,
+    cachedInputTokens: 3,
+    reasoningTokens: 2,
+  });
+  assert.deepEqual(accounted.usage, { inputTokens: 12, outputTokens: 4, totalTokens: 16, estimated: false });
+  assert.equal(accounted.spentAfter, 16);
+  assert.equal(accounted.remainingAfter, 63_984);
+  assert.equal((await fsp.stat(filename)).mode & 0o777, 0o600);
+  const serialized = JSON.stringify(rows);
+  for (const sensitive of [credential, promptSecret, argsSecret, ciphertextSecret, imageBase64])
+    assert.ok(!serialized.includes(sensitive), `diagnostics must not include ${sensitive.slice(0, 24)}`);
+});
+test('large tool results receive a preflight rejection with character counts', async () => {
+  const events = [];
+  const requests = [];
+  const queue = [
+    completed([{ type: 'function_call', call_id: 'large-result-call', name: 'fixture_tool', arguments: '{}' }]),
+    completed([message('Done')]),
+  ];
+  const { service, configuration } = await provider(
+    {},
+    async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return jsonResponse(queue.shift());
+    },
+    async event => events.push(event),
+  );
+  const first = {
+    ...turn(configuration.state().revision),
+    tools: [{ name: 'fixture_tool', description: 'Fixture tool.', parameters: { type: 'object', properties: {} }, strict: false }],
+  };
+  const result = await service.createTurn(first);
+  assert.equal(result.remainingTokens, 63_984);
+  const output = 'LARGE_TOOL_RESULT_MARKER_'.repeat(11_200);
+  assert.ok(output.length < 512_000);
+  await assert.rejects(
+    () =>
+      service.createTurn({
+        runId: first.runId,
+        requestId: randomUUID(),
+        configurationRevision: first.configurationRevision,
+        toolResults: [{ callId: 'large-result-call', output }],
+      }),
+    { message: 'Assistant token budget is exhausted; no request was sent.' },
+  );
+  assert.equal(requests.length, 1);
+  const budget = events.find(event => event.event === 'request_budget' && event.phase === 'continuation');
+  const rejection = events.find(event => event.event === 'request_rejected' && event.phase === 'continuation');
+  assert.equal(budget.admitted, false);
+  assert.equal(budget.characters.toolResultText, output.length);
+  assert.equal(rejection.reason, 'token_budget');
+  assert.ok(!JSON.stringify(events).includes(output));
+});
+test('assistant run invalidation during accounted diagnostic write withholds the provider result', async () => {
+  let reachedAccounted;
+  const atAccounted = new Promise(resolve => (reachedAccounted = resolve));
+  let releaseAccounted;
+  const accountedWrite = new Promise(resolve => (releaseAccounted = resolve));
+  const { service, configuration } = await provider(
+    {},
+    async () => jsonResponse(completed([message('Private completion')])),
+    async event => {
+      if (event.event === 'provider_usage' && event.stage === 'accounted') {
+        reachedAccounted();
+        await accountedWrite;
+      }
+    },
+  );
+  const request = turn(configuration.state().revision);
+  const pending = service.createTurn(request);
+  await atAccounted;
+  await service.cancelRun(request.runId);
+  releaseAccounted();
+  await assert.rejects(pending, { message: 'Assistant completion arrived after the run was invalidated.' });
+});
+test('vision setting controls route tools, system guidance and toolkit_help output', async () => {
+  const captures = [];
+  assistantRouteService = {
+    getConfiguration: async () => ({ config: { vision: false } }),
+    createTurn: async value => {
+      captures.push(value);
+      return { text: 'Fixture response.' };
+    },
+    cancelRun: async () => {},
+  };
+  const body = {
+    runId: randomUUID(),
+    requestId: randomUUID(),
+    configurationRevision: 1,
+    messages: [{ role: 'user', content: 'Describe this image.' }],
+    screen: '/dashboard',
+  };
+  const response = await postAssistantTurn({
+    json: async () => body,
+    signal: new AbortController().signal,
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { text: 'Fixture response.' });
+  assert.ok(!captures[0].tools.some(tool => tool.name === 'inspect_image'));
+  assert.match(captures[0].messages[0].content, /Visual observations are disabled/);
+
+  assistantRouteService = {
+    ...assistantRouteService,
+    getConfiguration: async () => ({ config: { vision: true } }),
+  };
+  await postAssistantTurn({
+    json: async () => ({ ...body, runId: randomUUID(), requestId: randomUUID() }),
+    signal: new AbortController().signal,
+  });
+  assert.ok(captures[1].tools.some(tool => tool.name === 'inspect_image'));
+  assert.match(captures[1].messages[0].content, /Visual observations are enabled/);
+
+  for (const vision of [false, true]) {
+    const fixtureProvider = (await provider({ vision })).service;
+    const ctx = await context({ provider: fixtureProvider });
+    const help = JSON.parse((await executeAssistantTool(call('toolkit_help', {}), ctx)).output);
+    assert.equal(help.tools.some(tool => tool.name === 'inspect_image'), vision);
+    assert.equal(help.notes.includes('Visual observations are disabled.'), !vision);
+  }
+  assistantRouteService = undefined;
 });
 for (const protocol of ['responses', 'chat-completions'])
   test(`${protocol} correlates tools and native images over complete turns`, async () => {

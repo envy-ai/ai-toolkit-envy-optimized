@@ -51,6 +51,8 @@ Data and sample views refresh after successful changes. The polling loop
 coalesces refreshes while an existing request is in progress.
 
 Visual observation must be enabled to send images to the configured provider.
+`inspect_image` is advertised in model tools and `toolkit_help` only while visual
+observation is enabled; the server also checks the setting when the tool runs.
 Images are normalized to PNG on CPU, capped at 1536 pixels per axis, and sent as
 native image parts rather than base64 text in tool output. Each run retains at
 most four observations and 8 MiB of encoded image bytes. Missing/unsupported
@@ -69,6 +71,44 @@ persistence uses an owner-only file; it is not an encrypted keychain. The same
 both configured folder boundaries and real paths to reject symlink escapes.
 Provider requests retain Node TLS verification and do not follow redirects.
 Install an appropriate CA or use `NODE_EXTRA_CA_CERTS` for a private proxy.
+
+The server writes assistant budget diagnostics to
+`data/assistant/assistant-diagnostics.jsonl`, or
+`$AI_TOOLKIT_ASSISTANT_SETTINGS_DIR/assistant-diagnostics.jsonl` when that override
+is set. Each line is a versioned JSON event with a UTC timestamp, run/request IDs,
+one-based round, initial/continuation phase, model, protocol, configuration
+revision, and the reasoning/output/run/reserve/tool-round settings. The active
+log rotates before exceeding 5 MiB, retaining one `.jsonl.1` archive. Files use
+owner-only permissions. Directly constructed providers do not log unless given
+an explicit diagnostic sink, so isolated provider tests do not write user logs.
+
+`request_budget` records admission, spent/remaining tokens, context and request
+estimates, normal/final output allowances, predicted/reserved totals, final-only
+decision and its causes, item/tool counts, incoming tool-result IDs and lengths,
+and retained image counts/bytes. Incoming tool results identify the tool and
+call ID with its result length; accounted usage also lists returned tool names,
+call IDs, and argument lengths. Its `characters` object separates serialized
+input, tool definitions, actual wire schemas, protocol overhead, message text,
+tool-result text, function arguments, and opaque encrypted reasoning lengths.
+`contextTokensWithoutEncryptedEstimate` shows the same rough context estimate
+after subtracting ciphertext characters; it is diagnostic only.
+`request_rejected` is written before context, pre-request budget, and post-response
+budget errors. `provider_usage` first records selected numeric provider counts
+at `stage: "received"`, including cached input and reasoning tokens when supplied,
+even if response parsing subsequently rejects an incomplete response. At
+`stage: "accounted"`, it adds the application's actual or estimated usage and
+updated spent/remaining totals.
+
+Diagnostics contain no prompts, message/tool output text, function argument
+contents, credentials, image/base64 data, or reasoning ciphertext. Size estimates
+still use the existing characters/4 policy, including ciphertext in the actual
+budget calculation; logging does not correct that estimate or change budget
+admission. Reported run usage sums input and output across all provider requests,
+including replayed context and cached input; it is neither unique context size
+nor monetary cost. Missing provider usage details remain absent, rather than
+being inferred. Log write failures appear in the server console and fail the
+affected operation; there is no silent logging fallback. Restart the UI server
+after building to activate this instrumentation.
 
 Optional server environment variables:
 

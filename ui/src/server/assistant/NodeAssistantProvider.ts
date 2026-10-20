@@ -16,6 +16,7 @@ import {
   type AssistantUsage,
 } from '@/assistant/AssistantProvider';
 import { NodeAssistantConfiguration } from './NodeAssistantConfiguration';
+import type { AssistantDiagnosticSink } from './diagnostics';
 
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_CONTEXT_CHARACTERS = 512_000;
@@ -354,6 +355,66 @@ function budgetText(value: string | RecordValue[]): string {
   const parsed = typeof value === 'string' ? (JSON.parse(value) as unknown) : value;
   return JSON.stringify(parsed, (key, item: unknown) => (key === 'image_url' ? '[image]' : item));
 }
+function contextCharacters(input: RecordValue[]) {
+  let messageText = 0,
+    toolResultText = 0,
+    functionArguments = 0,
+    encryptedReasoning = 0;
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) value.forEach(visit);
+    else if (value && typeof value === 'object') {
+      for (const [key, item] of Object.entries(value)) {
+        if (key === 'encrypted_content' && typeof item === 'string') encryptedReasoning += item.length;
+        else visit(item);
+      }
+    }
+  };
+  for (const item of input) {
+    visit(item);
+    if (item.type === 'function_call_output' && typeof item.output === 'string') toolResultText += item.output.length;
+    else if (item.role === 'tool' && typeof item.content === 'string') toolResultText += item.content.length;
+    else if (typeof item.content === 'string') messageText += item.content.length;
+    else if (Array.isArray(item.content)) {
+      for (const part of item.content) {
+        if (part && typeof part === 'object' && 'text' in part && typeof part.text === 'string')
+          messageText += part.text.length;
+      }
+    }
+    if (item.type === 'function_call' && typeof item.arguments === 'string') functionArguments += item.arguments.length;
+    if (Array.isArray(item.tool_calls)) {
+      for (const call of item.tool_calls) {
+        const fn = call?.function;
+        if (typeof fn?.arguments === 'string') functionArguments += fn.arguments.length;
+      }
+    }
+  }
+  return { messageText, toolResultText, functionArguments, encryptedReasoning };
+}
+/** Select only numeric usage details; never persist provider-owned strings or arbitrary fields. */
+function diagnosticProviderUsage(value: unknown, protocol: AssistantConfiguration['protocol']): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const raw = value as RecordValue;
+  const usage = raw.usage;
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return {};
+  const fields = usage as RecordValue;
+  const inputDetails = fields[protocol === 'responses' ? 'input_tokens_details' : 'prompt_tokens_details'];
+  const outputDetails = fields[protocol === 'responses' ? 'output_tokens_details' : 'completion_tokens_details'];
+  const candidates = {
+    inputTokens: fields[protocol === 'responses' ? 'input_tokens' : 'prompt_tokens'],
+    outputTokens: fields[protocol === 'responses' ? 'output_tokens' : 'completion_tokens'],
+    totalTokens: fields.total_tokens,
+    cachedInputTokens:
+      inputDetails && typeof inputDetails === 'object' ? (inputDetails as RecordValue).cached_tokens : undefined,
+    reasoningTokens:
+      outputDetails && typeof outputDetails === 'object' ? (outputDetails as RecordValue).reasoning_tokens : undefined,
+  };
+  return Object.fromEntries(
+    Object.entries(candidates).filter(
+      (entry): entry is [string, number] =>
+        typeof entry[1] === 'number' && Number.isSafeInteger(entry[1]) && entry[1] >= 0,
+    ),
+  );
+}
 function validateImage(image: AssistantImageInput): number {
   const bytes = Buffer.from(image.dataBase64, 'base64');
   if (bytes.byteLength > MAX_IMAGE_BYTES || bytes.toString('base64') !== image.dataBase64)
@@ -443,14 +504,22 @@ function strictToolMode(config: AssistantConfiguration, tool: AssistantToolDefin
 export class NodeAssistantProvider implements AssistantProviderService {
   readonly #configuration: NodeAssistantConfiguration;
   readonly #transport: AssistantHttpTransport;
+  readonly #diagnostics?: AssistantDiagnosticSink;
   readonly #runs = new Map<string, Run>();
   readonly #retired = new Set<string>();
   readonly #requests = new Set<string>();
   readonly #discovery = new Set<AbortController>();
   #configurationChanges = 0;
-  constructor(options: { configuration?: NodeAssistantConfiguration; transport?: AssistantHttpTransport } = {}) {
+  constructor(
+    options: {
+      configuration?: NodeAssistantConfiguration;
+      transport?: AssistantHttpTransport;
+      diagnostics?: AssistantDiagnosticSink;
+    } = {},
+  ) {
     this.#configuration = options.configuration ?? new NodeAssistantConfiguration();
     this.#transport = options.transport ?? nodeAssistantHttpTransport;
+    this.#diagnostics = options.diagnostics;
   }
   async getConfiguration() {
     return this.#configuration.state();
@@ -561,6 +630,7 @@ export class NodeAssistantProvider implements AssistantProviderService {
     const state = this.#configuration.state();
     const key = this.#configuration.key();
     let run: Run | undefined;
+    const incomingToolNames = new Map<string, string>();
     let ownsRun = false,
       registeredRequest = false;
     try {
@@ -624,6 +694,7 @@ export class NodeAssistantProvider implements AssistantProviderService {
         if (request.attachments?.some(attachment => !results.has(attachment.callId)))
           throw new Error('Assistant image attachment is not correlated to a current tool result.');
         for (const call of run.pending) {
+          incomingToolNames.set(call.callId, call.name);
           const result = results.get(call.callId);
           if (!result) throw new Error(`Missing function result for ${call.callId}.`);
           run.input.push(
@@ -649,17 +720,81 @@ export class NodeAssistantProvider implements AssistantProviderService {
         run.pending = [];
       }
       const config = state.config;
+      // Diagnostic writes may await I/O; retain the existing single-request-per-run invariant.
+      run.controller = new AbortController();
+      this.#requests.add(request.requestId);
+      registeredRequest = true;
+      const inputLength = budgetText(run.input).length;
+      const toolDefinitionsLength = JSON.stringify(run.tools).length;
       const contextEstimate =
         run.imageCount * ESTIMATED_IMAGE_TOKENS +
         Math.ceil((budgetText(run.input).length + JSON.stringify(run.tools).length) / 4);
+      const toolRoundsExceeded = run.round >= config.maxToolRounds;
+      const budgetRequiresFinal =
+        run.spentTokens + contextEstimate + config.maxOutputTokens + config.finalResponseReserve > config.maxRunTokens;
       const finalOnly =
         run.round >= config.maxToolRounds ||
         run.spentTokens + contextEstimate + config.maxOutputTokens + config.finalResponseReserve > config.maxRunTokens;
       const tools = finalOnly ? [] : run.tools;
       const outputLimit = finalOnly ? config.finalResponseReserve : config.maxOutputTokens;
-      const inputLength = budgetText(run.input).length;
-      if (inputLength > MAX_CONTEXT_CHARACTERS)
+      const characterDetails = contextCharacters(run.input);
+      const diagnostic = {
+        runId: request.runId,
+        requestId: request.requestId,
+        round: run.round + 1,
+        phase: request.messages ? 'initial' : 'continuation',
+        model: key ? config.model.split(key).join('[REDACTED]') : config.model,
+        protocol: config.protocol,
+        configurationRevision: state.revision,
+        settings: {
+          reasoningEffort: config.reasoningEffort ?? null,
+          maxRunTokens: config.maxRunTokens,
+          maxOutputTokens: config.maxOutputTokens,
+          finalResponseReserve: config.finalResponseReserve,
+          maxToolRounds: config.maxToolRounds,
+        },
+        spentTokens: run.spentTokens,
+        remainingTokens: config.maxRunTokens - run.spentTokens,
+        contextEstimate,
+        contextTokensWithoutEncryptedEstimate:
+          run.imageCount * ESTIMATED_IMAGE_TOKENS +
+          Math.ceil((inputLength - characterDetails.encryptedReasoning + toolDefinitionsLength) / 4),
+        normalRoundReservedTotal:
+          run.spentTokens + contextEstimate + config.maxOutputTokens + config.finalResponseReserve,
+        finalOnly,
+        finalOnlyReasons: [
+          ...(toolRoundsExceeded ? ['tool_round_limit'] : []),
+          ...(budgetRequiresFinal ? ['token_budget'] : []),
+        ],
+        outputLimit,
+        inputItems: run.input.length,
+        incomingToolResults:
+          request.toolResults?.map(result => ({
+            callId: result.callId,
+            tool: incomingToolNames.get(result.callId),
+            characters: result.output.length,
+          })) ?? [],
+        toolCount: tools.length,
+        images: {
+          count: run.imageCount,
+          bytes: run.imageBytes,
+          estimatedTokens: run.imageCount * ESTIMATED_IMAGE_TOKENS,
+        },
+        characters: {
+          serializedInput: inputLength,
+          toolDefinitions: toolDefinitionsLength,
+          ...characterDetails,
+        },
+      };
+      if (inputLength > MAX_CONTEXT_CHARACTERS) {
+        await this.#diagnostics?.({
+          ...diagnostic,
+          event: 'request_rejected',
+          reason: 'context_limit',
+          contextCharacterLimit: MAX_CONTEXT_CHARACTERS,
+        });
         throw new Error('Assistant context limit reached; start a fresh run with a concise summary.');
+      }
       const bodyObject: RecordValue =
         config.protocol === 'responses'
           ? {
@@ -704,18 +839,38 @@ export class NodeAssistantProvider implements AssistantProviderService {
             };
       const body = JSON.stringify(bodyObject);
       const estimatedInput = run.imageCount * ESTIMATED_IMAGE_TOKENS + Math.ceil(budgetText(body).length / 4);
+      const wireToolsLength = bodyObject.tools === undefined ? 0 : JSON.stringify(bodyObject.tools).length;
+      const serializedRequestLength = budgetText(body).length;
+      const budgetDiagnostic = {
+        ...diagnostic,
+        estimatedInput,
+        predictedTotal: run.spentTokens + estimatedInput + outputLimit,
+        reservedTotal: run.spentTokens + estimatedInput + outputLimit + (finalOnly ? 0 : config.finalResponseReserve),
+        characters: {
+          ...diagnostic.characters,
+          wireTools: wireToolsLength,
+          serializedRequest: serializedRequestLength,
+          protocolOverhead: serializedRequestLength - inputLength - wireToolsLength,
+        },
+      };
+      const admitted = budgetDiagnostic.reservedTotal <= config.maxRunTokens;
+      await this.#diagnostics?.({ ...budgetDiagnostic, event: 'request_budget', admitted });
       if (
         run.spentTokens + estimatedInput + outputLimit + (finalOnly ? 0 : config.finalResponseReserve) >
         config.maxRunTokens
-      )
+      ) {
+        await this.#diagnostics?.({ ...budgetDiagnostic, event: 'request_rejected', reason: 'token_budget' });
         throw new Error('Assistant token budget is exhausted; no request was sent.');
-      run.controller = new AbortController();
-      this.#requests.add(request.requestId);
-      registeredRequest = true;
-      const parsed = parseAssistantResponse(
-        await this.#request(config.protocol === 'responses' ? 'responses' : 'chat/completions', run.controller, body),
-        config.protocol,
+      }
+      run.controller.signal.throwIfAborted();
+      const providerResponse = await this.#request(
+        config.protocol === 'responses' ? 'responses' : 'chat/completions',
+        run.controller,
+        body,
       );
+      const providerUsage = diagnosticProviderUsage(providerResponse, config.protocol);
+      await this.#diagnostics?.({ ...diagnostic, event: 'provider_usage', stage: 'received', providerUsage });
+      const parsed = parseAssistantResponse(providerResponse, config.protocol);
       if (
         run.controller.signal.aborted ||
         this.#runs.get(request.runId) !== run ||
@@ -747,8 +902,36 @@ export class NodeAssistantProvider implements AssistantProviderService {
         turnUsage.totalTokens += run.imageCount * ESTIMATED_IMAGE_TOKENS;
       }
       run.spentTokens += turnUsage.totalTokens;
-      if (run.spentTokens > config.maxRunTokens)
+      await this.#diagnostics?.({
+        ...diagnostic,
+        event: 'provider_usage',
+        stage: 'accounted',
+        providerUsage,
+        usage: turnUsage,
+        spentAfter: run.spentTokens,
+        remainingAfter: config.maxRunTokens - run.spentTokens,
+        returnedToolCalls: parsed.toolCalls.length,
+        returnedTools: parsed.toolCalls.map(call => ({
+          callId: call.callId,
+          tool: call.name,
+          argumentCharacters: JSON.stringify(call.arguments).length,
+        })),
+      });
+      if (
+        run.controller.signal.aborted ||
+        this.#runs.get(request.runId) !== run ||
+        this.#configuration.state().revision !== state.revision
+      )
+        throw new Error('Assistant completion arrived after the run was invalidated.');
+      if (run.spentTokens > config.maxRunTokens) {
+        await this.#diagnostics?.({
+          ...budgetDiagnostic,
+          event: 'request_rejected',
+          reason: 'provider_budget',
+          spentAfter: run.spentTokens,
+        });
         throw new Error('Provider response exceeded the run token budget; no function calls were accepted.');
+      }
       run.input.push(...parsed.continuation);
       run.pending = parsed.toolCalls;
       for (const call of parsed.toolCalls) run.seenCalls.add(call.callId);

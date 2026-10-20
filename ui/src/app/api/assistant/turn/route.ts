@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getAssistantService } from '@/server/assistant/service';
-import { ASSISTANT_SYSTEM_PROMPT, ASSISTANT_TOOLS } from '@/assistant/tools';
+import { getAssistantSystemPrompt, getAssistantTools } from '@/assistant/tools';
 import type { AssistantTurnRequest } from '@/assistant/AssistantProvider';
 export const runtime = 'nodejs';
 const startMessages = z
@@ -25,15 +25,16 @@ export async function POST(request: NextRequest) {
       configurationRevision: body.configurationRevision,
     };
     if (body.messages) {
+      const { config } = await service.getConfiguration();
       const screen = z
         .string()
         .max(2048)
         .parse(body.screen || '/dashboard');
       turn.messages = [
-        { role: 'system', content: ASSISTANT_SYSTEM_PROMPT + `\nCurrent screen: ${screen}` },
+        { role: 'system', content: getAssistantSystemPrompt(config.vision) + `\nCurrent screen: ${screen}` },
         ...startMessages.parse(body.messages),
       ];
-      turn.tools = ASSISTANT_TOOLS;
+      turn.tools = getAssistantTools(config.vision);
     } else {
       turn.toolResults = body.toolResults;
       turn.attachments = body.attachments;

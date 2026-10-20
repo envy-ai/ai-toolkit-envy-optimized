@@ -5,7 +5,7 @@ import sharp from 'sharp';
 import { z } from 'zod';
 import { getDataRoot, getDatasetsRoot, getTrainingFolder, getHFToken, getModelsPath } from '@/server/settings';
 import type { AssistantImageInput, AssistantToolCall } from '@/assistant/AssistantProvider';
-import { API_CATALOG, ASSISTANT_TOOLS, isReadOnlyTool } from '@/assistant/tools';
+import { API_CATALOG, getAssistantTools, isReadOnlyTool } from '@/assistant/tools';
 import { defaultJobConfig } from '@/app/jobs/new/jobConfig';
 import { NodeAssistantProvider } from './NodeAssistantProvider';
 
@@ -212,16 +212,20 @@ export async function executeAssistantTool(call: AssistantToolCall, context: Too
   if (!Object.hasOwn(schemas, call.name)) throw new Error(`Unknown tool: ${call.name}`);
   const args: any = schemas[call.name as keyof typeof schemas].parse(call.arguments);
   context.signal?.throwIfAborted();
-  if (call.name === 'toolkit_help')
+  if (call.name === 'toolkit_help') {
+    const { config } = await context.provider.getConfiguration();
     return {
       output: JSON.stringify({
         api: API_CATALOG,
-        tools: ASSISTANT_TOOLS,
+        tools: getAssistantTools(config.vision),
         defaultJobConfig,
         notes:
-          'Running jobs: update with sample_only:true. Read the job before editing. Images are observed with inspect_image. File operations use configured roots; do not mutate a running dataset unless requested.',
+          'Running jobs: update with sample_only:true. Read the job before editing. '
+          + (config.vision ? 'Images are observed with inspect_image. ' : 'Visual observations are disabled. ')
+          + 'File operations use configured roots; do not mutate a running dataset unless requested.',
       }),
     };
+  }
   if (call.name === 'navigate') {
     if (
       !/^\/(dashboard|datasets|jobs|generate|settings)(\/[^?#]*)?(\?[^#]*)?$/.test(args.path) ||

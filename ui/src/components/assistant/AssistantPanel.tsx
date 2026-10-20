@@ -179,7 +179,7 @@ export default function AssistantPanel() {
     const prompt =
       input.trim() +
       (attachments.length
-        ? `\nAttached images (local paths; inspect them with inspect_image):\n${attachments.join('\n')}`
+        ? `\nAttached images (local paths):\n${attachments.join('\n')}`
         : '');
     const messages = entries
       .filter(entry => entry.role !== 'tool')
