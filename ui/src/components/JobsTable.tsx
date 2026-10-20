@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { matchesSearch } from '@/utils/search';
 import useJobsList from '@/hooks/useJobsList';
 import Link from 'next/link';
@@ -38,6 +38,8 @@ interface JobsTableProps {
   autoStartQueue?: boolean;
   onlyActive?: boolean;
   job_type?: string | null;
+  pageSize?: number;
+  scrollRoot?: RefObject<HTMLDivElement | null>;
 }
 
 interface QueueTableProps {
@@ -48,6 +50,7 @@ interface QueueTableProps {
   onRefresh: () => void;
   onReorder: (queueID: string, orderedJobIds: string[]) => void;
   theadClassName?: string;
+  reorderDisabledReason?: string;
 }
 
 function renderTableCells(row: Job, columns: TableColumn[]) {
@@ -69,9 +72,20 @@ function StaticQueueRow({ row, columns, rowClass }: { row: Job; columns: TableCo
   );
 }
 
-function SortableQueueRow({ row, columns, rowClass }: { row: Job; columns: TableColumn[]; rowClass: string }) {
+function SortableQueueRow({
+  row,
+  columns,
+  rowClass,
+  disabledReason,
+}: {
+  row: Job;
+  columns: TableColumn[];
+  rowClass: string;
+  disabledReason?: string;
+}) {
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, transition, isDragging } = useSortable({
     id: row.id,
+    disabled: Boolean(disabledReason),
   });
 
   const style = {
@@ -91,8 +105,10 @@ function SortableQueueRow({ row, columns, rowClass }: { row: Job; columns: Table
         <button
           ref={setActivatorNodeRef}
           type="button"
-          className="inline-flex h-7 w-7 items-center justify-center rounded text-gray-400 hover:bg-gray-700 hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-grab active:cursor-grabbing"
-          aria-label={`Reorder ${row.name}`}
+          disabled={Boolean(disabledReason)}
+          title={disabledReason}
+          className="inline-flex h-7 w-7 items-center justify-center rounded text-gray-400 hover:bg-gray-700 hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-grab active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
+          aria-label={disabledReason ? `Reorder ${row.name}: ${disabledReason}` : `Reorder ${row.name}`}
           {...attributes}
           {...listeners}
         >
@@ -112,6 +128,7 @@ function SortableQueueTable({
   onRefresh,
   onReorder,
   theadClassName = 'text-gray-400',
+  reorderDisabledReason,
 }: QueueTableProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -126,6 +143,7 @@ function SortableQueueTable({
   const queuedRowIds = queuedRows.map(job => job.id);
 
   const handleDragEnd = (event: DragEndEvent) => {
+    if (reorderDisabledReason) return;
     const { active, over } = event;
     if (!over || active.id === over.id) return;
 
@@ -179,6 +197,7 @@ function SortableQueueTable({
                     row={row}
                     columns={columns}
                     rowClass={(runningRows.length + index) % 2 === 0 ? 'bg-gray-900' : 'bg-gray-800'}
+                    disabledReason={reorderDisabledReason}
                   />
                 ))}
                 {otherRows.map((row, index) => (
@@ -186,7 +205,9 @@ function SortableQueueTable({
                     key={row.id}
                     row={row}
                     columns={columns}
-                    rowClass={(runningRows.length + queuedRows.length + index) % 2 === 0 ? 'bg-gray-900' : 'bg-gray-800'}
+                    rowClass={
+                      (runningRows.length + queuedRows.length + index) % 2 === 0 ? 'bg-gray-900' : 'bg-gray-800'
+                    }
                   />
                 ))}
               </tbody>
@@ -198,13 +219,88 @@ function SortableQueueTable({
   );
 }
 
-export default function JobsTable({ onlyActive = false, job_type = null, search = '' }: JobsTableProps) {
-  const { jobs, setJobs, status, refreshJobs } = useJobsList({ onlyActive, reloadInterval: 5000, job_type });
+export default function JobsTable({
+  onlyActive = false,
+  job_type = null,
+  search = '',
+  pageSize,
+  scrollRoot,
+}: JobsTableProps) {
+  const { jobs, setJobs, status, refreshJobs, hasMore, loadMore, isLoadingMore, error, loadMoreError } = useJobsList({
+    onlyActive,
+    reloadInterval: 5000,
+    job_type,
+    pageSize,
+    search: pageSize ? search : '',
+  });
   const { queues, status: queueStatus, refreshQueues } = useQueueList();
   const { gpuList, isGPUInfoLoaded } = useGPUInfo();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteProgress, setDeleteProgress] = useState<{ done: number; total: number } | null>(null);
-  const [datasetLightboxJob, setDatasetLightboxJob] = useState<{ jobId: string; imagePath: string | null } | null>(null);
+  const [datasetLightboxJob, setDatasetLightboxJob] = useState<{ jobId: string; imagePath: string | null } | null>(
+    null,
+  );
+  const sentinel = useRef<HTMLDivElement>(null);
+  const [scrollRequested, setScrollRequested] = useState(false);
+  const reorderDisabledReason =
+    pageSize && (hasMore || search.trim() || status !== 'success')
+      ? 'Load all jobs and clear search to reorder the complete queue.'
+      : undefined;
+
+  useEffect(() => {
+    const root = scrollRoot?.current;
+    if (!pageSize || !root) return;
+    root.scrollTop = 0;
+    setScrollRequested(false);
+    let previousTop = root.scrollTop;
+    const onScroll = () => {
+      if (root.scrollTop > previousTop) setScrollRequested(true);
+      previousTop = root.scrollTop;
+    };
+    root.addEventListener('scroll', onScroll, { passive: true });
+    return () => root.removeEventListener('scroll', onScroll);
+  }, [pageSize, search, scrollRoot]);
+
+  useEffect(() => {
+    const root = scrollRoot?.current;
+    const target = sentinel.current;
+    if (
+      !pageSize ||
+      !root ||
+      !target ||
+      !hasMore ||
+      !scrollRequested ||
+      status !== 'success' ||
+      !isGPUInfoLoaded ||
+      isLoadingMore ||
+      loadMoreError ||
+      error
+    )
+      return;
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries.some(entry => entry.isIntersecting)) {
+          void loadMore().then(started => {
+            if (started) setScrollRequested(false);
+          });
+        }
+      },
+      { root, threshold: 0.01 },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [
+    pageSize,
+    scrollRoot,
+    hasMore,
+    scrollRequested,
+    status,
+    isGPUInfoLoaded,
+    isLoadingMore,
+    loadMoreError,
+    error,
+    loadMore,
+  ]);
 
   const refresh = () => {
     refreshJobs();
@@ -237,13 +333,14 @@ export default function JobsTable({ onlyActive = false, job_type = null, search 
   };
 
   const onReorderQueue = (queueID: string, orderedJobIds: string[]) => {
+    if (reorderDisabledReason) return;
     // Reorder matching rows within their existing slots, preserving hidden jobs.
     const movedIds = new Set(orderedJobIds);
     let nextVisible = 0;
     orderedJobIds = jobs
       .filter(job => job.status === 'queued' && job.gpu_ids === queueID)
       .sort((a, b) => (a.queue_position ?? Infinity) - (b.queue_position ?? Infinity))
-      .map(job => movedIds.has(job.id) ? orderedJobIds[nextVisible++] : job.id);
+      .map(job => (movedIds.has(job.id) ? orderedJobIds[nextVisible++] : job.id));
     const nextPositionById = new Map(orderedJobIds.map((id, index) => [id, (index + 1) * 1000]));
     setJobs(prevJobs =>
       prevJobs.map(job =>
@@ -516,8 +613,22 @@ export default function JobsTable({ onlyActive = false, job_type = null, search 
           )}
         </div>
       )}
-      {!isLoading && visibleJobs.length === 0 && search.trim() && (
-        <p role="status" className="p-6 text-center text-sm text-gray-400">No jobs match your search.</p>
+      {error && (
+        <div role="alert" className="mb-4 rounded-md border border-red-700 bg-red-950 p-3 text-sm text-red-200">
+          Could not refresh jobs: {error}{' '}
+          <button
+            type="button"
+            onClick={() => void refreshJobs()}
+            className="underline focus-visible:outline focus-visible:outline-blue-400"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {!isLoading && !error && visibleJobs.length === 0 && search.trim() && (
+        <p role="status" className="p-6 text-center text-sm text-gray-400">
+          No jobs match your search.
+        </p>
       )}
       {Object.keys(jobsDict)
         .sort()
@@ -576,6 +687,7 @@ export default function JobsTable({ onlyActive = false, job_type = null, search 
                 isLoading={isLoading}
                 onRefresh={refresh}
                 onReorder={onReorderQueue}
+                reorderDisabledReason={reorderDisabledReason}
                 theadClassName={
                   queue?.is_running
                     ? 'bg-green-700 dark:bg-green-950 text-white dark:text-gray-400'
@@ -592,7 +704,42 @@ export default function JobsTable({ onlyActive = false, job_type = null, search 
               <h2 className="font-semibold text-gray-100">Idle</h2>
             </div>
           </div>
-          <UniversalTable columns={columns} rows={jobsDict['Idle'].jobs.filter(job => matchesSearch(job.name, search))} isLoading={isLoading} onRefresh={refresh} />
+          <UniversalTable
+            columns={columns}
+            rows={jobsDict['Idle'].jobs.filter(job => matchesSearch(job.name, search))}
+            isLoading={isLoading}
+            onRefresh={refresh}
+          />
+        </div>
+      )}
+      {pageSize && (
+        <div
+          ref={sentinel}
+          className="mb-6 flex min-h-16 flex-col items-center justify-center gap-2 text-sm text-gray-400"
+        >
+          <p role="status">
+            {jobs.length} matching job{jobs.length === 1 ? '' : 's'} loaded
+            {!hasMore && status === 'success' ? ' · All results loaded' : ''}
+          </p>
+          {loadMoreError && (
+            <p role="alert" className="text-red-300">
+              Could not load more jobs: {loadMoreError}
+            </p>
+          )}
+          {hasMore && (
+            <button
+              type="button"
+              disabled={isLoadingMore || status === 'loading'}
+              onClick={() => {
+                setScrollRequested(false);
+                void loadMore();
+              }}
+              className="rounded-md border border-gray-600 px-4 py-2 text-gray-200 hover:bg-gray-800 disabled:opacity-50 focus-visible:outline focus-visible:outline-blue-400"
+            >
+              {isLoadingMore ? 'Loading more…' : loadMoreError ? 'Retry loading more' : 'Load more'}
+            </button>
+          )}
+          {reorderDisabledReason && <p>{reorderDisabledReason}</p>}
         </div>
       )}
     </div>

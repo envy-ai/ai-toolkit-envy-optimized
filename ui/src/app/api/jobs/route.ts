@@ -8,6 +8,7 @@ import { mergeSampleOnlyJobConfig } from '@/helpers/sampleOnlyJobConfig';
 import { validateTrainingCapabilities } from '@/app/jobs/new/trainingCapabilities';
 import { validateSliderSpace } from '@/app/jobs/new/sliderspace';
 import { createJobFork, JobForkError, previewJobFork } from '@/server/jobFork';
+import { matchesSearch } from '@/utils/search';
 
 const TOOLKIT_ROOT = path.resolve('@', '..', '..');
 const defaultTrainFolder = path.join(TOOLKIT_ROOT, 'output');
@@ -107,6 +108,7 @@ export async function GET(request: Request) {
   const job_type = searchParams.get('job_type');
   const only_active = searchParams.get('only_active');
   const name = searchParams.get('name')?.trim() || '';
+  const search = searchParams.get('search') || '';
   const matchesName = (job: { name: string }) => job.name.toLowerCase().includes(name.toLowerCase());
 
   try {
@@ -129,11 +131,55 @@ export async function GET(request: Request) {
     if (job_type) {
       where.job_type = job_type;
     }
-    if (name) {
-      where.name = { contains: name };
-    }
     if (only_active === 'true') {
       where.status = { in: ['running', 'queued', 'stopping'] };
+    }
+    const limitValue = searchParams.get('limit');
+    const cursorValue = searchParams.get('cursor');
+    if (cursorValue && limitValue === null)
+      return NextResponse.json({ error: 'A cursor requires a page limit.' }, { status: 400 });
+    if (limitValue !== null) {
+      const limit = Number(limitValue);
+      if (!/^\d+$/.test(limitValue) || !Number.isSafeInteger(limit) || limit < 1)
+        return NextResponse.json({ error: 'Page limit must be a positive integer.' }, { status: 400 });
+      if (cursorValue) {
+        let cursor: { createdAt: string; id: string };
+        try {
+          cursor = JSON.parse(Buffer.from(cursorValue, 'base64url').toString('utf8'));
+          if (typeof cursor.createdAt !== 'string' || typeof cursor.id !== 'string' || !cursor.id ||
+            !Number.isFinite(new Date(cursor.createdAt).getTime())) throw new Error('Invalid cursor.');
+        } catch {
+          return NextResponse.json({ error: 'Invalid jobs page cursor.' }, { status: 400 });
+        }
+        const createdAt = new Date(cursor.createdAt);
+        where.OR = [{ created_at: { lt: createdAt } }, { created_at: createdAt, id: { lt: cursor.id } }];
+      }
+      const orderBy = [{ created_at: 'desc' as const }, { id: 'desc' as const }];
+      let jobs;
+      let hasMore: boolean;
+      if (name || search.trim()) {
+        // Match lightweight metadata first: SQLite LIKE has wildcard and Unicode
+        // differences from the UI's literal, case-insensitive substring matching.
+        const candidates = await prisma.job.findMany({
+          where, orderBy, select: { id: true, name: true, created_at: true },
+        });
+        const matching = candidates.filter(job => matchesName(job) && matchesSearch(job.name, search));
+        hasMore = matching.length > limit;
+        const ids = matching.slice(0, limit).map(job => job.id);
+        jobs = ids.length ? await prisma.job.findMany({ where: { ...where, id: { in: ids } }, orderBy }) : [];
+      } else {
+        const page = await prisma.job.findMany({ where, orderBy, take: limit + 1 });
+        hasMore = page.length > limit;
+        jobs = page.slice(0, limit);
+      }
+      const last = jobs[jobs.length - 1];
+      const nextCursor = hasMore && last
+        ? Buffer.from(JSON.stringify({ createdAt: last.created_at.toISOString(), id: last.id })).toString('base64url')
+        : null;
+      return NextResponse.json({ jobs: jobs.map(attachDatasetThumbnail), hasMore, nextCursor });
+    }
+    if (name) where.name = { contains: name };
+    if (only_active === 'true') {
       const jobs = await cached(
         'jobs-active',
         () =>
@@ -146,14 +192,14 @@ export async function GET(request: Request) {
       );
       // SQLite LIKE treats underscores and percent signs as wildcards. Keep
       // name searches literal, since those characters are common in job names.
-      return NextResponse.json({ jobs: jobs.filter(matchesName).map(attachDatasetThumbnail) });
+      return NextResponse.json({ jobs: jobs.filter(job => matchesName(job) && matchesSearch(job.name, search)).map(attachDatasetThumbnail) });
     }
 
     const jobs = await prisma.job.findMany({
       where,
       orderBy: { created_at: 'desc' },
     });
-    return NextResponse.json({ jobs: jobs.filter(matchesName).map(attachDatasetThumbnail) });
+    return NextResponse.json({ jobs: jobs.filter(job => matchesName(job) && matchesSearch(job.name, search)).map(attachDatasetThumbnail) });
   } catch (error) {
     console.error(error);
     if (error instanceof JobForkError) {

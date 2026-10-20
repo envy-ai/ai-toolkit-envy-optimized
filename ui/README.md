@@ -4,6 +4,20 @@ The eye icon beside a training job on the dashboard, queue, or jobs list opens
 its **Samples** tab directly (`/jobs/<id>?tab=samples`). Click it or focus it with
 Tab and press Enter. Job-name links still open the overview.
 
+The **Queue** page (`/jobs`) initially loads the 100 newest jobs by creation
+time. Scrolling down to the end loads the next 100; the **Load more** button
+also works with Tab and Enter/Space. Search checks every job name in the database
+using all space-separated substrings, without regard to case or term order.
+Matching results use the same 100-at-a-time loading. Changing the search resets
+the list; polling refreshes the number of results already loaded. Selection and
+bulk deletion apply to the loaded matching rows. Failed loads retain existing
+rows and expose **Retry** controls.
+
+Queue drag handles are disabled while results are incomplete or a search is
+active, because reordering requires the complete queued-job order. Load all jobs
+and clear search to reorder from this page. The dashboard continues to load and
+poll its complete active queue and supports its existing drag behavior.
+
 Training jobs support **Fork this job** from their gear menu. It opens the job
 form and creates an independent, stopped job from the latest complete checkpoint
 and optimizer state. See [the fork workflow and supported layouts](../docs/job_fork.md).

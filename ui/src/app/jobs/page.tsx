@@ -3,10 +3,11 @@
 import JobsTable from '@/components/JobsTable';
 import { TopBar, MainContent } from '@/components/layout';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 export default function Dashboard() {
   const [search, setSearch] = useState('');
+  const scrollRoot = useRef<HTMLDivElement>(null);
   return (
     <>
       <TopBar>
@@ -35,8 +36,8 @@ export default function Dashboard() {
           className="min-w-0 flex-1 rounded-md bg-gray-800 border border-gray-600 text-sm text-gray-200 placeholder-gray-500 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
       </div>
-      <MainContent belowTopBar style={{ top: '7rem' }}>
-        <JobsTable search={search} />
+      <MainContent ref={scrollRoot} belowTopBar style={{ top: '7rem' }}>
+        <JobsTable search={search} pageSize={100} scrollRoot={scrollRoot} />
       </MainContent>
     </>
   );

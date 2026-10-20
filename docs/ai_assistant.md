@@ -36,6 +36,16 @@ The name filter matches literal substrings without case sensitivity; combine it
 with `only_active: true` to restrict results to active jobs. Results retain job
 IDs, configurations, status, and progress. A blank name keeps the normal list.
 
+`GET /api/jobs` also accepts an optional positive integer `limit` and an opaque
+`cursor` returned by the previous page. Paginated responses contain `jobs`,
+`hasMore`, and `nextCursor`; they order jobs by descending creation time and ID.
+`search` matches all whitespace-separated, case-insensitive literal substrings
+in the name, while `name` keeps its single literal substring semantics. Both
+filters apply before pagination across the full database. Searching reads only
+ID/name/creation-time metadata for candidates and fetches full configurations
+for the selected page. Omitting `limit` preserves the existing complete-list
+API behavior; the Queue UI explicitly requests 100 results per page.
+
 Additional tools inspect dataset and sample images, read and write text sidecars
 and text sample outputs, copy/rename/delete dataset files, import local files,
 and create or edit training images with CPU operations. Image edits support
