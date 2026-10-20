@@ -5,6 +5,7 @@ import path from 'path';
 import { Readable } from 'stream';
 import { getDatasetsRoot, getTrainingFolder, getDataRoot } from '@/server/settings';
 import { catchAllToFilePath } from '@/server/catchAllPath';
+import { getThumbnailCacheBasename, getThumbnailVariant } from '../../../../../cron/thumbnailVariant';
 
 const contentTypeMap: { [key: string]: string } = {
   // Images
@@ -64,8 +65,12 @@ export async function GET(
     // folder when it exists; otherwise falls through to the full file exactly
     // as before. A source with alpha gets a <name>.<ext>.png thumb so the
     // transparency survives, everything else stays <name>.<ext>.jpg.
+    // ?thumb=fit selects a separate <name>.<ext>.fit cache with no crop.
     if (request.nextUrl.searchParams.has('thumb')) {
-      const thumbBase = path.join(path.dirname(resolved), '.thumbs', path.basename(resolved));
+      const variant = getThumbnailVariant(request.nextUrl.searchParams.get('thumb'));
+      const thumbBase = path.join(
+        path.dirname(resolved), '.thumbs', getThumbnailCacheBasename(path.basename(resolved), variant),
+      );
       for (const thumbPath of [`${thumbBase}.png`, `${thumbBase}.jpg`]) {
         const thumbStat = await fs.promises.stat(thumbPath).catch(() => null);
         if (thumbStat && thumbStat.isFile()) {

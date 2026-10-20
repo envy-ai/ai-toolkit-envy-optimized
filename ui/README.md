@@ -4,6 +4,17 @@ The eye icon beside a training job on the dashboard, queue, or jobs list opens
 its **Samples** tab directly (`/jobs/<id>?tab=samples`). Click it or focus it with
 Tab and press Enter. Job-name links still open the overview.
 
+Dataset cards show the entire first image inside their square preview area,
+keeping its aspect ratio and transparency; any extra space uses the card's dark
+background. They request an uncropped thumbnail bounded to 300 pixels per axis
+using `?thumb=fit`, with a separate `.thumbs/<filename>.fit.png` (alpha) or
+`.fit.jpg` cache. The front file server generates these previews on demand;
+the Next.js image route reads the same cache variant. A standalone Next.js
+server keeps its existing fallback to the uncropped original when that cache
+does not exist. Ordinary `?thumb=1`
+gallery thumbnails keep their existing square crop. First-image discovery
+supports PNG, JPEG, WebP, GIF, BMP, and AVIF.
+
 The **Queue** page (`/jobs`) initially loads the 100 newest jobs by creation
 time. Scrolling down to the end loads the next 100; the **Load more** button
 also works with Tab and Enter/Space. Search checks every job name in the database

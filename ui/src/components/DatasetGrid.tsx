@@ -28,7 +28,7 @@ function DatasetCard({
         <div className="aspect-square bg-gray-950 flex items-center justify-center">
           {image && !failed ? (
             <img
-              src={`/api/img/${encodeFilePathForUrl(image)}?thumb=1`}
+              src={`/api/img/${encodeFilePathForUrl(image)}?thumb=fit`}
               alt={`First image in ${name}`}
               loading="lazy"
               className="w-full h-full object-contain"

@@ -32,6 +32,7 @@ import path from 'path';
 import { pipeline } from 'stream';
 import prisma from './prisma';
 import { defaultDatasetsFolder, defaultTrainFolder, defaultDataRoot, TOOLKIT_ROOT } from './paths';
+import { getThumbnailCacheBasename, getThumbnailVariant, type ThumbnailVariant } from './thumbnailVariant';
 
 const isDev = process.argv.includes('dev');
 
@@ -84,15 +85,16 @@ async function getRoots(forceFresh = false): Promise<Roots> {
 }
 
 // ---------------------------------------------------------------------------
-// Thumbnail generation for ?thumb=1 requests whose thumb doesn't exist yet.
+// Thumbnail generation for ?thumb=1 (square crop) and ?thumb=fit (whole image).
 // Output matches the Python generator (SampleConfig._generate_thumbnail in
 // toolkit/config_modules.py): a 300x300 center-cropped thumb written
 // atomically into the sibling .thumbs folder as <name>.<ext>.jpg, or
 // <name>.<ext>.png when the source has alpha (jpg cannot carry it, and the
-// RGB under a transparent pixel shows through as a garbage color).
+// RGB under a transparent pixel shows through as a garbage color). Fit thumbs
+// preserve aspect ratio inside 300x300 with a separate <name>.<ext>.fit cache.
 // ---------------------------------------------------------------------------
 const THUMB_SIZE = 300;
-const IMAGE_THUMB_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp']);
+const IMAGE_THUMB_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.avif']);
 const VIDEO_THUMB_EXTS = new Set(['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v', '.flv']);
 // audio thumbs: the embedded cover (the sampler's waveform art) when the file
 // has one, else a waveform rendered by ffmpeg in the same amber-on-dark look
@@ -169,8 +171,13 @@ function runFfmpeg(args: string[]): Promise<void> {
 }
 
 const SQUARE_THUMB_VF = `crop='min(iw,ih)':'min(iw,ih)',scale=${THUMB_SIZE}:${THUMB_SIZE}`;
+const FIT_THUMB_VF = `scale=${THUMB_SIZE}:${THUMB_SIZE}:force_original_aspect_ratio=decrease`;
 
-async function generateThumb(sourcePath: string, thumbBase: string): Promise<string | null> {
+async function generateThumb(
+  sourcePath: string,
+  thumbBase: string,
+  variant: ThumbnailVariant = 'square',
+): Promise<string | null> {
   const ext = path.extname(sourcePath).toLowerCase();
   const isImage = IMAGE_THUMB_EXTS.has(ext);
   const isVideo = VIDEO_THUMB_EXTS.has(ext);
@@ -184,19 +191,20 @@ async function generateThumb(sourcePath: string, thumbBase: string): Promise<str
   // as the Python generator) so a concurrent request never reads a partial
   // thumb. The suffix is required for ffmpeg's output format detection.
   const tmpPath = `${thumbPath}.${process.pid}.tmp${hasAlpha ? '.png' : '.jpg'}`;
+  const frameFilter = variant === 'fit' ? FIT_THUMB_VF : SQUARE_THUMB_VF;
   try {
     if (isImage) {
       // sharp opens animated formats on the first frame by default
-      const pipeline = sharp(sourcePath).resize(THUMB_SIZE, THUMB_SIZE, { fit: 'cover' });
+      const pipeline = sharp(sourcePath).resize(THUMB_SIZE, THUMB_SIZE, { fit: variant === 'fit' ? 'inside' : 'cover' });
       await (hasAlpha ? pipeline.png() : pipeline.jpeg({ quality: 90 })).toFile(tmpPath);
     } else if (isVideo) {
-      await runFfmpeg(['-i', sourcePath, '-frames:v', '1', '-vf', SQUARE_THUMB_VF, '-q:v', '2', tmpPath]);
+      await runFfmpeg(['-i', sourcePath, '-frames:v', '1', '-vf', frameFilter, '-q:v', '2', tmpPath]);
     } else {
       // embedded cover first (ffmpeg exposes an attached picture as a video stream)
       let done = false;
       if (ext === '.mp3') {
         try {
-          await runFfmpeg(['-i', sourcePath, '-map', '0:v:0', '-frames:v', '1', '-vf', SQUARE_THUMB_VF, '-q:v', '2', tmpPath]);
+          await runFfmpeg(['-i', sourcePath, '-map', '0:v:0', '-frames:v', '1', '-vf', frameFilter, '-q:v', '2', tmpPath]);
           done = true;
         } catch {
           // no cover: fall through to the rendered waveform
@@ -217,12 +225,17 @@ async function generateThumb(sourcePath: string, thumbBase: string): Promise<str
 
 // Resolves to the thumb path it wrote (the extension depends on alpha), or
 // null when none could be generated.
-function ensureThumb(sourcePath: string, thumbBase: string, sourceMtimeMs: number): Promise<string | null> {
+function ensureThumb(
+  sourcePath: string,
+  thumbBase: string,
+  sourceMtimeMs: number,
+  variant: ThumbnailVariant = 'square',
+): Promise<string | null> {
   const failKey = `${thumbBase}:${sourceMtimeMs}`;
   if (failedThumbs.has(failKey)) return Promise.resolve(null);
   let pending = inFlightThumbs.get(thumbBase);
   if (!pending) {
-    pending = withThumbGenSlot(() => generateThumb(sourcePath, thumbBase))
+    pending = withThumbGenSlot(() => generateThumb(sourcePath, thumbBase, variant))
       .catch(err => {
         console.warn(`Failed to generate thumbnail for ${sourcePath}: ${err?.message || err}`);
         return null;
@@ -312,11 +325,17 @@ async function serveFile(req: http.IncomingMessage, res: http.ServerResponse, pr
 
     // ?thumb=1 serves the 300x300 thumb from the sibling .thumbs folder
     // (<name>.<ext>.png when the source has alpha, else <name>.<ext>.jpg),
-    // generating and saving it on the fly when missing. Falls through to the
-    // full file only if generation isn't possible (unsupported format, no
+    // generating and saving it on the fly when missing. ?thumb=fit uses a
+    // separate <name>.<ext>.fit cache and preserves the complete aspect ratio.
+    // Falls through to the full file only if generation isn't possible (unsupported format, no
     // ffmpeg, corrupt file). Album art is always the thumb.
     if (isArt || (isImg && new URL(req.url || '', 'http://localhost').searchParams.has('thumb'))) {
-      const thumbBase = path.join(path.dirname(resolvedFilePath), '.thumbs', path.basename(resolvedFilePath));
+      const variant = isArt
+        ? 'square'
+        : getThumbnailVariant(new URL(req.url || '', 'http://localhost').searchParams.get('thumb'));
+      const thumbBase = path.join(
+        path.dirname(resolvedFilePath), '.thumbs', getThumbnailCacheBasename(path.basename(resolvedFilePath), variant),
+      );
       let thumbPath: string | null = null;
       let thumbStat: fs.Stats | null = null;
       for (const candidate of [`${thumbBase}.png`, `${thumbBase}.jpg`]) {
@@ -330,7 +349,7 @@ async function serveFile(req: http.IncomingMessage, res: http.ServerResponse, pr
       if (!thumbStat) {
         const srcStat = await fs.promises.stat(resolvedFilePath).catch(() => null);
         if (srcStat && srcStat.isFile()) {
-          const written = await ensureThumb(resolvedFilePath, thumbBase, srcStat.mtimeMs);
+          const written = await ensureThumb(resolvedFilePath, thumbBase, srcStat.mtimeMs, variant);
           if (written) {
             thumbPath = written;
             thumbStat = await fs.promises.stat(written).catch(() => null);
