@@ -16,6 +16,8 @@ SCHEMA = 1
 SOURCE_FILES = (
     "workers/kaggle_tpu/full_model_smoke.py",
     "workers/kaggle_tpu/static_qwen.py",
+    "workers/kaggle_tpu/runtime_env.py",
+    "toolkit/lora_special.py",
     "toolkit/util/convrot_quant.py",
     "toolkit/util/convrot_xla.py",
     "toolkit/fizgig_image_objective.py",

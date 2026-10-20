@@ -13,7 +13,8 @@
   "dataset_sources": [
     "nerfviking/qwen21-fizgig-smoke-assets",
     "nerfviking/qwen21-fizgig-paired-cache",
-    "nerfviking/qwen21-fizgig-tpu-train-source"
+    "nerfviking/qwen21-fizgig-tpu-train-source",
+    "nerfviking/qwen21-fizgig-private-auth"
   ],
   "kernel_sources": [],
   "competition_sources": [],

@@ -19,6 +19,10 @@ from types import MethodType, SimpleNamespace
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from workers.kaggle_tpu.runtime_env import configure_torch_only
+
+configure_torch_only()
+
 
 def sha256(path):
     digest = hashlib.sha256()
@@ -169,16 +173,10 @@ def run(args, report, update):
     from workers.kaggle_tpu.probe import preflight
     report["runtime"] = preflight()
     import torch
-    import torch_xla
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
     import torch_xla.debug.metrics as metrics
-    from toolkit.util.convrot_xla import prepare_convrot8_scales_for_xla_
-    from toolkit.config_modules import ModelConfig
-    from toolkit.lora_special import LoRASpecialNetwork
-    from toolkit.assistant_lora import load_assistant_lora_from_path
     from toolkit.fizgig_image_objective import _noised_state, _image_loss
-    from workers.kaggle_tpu.static_qwen import StaticQwen
 
     device = xm.xla_device()
     if xr.world_size() != 1 or device.type != "xla":
@@ -201,6 +199,8 @@ def run(args, report, update):
     report["identity"] = identity
     report["source_files_sha256"] = {name: sha256(ROOT / name) for name in (
         "workers/kaggle_tpu/full_model_smoke.py", "workers/kaggle_tpu/static_qwen.py",
+        "workers/kaggle_tpu/runtime_env.py",
+        "toolkit/lora_special.py",
         "toolkit/util/convrot_quant.py", "toolkit/util/convrot_xla.py",
         "toolkit/fizgig_image_objective.py",
         "extensions_built_in/diffusion_models/qwen_image_2/src/transformer.py")}

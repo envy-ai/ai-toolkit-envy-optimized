@@ -593,6 +593,34 @@ def test_repository_training_notebook_stages_in_direct_mode(tmp_path):
     assert "owner/smoke-report" not in metadata_source["dataset_sources"]
 
 
+def test_training_notebook_loads_only_a_dummy_token_from_attached_private_dataset(tmp_path):
+    template = Path(orchestrator_module.__file__).with_name("train_session.ipynb")
+    notebook = json.loads(template.read_text())
+    source = "".join(notebook["cells"][4]["source"])
+    start = source.index("token_paths = [")
+    end = source.index("config = AITK_SESSION_CONFIG")
+    token_loader = source[start:end]
+
+    inputs = tmp_path / "input"
+    auth_dataset = inputs / "nerfviking" / "qwen21-fizgig-private-auth"
+    auth_dataset.mkdir(parents=True)
+    (auth_dataset / "kaggle_token").write_bytes(b"dummy-token-for-offline-test\r\n")
+    child_env = {}
+    process_env = {}
+    namespace = {
+        "inputs": inputs,
+        "pathlib": __import__("pathlib"),
+        "os": SimpleNamespace(environ=process_env),
+        "env": child_env,
+    }
+
+    exec(compile(token_loader, str(template) + " token loader", "exec"), namespace)
+
+    assert process_env["KAGGLE_API_TOKEN"] == "dummy-token-for-offline-test"
+    assert child_env["KAGGLE_API_TOKEN"] == "dummy-token-for-offline-test"
+    assert "secret_token" not in namespace
+
+
 def test_stage_rejects_notebook_docker_image_pin(tmp_path):
     notebook, metadata = write_templates(tmp_path)
     contents = json.loads(notebook.read_text())

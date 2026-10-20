@@ -20,6 +20,10 @@ from types import MethodType, SimpleNamespace
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from workers.kaggle_tpu.runtime_env import configure_torch_only
+
+configure_torch_only()
+
 from workers.kaggle_tpu.full_model_smoke import sha256, verified_file
 
 

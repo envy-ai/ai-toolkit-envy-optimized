@@ -7,7 +7,6 @@ import re
 import sys
 from typing import Any, List, Optional, Dict, Type, Union
 import torch
-from diffusers import UNet2DConditionModel, PixArtTransformer2DModel, AuraFlowTransformer2DModel, WanTransformer3DModel
 from transformers import CLIPTextModel
 from toolkit.models.lokr import LokrModule
 
@@ -21,6 +20,7 @@ from toolkit.models.loha import LoHaModule
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from diffusers import UNet2DConditionModel, PixArtTransformer2DModel, AuraFlowTransformer2DModel, WanTransformer3DModel
     from toolkit.stable_diffusion_model import StableDiffusion
 
 RE_UPDOWN = re.compile(r"(up|down)_blocks_(\d+)_(resnets|upsamplers|downsamplers|attentions)_(\d+)_")

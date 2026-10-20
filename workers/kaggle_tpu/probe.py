@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import sys
 import time
 import traceback
 
@@ -90,7 +89,6 @@ def _quantize_rows(x, qmax):
 
 def _rank(index, report_dir):
     import torch
-    import torch_xla
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
 

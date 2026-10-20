@@ -32,40 +32,39 @@ An optional smoke gate remains available with `--smoke-kernel`,
 That mode adopts and verifies an already-submitted one-rank smoke and publishes
 a private pinned report before training; omit these options for direct launch.
 
-Kaggle attaches Secrets to an existing notebook, so first create the **private
-CPU draft** at the eventual training slug. The ready-to-push folder is
-`workers/kaggle_tpu/train_draft/`; its metadata names
-`nerfviking/qwen21-fizgig-train`, title `Qwen21 Fizgig Train`, Internet enabled,
-GPU and TPU disabled. Its only code cell prints a message. To submit that draft
-separately, use the installed official CLI without a timeout or accelerator
-override:
+The controller's first launch still adopts a terminal private CPU draft at the
+training slug. The ready-to-push folder is `workers/kaggle_tpu/train_draft/`;
+its metadata names `nerfviking/qwen21-fizgig-train`, title `Qwen21 Fizgig Train`,
+Internet enabled, GPU and TPU disabled. Submit that initial draft with:
 
 ```bash
 conda run -n ai-toolkit kaggle kernels push -p workers/kaggle_tpu/train_draft
 ```
 
-Wait until that version is `COMPLETE`, then enable the account Secret in that
-private notebook's Settings. Kaggle may create another draft version when
-the Secret is enabled. The controller accepts any terminal version with the
-exact private CPU draft code and title as its initial baseline. It waits if
-the draft is absent or still running, and rejects a failed, public, GPU, TPU,
-renamed or modified draft. The later controller push replaces it with the
-actual private TPU training notebook; the draft itself consumes no TPU session.
+The controller requires the exact terminal private CPU draft code and title
+before its first push. The draft itself consumes no TPU session.
 
-Enable the Kaggle Secret `KAGGLE_API_TOKEN` on the private training notebook. Its value is
-read by `kaggle_secrets` inside the notebook and enters only the training
-subprocess environment. Authenticate the *local* official Kaggle client with
-its existing private credential configuration. Never put a token in a command,
-metadata, notebook, source bundle, relay dataset or local state file. The relay
-dataset must be dedicated to this one training job and remain private. Its
-first version is created by the first completed save, not by an empty bootstrap.
+Attach the dedicated **private** dataset
+`nerfviking/qwen21-fizgig-private-auth` containing only `kaggle_token` and its
+Kaggle dataset metadata. Copy the user's token file directly into the private
+upload staging folder without printing or inspecting its contents. The notebook
+reads that attached file, accepts one terminal LF or CRLF, rejects empty tokens
+or other whitespace, and places the token only in the notebook/worker process
+environment as `KAGGLE_API_TOKEN`. It does not use `kaggle_secrets`, write token
+bytes to outputs, or try another credential source if this input is missing or
+invalid. Keep this auth dataset private and separate from source, relay and
+training data. Authenticate the local official Kaggle client with its existing
+private credential configuration.
 
-The controller does **not** submit training until a local Secret readiness
-marker has been created. While it is absent, relay polling and any explicitly configured optional smoke
-gate continue indefinitely. After you have enabled
-the Secret on the private training notebook, create the marker named by
-`--secret-ready-file` with exactly this credential-free JSON (substitute your
-job and kernel identifiers):
+The relay dataset must be dedicated to this job and remain private. Its first
+version is created by the first completed save, not an empty bootstrap.
+
+For compatibility with existing controller state, `--secret-ready-file` and its
+credential-free JSON schema retain their original names. This marker now
+confirms that the private auth dataset has been uploaded and attached; it does
+not require a Kaggle Secret. While absent, relay polling and any explicitly
+configured optional smoke gate continue. Create the marker using this JSON
+with your job and kernel identifiers:
 
 ```json
 {
@@ -79,13 +78,12 @@ job and kernel identifiers):
 
 The controller reads the marker as a regular file, records the confirmation in
 `orchestrator-state.json` before its first notebook push, and then can survive
-a restart without requiring the marker again. No Secret value is stored there.
-The marker is a user confirmation; the local controller cannot inspect which
-Kaggle Secrets are enabled in the remote notebook settings.
+a restart without requiring the marker again. No credential value is stored there. The marker is an operator confirmation;
+the notebook validates the attached token file before training.
 
 The destination must be a new/empty folder separate from the current local job
 folder. Use this command after the private training-source dataset is ready;
-the controller can run before the Secret marker exists:
+the controller can run before the auth readiness marker exists:
 
 ```bash
 conda run --no-capture-output -n ai-toolkit python -m workers.kaggle_tpu.session_orchestrator \
@@ -142,7 +140,7 @@ ambiguous push. Kaggle quotas, batch TPU availability, processing latency and
 actual full-model TPU fit remain external acceptance conditions.
 
 `--poll-seconds` controls the local controller interval, including queue waits;
-`--poll-seconds 28800` checks every eight hours without setting a queue deadline.
+`--poll-seconds 3600` checks every hour without setting a queue deadline.
 The notebook's own five-second rank/deadline monitor remains active during TPU
 training. The first staged code cell records allocation time before dependency
 setup; session configuration injection preserves that timestamp.

@@ -5,6 +5,17 @@ cache, base/helper identities and qualified Kaggle runtime, launches through
 session establishes model fit and training behavior; failures remain visible
 and stop the complete launcher process group.
 
+Worker entrypoints select `USE_TORCH=1`, `USE_FLAX=0` and `USE_TF=0` before
+importing Diffusers or Transformers. This keeps unrelated Kaggle Flax/JAX and
+TensorFlow packages out of the PyTorch training import path without changing
+the pinned NumPy or runtime wheels. The notebook checks the real LoRA/Qwen
+imports in a CPU subprocess after dependency installation and preserves its
+traceback in `qwen21_import_preflight.log`; it loads no weights or TPU replicas.
+These flags use the [pinned Diffusers import controls](https://github.com/huggingface/diffusers/blob/c943837899b16cbae2f619b8dd4f7bb6f07dd81a/src/diffusers/utils/import_utils.py).
+The shared LoRA helper keeps annotation-only non-Qwen Diffusers model imports
+under `TYPE_CHECKING`; the worker continues using its Qwen-only namespace loader
+to avoid eagerly importing the full diffusion-model registry.
+
 The fixed contract is 40,000 completed optimizer updates, per-rank batch one,
 one accumulation step and global batch eight. Every rank owns the complete
 frozen ConvRot transformer and helper plus signed DoRA. The objective uses the
