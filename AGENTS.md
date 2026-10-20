@@ -11,6 +11,13 @@ Use the `ai-toolkit` Conda environment for all project Python commands:
 conda run -n ai-toolkit python ...
 ```
 
+# Build verification
+
+After changes that affect the UI or server build, run `npm run build` from
+`ui/` before finishing, even if the whole server cannot be restarted. An
+inability to restart the server is not a reason to skip the build. Report the
+build result and whether the server was restarted separately.
+
 # Network services
 
 This machine is behind a firewall and is accessed remotely over the local
