@@ -4,6 +4,9 @@ Open **AI assistant** with the robot icon at the top right of any toolkit screen
 after the page's action buttons. The drawer stays
 available across navigation. Chat supports image attachments, image previews,
 activity records, token usage, cancellation, and a new-conversation button.
+Function-call activity appears as small grey text showing only the function
+name and a chevron, collapsed by default. Click the row, or focus it with Tab
+and press Enter/Space, to expand its details and any image preview.
 Drag the handle on the drawer's left edge to resize it; the width is remembered
 in this browser. Arrow keys also adjust width, and double-click resets it.
 On small screens the drawer uses the full screen width.

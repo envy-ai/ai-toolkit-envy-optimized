@@ -3,7 +3,16 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { v4 as uuidv4 } from 'uuid';
-import { MdClose, MdSettings, MdSmartToy, MdStop, MdSend, MdAttachFile, MdDeleteOutline } from 'react-icons/md';
+import {
+  MdClose,
+  MdSettings,
+  MdSmartToy,
+  MdStop,
+  MdSend,
+  MdAttachFile,
+  MdDeleteOutline,
+  MdChevronRight,
+} from 'react-icons/md';
 import { apiClient } from '@/utils/api';
 import type {
   AssistantConfigurationState,
@@ -42,6 +51,26 @@ function MessageText({ text }: { text: string }) {
           part
         );
       })}
+    </>
+  );
+}
+
+function EntryContent({ entry }: { entry: Entry }) {
+  return (
+    <>
+      <div className="whitespace-pre-wrap break-words">
+        <MessageText text={entry.text} />
+      </div>
+      {entry.preview && (
+        <a href={entry.preview.url} target="_blank" rel="noopener noreferrer" className="mt-2 block">
+          <img
+            src={entry.preview.url}
+            alt={entry.preview.path.split(/[\\/]/).pop() || 'Observed image'}
+            loading="lazy"
+            className="max-h-64 w-full rounded-md object-contain"
+          />
+        </a>
+      )}
     </>
   );
 }
@@ -177,10 +206,7 @@ export default function AssistantPanel() {
       return;
     }
     const prompt =
-      input.trim() +
-      (attachments.length
-        ? `\nAttached images (local paths):\n${attachments.join('\n')}`
-        : '');
+      input.trim() + (attachments.length ? `\nAttached images (local paths):\n${attachments.join('\n')}` : '');
     const messages = entries
       .filter(entry => entry.role !== 'tool')
       .slice(-40)
@@ -433,29 +459,32 @@ export default function AssistantPanel() {
                   </div>
                 </div>
               )}
-              {entries.map(entry => (
-                <div
-                  key={entry.id}
-                  className={`mb-4 rounded-lg p-3 ${entry.role === 'user' ? 'ml-6 bg-blue-950' : entry.role === 'tool' ? 'border border-gray-700 bg-gray-950 text-xs text-gray-400' : 'mr-3 bg-gray-800 text-sm'}`}
-                >
-                  <p className="mb-1 text-xs font-medium uppercase tracking-wide text-gray-400">
-                    {entry.role === 'tool' ? 'Activity' : entry.role === 'user' ? 'You' : 'Assistant'}
-                  </p>
-                  <div className="whitespace-pre-wrap break-words">
-                    <MessageText text={entry.text} />
-                  </div>
-                  {entry.preview && (
-                    <a href={entry.preview.url} target="_blank" rel="noopener noreferrer" className="mt-2 block">
-                      <img
-                        src={entry.preview.url}
-                        alt={entry.preview.path.split(/[\\/]/).pop() || 'Observed image'}
-                        loading="lazy"
-                        className="max-h-64 w-full rounded-md object-contain"
+              {entries.map(entry =>
+                entry.role === 'tool' ? (
+                  <details key={entry.id} className="group mb-3 text-xs text-gray-400">
+                    <summary className="flex cursor-pointer list-none items-center gap-1 rounded py-1 hover:text-gray-300 focus-visible:outline focus-visible:outline-blue-400 [&::-webkit-details-marker]:hidden">
+                      <MdChevronRight
+                        aria-hidden="true"
+                        className="h-3 w-3 shrink-0 transition-transform group-open:rotate-90"
                       />
-                    </a>
-                  )}
-                </div>
-              ))}
+                      <span className="truncate">{entry.text.replace(/^Declined /, '').split(/[:\s]/, 1)[0]}</span>
+                    </summary>
+                    <div className="mt-1 max-h-64 overflow-auto pl-4">
+                      <EntryContent entry={entry} />
+                    </div>
+                  </details>
+                ) : (
+                  <div
+                    key={entry.id}
+                    className={`mb-4 rounded-lg p-3 ${entry.role === 'user' ? 'ml-6 bg-blue-950' : 'mr-3 bg-gray-800 text-sm'}`}
+                  >
+                    <p className="mb-1 text-xs font-medium uppercase tracking-wide text-gray-400">
+                      {entry.role === 'user' ? 'You' : 'Assistant'}
+                    </p>
+                    <EntryContent entry={entry} />
+                  </div>
+                ),
+              )}
               {review && (
                 <section
                   aria-label="Review assistant action"
