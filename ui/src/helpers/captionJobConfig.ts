@@ -1,5 +1,53 @@
-import { CaptionJobConfig } from "@/types";
+import { CaptionJobConfig, CaptionProcessConfig } from "@/types";
 import { captionerTypes } from "./captionOptions";
+import { API_CAPTIONER, assertNoCaptionCredentials } from '../../cron/captionApiConfig';
+
+export const captionPreferenceFields = [
+  'model_name_or_path', 'model_name_or_path2', 'dtype', 'quantize', 'qtype', 'low_vram',
+  'extensions', 'recaption', 'compile', 'caption_prompt', 'max_res', 'max_new_tokens',
+  'fixed_caption', 'caption_format', 'extract_vocals_before_transcribe', 'keep_timestamps',
+  'caption_extension', 'thinking', 'batch_size', 'layer_offloading', 'layer_offloading_percent',
+  'loras', 'mtp', 'mtp_depth', 'cuda_graph', 'vision_bf16', 'video_fps', 'system_prompt',
+  'api_url', 'api_credential_id', 'api_timeout', 'api_max_tokens_field', 'temperature', 'top_p',
+  'frequency_penalty', 'presence_penalty', 'seed', 'stop', 'device',
+] as const;
+
+export interface CaptionJobPreferences {
+  type: string;
+  caption: Omit<CaptionProcessConfig['caption'], 'path_to_caption'>;
+  gpu_ids: string | null;
+}
+
+/** Dataset/job identity and plaintext credentials never belong in shared defaults. */
+export function createCaptionJobPreferences(config: CaptionJobConfig, gpuIDs: string | null): CaptionJobPreferences {
+  assertNoCaptionCredentials(config);
+  const process = config.config.process[0];
+  const caption = Object.fromEntries(Object.entries(process.caption)
+    .filter(([key]) => captionPreferenceFields.includes(key as typeof captionPreferenceFields[number])));
+  return JSON.parse(JSON.stringify({ type: process.type, caption, gpu_ids: gpuIDs }));
+}
+
+export function restoreCaptionJobPreferences(
+  preferences: CaptionJobPreferences | null,
+  datasetPath: string,
+  captionExt?: string,
+): CaptionJobConfig {
+  const config: CaptionJobConfig = JSON.parse(JSON.stringify(defaultCaptionJobConfig));
+  const process = config.config.process[0];
+  if (preferences) {
+    process.type = preferences.type;
+    process.device = preferences.type === API_CAPTIONER ? 'cpu' : process.device;
+    process.caption = {
+      ...process.caption,
+      ...(preferences.type === API_CAPTIONER
+        ? { max_new_tokens: 4096, api_timeout: 300, api_max_tokens_field: 'max_tokens' as const } : {}),
+      ...preferences.caption,
+    };
+  }
+  process.caption.path_to_caption = datasetPath;
+  if (captionExt) process.caption.caption_extension = captionExt;
+  return config;
+}
 
 
 export const defaultCaptionJobConfig: CaptionJobConfig = {

@@ -38,6 +38,34 @@ function loadCredentials(root) {
     id === './captionApiConfig' ? config : originalRequire(id));
 }
 
+function loadCaptionPreferenceModules(root, prisma, readCredential = async () => 'fixture-private-key') {
+  const config = loadConfig();
+  const options = loadTypeScript(path.resolve(__dirname, '../src/helpers/captionOptions.ts'), (id, originalRequire) => {
+    if (id === '@/types') return {};
+    if (id === '../../cron/captionApiConfig') return config;
+    return originalRequire(id);
+  });
+  const jobConfig = loadTypeScript(path.resolve(__dirname, '../src/helpers/captionJobConfig.ts'), (id, originalRequire) => {
+    if (id === '@/types') return {};
+    if (id === './captionOptions') return options;
+    if (id === '../../cron/captionApiConfig') return config;
+    return originalRequire(id);
+  });
+  const credentials = { readCaptionApiCredential: readCredential };
+  const server = loadTypeScript(path.resolve(__dirname, '../src/server/captionSettings.ts'), (id, originalRequire) => {
+    if (id === '@/server/prisma') return { __esModule: true, default: prisma };
+    if (id === '@/paths') return { TOOLKIT_ROOT: root };
+    if (id === '@/helpers/captionOptions') return options;
+    if (id === '@/helpers/captionJobConfig') return jobConfig;
+    if (id === '../../cron/captionApiConfig') return config;
+    if (id === '../../cron/captionApiCredentials') return credentials;
+    return originalRequire(id);
+  });
+  const route = loadTypeScript(path.resolve(__dirname, '../src/app/api/caption/settings/route.ts'), (id, originalRequire) =>
+    id === '@/server/captionSettings' ? server : originalRequire(id));
+  return { config, options, jobConfig, server, route };
+}
+
 function apiCaptionConfig(root, credentialId) {
   return {
     job: 'extension',
@@ -173,7 +201,7 @@ test('captioner selection exposes API defaults while leaving recaption off for e
   const options = loadTypeScript(path.resolve(__dirname, '../src/helpers/captionOptions.ts'), (id, originalRequire) =>
     id === '../../cron/captionApiConfig' ? apiConfig : originalRequire(id));
   const configModule = loadTypeScript(path.resolve(__dirname, '../src/helpers/captionJobConfig.ts'), (id, originalRequire) =>
-    id === './captionOptions' ? options : originalRequire(id));
+    id === './captionOptions' ? options : id === '../../cron/captionApiConfig' ? apiConfig : originalRequire(id));
   const initial = JSON.parse(JSON.stringify(configModule.defaultCaptionJobConfig));
   assert.equal(initial.config.process[0].caption.recaption, false);
   const set = {};
@@ -183,6 +211,162 @@ test('captioner selection exposes API defaults while leaving recaption off for e
   assert.equal(set['config.process[0].caption.api_max_tokens_field'], 'max_tokens');
   assert.equal(set['config.process[0].caption.api_credential_id'], undefined);
   assert.ok(set['config.process[0].caption.caption_prompt'].length > 0);
+});
+
+test('remembered caption preferences round-trip all safe API settings and restore current dataset identity', async () => {
+  const root = fs.mkdtempSync(path.join(tempRoot, 'api-caption-settings-test-'));
+  const rows = new Map();
+  const prisma = { settings: {
+    findUnique: async ({ where }) => rows.has(where.key) ? { key: where.key, value: rows.get(where.key) } : null,
+    upsert: async ({ where, create, update }) => {
+      rows.set(where.key, rows.has(where.key) ? update.value : create.value);
+    },
+  } };
+  const credentialCalls = [];
+  const modules = loadCaptionPreferenceModules(root, prisma, async (toolkitRoot, id, apiUrl) => {
+    credentialCalls.push({ toolkitRoot, id, apiUrl });
+    if (apiUrl !== 'http://127.0.0.1:34343/v1') throw new Error('saved key belongs to a different endpoint');
+    return 'fixture-private-key';
+  });
+  const credentialId = '123e4567-e89b-42d3-a456-426614174000';
+  const job = apiCaptionConfig(root, credentialId);
+  Object.assign(job.config.process[0].caption, {
+    temperature: 0.25,
+    top_p: 0.8,
+    frequency_penalty: -0.2,
+    presence_penalty: 0.3,
+    seed: 7,
+    stop: ['END'],
+  });
+  const preferences = modules.jobConfig.createCaptionJobPreferences(job, 'cpu');
+  assert.equal(preferences.type, 'APICaptioner');
+  assert.equal(preferences.gpu_ids, 'cpu');
+  assert.equal(preferences.caption.api_credential_id, credentialId);
+  assert.equal(preferences.caption.api_timeout, 3);
+  assert.equal(preferences.caption.max_new_tokens, 4096);
+  assert.equal(preferences.caption.temperature, 0.25);
+  assert.equal(preferences.caption.top_p, 0.8);
+  assert.equal(preferences.caption.frequency_penalty, -0.2);
+  assert.equal(preferences.caption.presence_penalty, 0.3);
+  assert.equal(preferences.caption.seed, 7);
+  assert.deepEqual(preferences.caption.stop, ['END']);
+  assert.equal(Object.hasOwn(preferences.caption, 'path_to_caption'), false);
+
+  const initial = await modules.route.GET();
+  assert.deepEqual(await initial.json(), { preferences: null });
+  assert.equal(initial.headers.get('cache-control'), 'no-store');
+  const saved = await modules.route.POST(new NextRequest('http://localhost/api/caption/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(preferences),
+  }));
+  assert.equal(saved.status, 200);
+  assert.equal(saved.headers.get('cache-control'), 'no-store');
+  assert.deepEqual((await saved.json()).preferences, preferences);
+  assert.equal(rows.size, 1);
+  assert.equal([...rows.keys()][0], 'CAPTION_DEFAULTS');
+  const stored = JSON.parse([...rows.values()][0]);
+  assert.deepEqual(stored, preferences);
+  assert.doesNotMatch(JSON.stringify(stored), /fixture-private-key|api_key|path_to_caption/i);
+
+  const restored = modules.jobConfig.restoreCaptionJobPreferences(preferences, '/current/dataset', 'caption-json');
+  assert.equal(restored.config.process[0].type, 'APICaptioner');
+  assert.equal(restored.config.process[0].caption.path_to_caption, '/current/dataset');
+  assert.equal(restored.config.process[0].caption.caption_extension, 'caption-json');
+  assert.equal(restored.config.process[0].caption.api_credential_id, credentialId);
+  assert.equal(restored.config.process[0].caption.caption_prompt, 'Fixture prompt');
+  assert.deepEqual(credentialCalls, [{ toolkitRoot: root, id: credentialId, apiUrl: 'http://127.0.0.1:34343/v1' }]);
+
+  const loaded = await modules.route.GET();
+  assert.deepEqual((await loaded.json()).preferences, preferences);
+  const mismatchedEndpoint = structuredClone(preferences);
+  mismatchedEndpoint.caption.api_url = 'http://127.0.0.1:34344/v1';
+  const rejectedCredential = await modules.route.POST(new NextRequest('http://localhost/api/caption/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(mismatchedEndpoint),
+  }));
+  assert.equal(rejectedCredential.status, 400);
+  assert.doesNotMatch(JSON.stringify(await rejectedCredential.json()), /fixture-private-key|34344/);
+  assert.deepEqual(JSON.parse([...rows.values()][0]), preferences, 'failed validation leaves remembered settings intact');
+
+  const rawKey = structuredClone(preferences);
+  rawKey.caption.api_key = 'plaintext-secret-fixture';
+  const rejectedSecret = await modules.route.POST(new NextRequest('http://localhost/api/caption/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(rawKey),
+  }));
+  assert.equal(rejectedSecret.status, 400);
+  assert.doesNotMatch(JSON.stringify(await rejectedSecret.json()), /plaintext-secret-fixture/);
+  assert.deepEqual(JSON.parse([...rows.values()][0]), preferences, 'raw credential is never persisted');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('remembered settings remain readable when their private credential file is missing', async () => {
+  const root = fs.mkdtempSync(path.join(tempRoot, 'api-caption-settings-missing-key-test-'));
+  const preferences = {
+    type: 'APICaptioner', gpu_ids: 'cpu', caption: {
+      api_url: 'http://127.0.0.1:34343/v1', api_credential_id: '123e4567-e89b-42d3-a456-426614174000',
+      model_name_or_path: 'fixture-model', system_prompt: 'Fixture system', caption_prompt: 'Fixture prompt',
+      max_new_tokens: 4096, api_timeout: 3, api_max_tokens_field: 'max_tokens',
+      caption_extension: 'txt', extensions: ['png'],
+    },
+  };
+  const prisma = { settings: { findUnique: async () => ({ key: 'CAPTION_DEFAULTS', value: JSON.stringify(preferences) }) } };
+  let credentialLookups = 0;
+  const modules = loadCaptionPreferenceModules(root, prisma, async () => {
+    credentialLookups += 1;
+    throw new Error('fixture private credential file is missing');
+  });
+  try {
+    const response = await modules.route.GET();
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).preferences, preferences);
+    assert.equal(credentialLookups, 0, 'GET must allow the user to replace or clear a stale key reference');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('caption settings distinguish validation errors from sanitized persistence failures', async () => {
+  const root = fs.mkdtempSync(path.join(tempRoot, 'api-caption-settings-write-error-test-'));
+  let writes = 0;
+  const prisma = { settings: {
+    findUnique: async () => null,
+    upsert: async () => {
+      writes += 1;
+      throw Object.assign(new Error('fixture database private detail'), { code: 'P1001' });
+    },
+  } };
+  const modules = loadCaptionPreferenceModules(root, prisma);
+  const preferences = {
+    type: 'APICaptioner', gpu_ids: 'cpu', caption: {
+      api_url: 'http://127.0.0.1:34343/v1', model_name_or_path: 'fixture-model',
+      system_prompt: 'Fixture system', caption_prompt: 'Fixture prompt',
+      max_new_tokens: 4096, api_timeout: 3, api_max_tokens_field: 'max_tokens',
+      caption_extension: 'txt', extensions: ['png'],
+    },
+  };
+  const logged = [];
+  const originalError = console.error;
+  console.error = (...args) => logged.push(args.map(String).join(' '));
+  try {
+    const invalid = structuredClone(preferences);
+    invalid.caption.path_to_caption = '/must-not-be-remembered';
+    const validation = await modules.route.POST(new NextRequest('http://localhost/api/caption/settings', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(invalid),
+    }));
+    assert.equal(validation.status, 400);
+    assert.equal(writes, 0, 'validation must fail before persistence');
+
+    const persistence = await modules.route.POST(new NextRequest('http://localhost/api/caption/settings', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(preferences),
+    }));
+    assert.equal(persistence.status, 500);
+    const persistenceBody = JSON.stringify(await persistence.json());
+    assert.match(persistenceBody, /P1001/);
+    assert.doesNotMatch(persistenceBody, /fixture database private detail/);
+    assert.doesNotMatch(logged.join(' '), /fixture database private detail/);
+    assert.equal(writes, 1);
+  } finally {
+    console.error = originalError;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('caption job API forces CPU queue and never stores raw keys in job rows or responses', async () => {

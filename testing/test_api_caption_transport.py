@@ -4,9 +4,12 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import runpy
 import ssl
+import subprocess
 import sys
+import tempfile
 import threading
 import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -318,3 +321,110 @@ def test_api_captioner_defaults_to_preserving_existing_sidecars_and_recaptions_w
     assert overwrite_run.file_paths == [str(image)]
     overwrite_run.save_caption_for_file(str(image), "fresh API caption")
     assert image.with_suffix(".txt").read_text(encoding="utf-8") == "fresh API caption"
+
+
+def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports():
+    """Exercise the real CLI bootstrap while keeping inference local and synthetic."""
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[1]
+    (repo_root / "tmp").mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="api-caption-cli-", dir=repo_root / "tmp") as work_dir:
+        work = Path(work_dir)
+        image_dir = work / "images"
+        image_dir.mkdir()
+        Image.new("RGBA", (9, 5), (30, 90, 180, 123)).save(image_dir / "fixture.png")
+        config_path = work / "job.yaml"
+
+        with CaptionServer() as server:
+            config_path.write_text(yaml.safe_dump({
+                "job": "extension",
+                "config": {
+                    "name": "offline-api-caption-cli-regression",
+                    "process": [{
+                        "type": "APICaptioner",
+                        "sqlite_db_path": str(work / "job.sqlite"),
+                        "caption": {
+                            "path_to_caption": str(image_dir),
+                            "extensions": ["png"],
+                            "caption_extension": "txt",
+                            "model_name_or_path": "fixture-model",
+                            "api_url": server.url,
+                            "system_prompt": "Return one concise caption.",
+                            "caption_prompt": "Describe the synthetic fixture.",
+                            "max_new_tokens": 48,
+                            "api_timeout": 5,
+                        },
+                    }],
+                },
+            }), encoding="utf-8")
+
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = ""
+            env["AITK_API_CAPTION_KEY"] = ""
+            # Prevent a developer shell's provider credentials from reaching this test.
+            for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "AITK_JOB_ID", "SEED"):
+                env.pop(key, None)
+            result = subprocess.run(
+                ["conda", "run", "-n", "ai-toolkit", "python", "run.py", str(config_path)],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=150,
+                check=False,
+            )
+
+        assert result.returncode == 0, (
+            f"run.py exited {result.returncode}; stderr tail:\n{result.stderr[-5000:]}\n"
+            f"stdout tail:\n{result.stdout[-5000:]}"
+        )
+        assert (image_dir / "fixture.txt").read_text(encoding="utf-8") == "a green glass vase"
+        assert len(server.requests) == 1
+        request = server.requests[0]
+        assert request["path"] == "/v1/chat/completions"
+        assert request["authorization"] is None
+        assert request["payload"]["model"] == "fixture-model"
+        assert request["payload"]["max_tokens"] == 48
+
+
+def test_extension_job_only_bypasses_global_discovery_for_api_captioner(monkeypatch):
+    import importlib
+    from collections import OrderedDict
+
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    module = importlib.import_module("jobs.ExtensionJob")
+    discovered = []
+    loaded = []
+    api_process = object()
+    global_process = object()
+
+    def global_discovery():
+        discovered.append(True)
+        return {"APICaptioner": global_process, "OtherExtension": global_process}
+
+    def capture_load_processes(self, process_dict):
+        loaded.append(process_dict)
+
+    monkeypatch.setattr(module, "get_all_extensions_process_dict", global_discovery)
+    monkeypatch.setattr(module.BaseJob, "load_processes", capture_load_processes)
+    from extensions_built_in.captioner import APICaptionerExtension
+    monkeypatch.setattr(APICaptionerExtension, "get_process", classmethod(lambda cls: api_process))
+
+    def make_job(processes):
+        return module.ExtensionJob(OrderedDict([
+            ("job", "extension"),
+            ("config", OrderedDict([("name", "resolver-fixture"), ("process", processes)])),
+        ]))
+
+    make_job([{"type": "APICaptioner"}, {"type": "APICaptioner"}])
+    assert loaded[-1] == {"APICaptioner": api_process}
+    assert discovered == []
+
+    make_job([{"type": "APICaptioner"}, {"type": "OtherExtension"}])
+    assert loaded[-1] == {"APICaptioner": global_process, "OtherExtension": global_process}
+    make_job([{"type": "OtherExtension"}])
+    assert loaded[-1] == {"APICaptioner": global_process, "OtherExtension": global_process}
+    assert discovered == [True, True]
