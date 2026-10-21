@@ -118,11 +118,40 @@ restarted independently of the queue worker; the new-job page and the client
 asset containing the Turbo workflow choice both returned HTTP 200. No browser
 was connected for an interactive selector check.
 
+## Ordinary training batch contract and DoRA GPU check
+
+The ordinary trainer now counts `AdvancedPromptEmbeds` list entries as examples,
+preserving each FIBO2 entry's six conditioning bundles. The container's split
+method also returns its results. Three CPU regressions pass through the shared
+prediction entry point, including CFG, cached negatives, unequal prompt lengths,
+backpropagation and legacy embedding layouts.
+
+Real-checkpoint GPU diagnosis found a second issue: ordinary DoRA produced
+`0/0` scales on the 384 zero-padded rows of the first noise-refiner `w13`
+projection. Latents and encoder outputs were finite before that projection.
+Both ordinary DoRA norm paths now use identity scaling for exact zero norms,
+with safe division before selection. The three-test DoRA suite checks finite
+backward, neutral initialization with bias, and unchanged nonzero-row ratios.
+
+An isolated RTX 4090 run used the reported ConvRot Dev transformer, ConvRot
+Heretic Qwen3-VL encoder and `flux2-vae_small.safetensors`, BF16, DoRA rank/alpha
+64, gradient checkpointing, AdamW8bit and differential guidance 3. Two steps
+on one synthetic 512-square image produced losses `0.1995` and `0.2947`.
+Separate artifact verification found all 1,044 saved adapter tensors finite,
+with nonzero optimizer updates in all 261 initially-zero up-weight tensors.
+Matching source quantization wrote no redundant module caches.
+
+Compilation and sampling were disabled for this bounded training check. The
+16 GiB/no-swap host-memory scope was OOM-killed after checkpoint/optimizer save
+messages; the saved adapter passed a separate bounded verification. This is
+evidence of finite forward/backward, optimizer updates and adapter export,
+not a clean end-to-end shutdown within 16 GiB. Artifacts and diagnostics live
+under `tmp/fibo2-batch-gpu-smoke/`. No user job or service was restarted.
+
 ## Qualification limits
 
-Full-checkpoint CUDA training, CUDA quantized forward/backward, normal-resolution
-GPU fit, and trained image quality remain unverified. The final resource check
-found active Toolkit and ComfyUI jobs with about 4 GB free GPU memory. No user
-job was interrupted and no Comfy model was unloaded for these checks. This is
-why the user guide labels the integration experimental. CPU/synthetic evidence
-and the real encoder/VAE checks do not replace that GPU qualification.
+Longer or resumed CUDA training, compiled training, higher-resolution GPU fit,
+and trained image quality remain unverified. The bounded check above does not
+establish a 16 GiB host-memory fit. Earlier qualification found active Toolkit
+and ComfyUI jobs with about 4 GB free GPU memory; those jobs were not interrupted
+for the earlier CPU checks. The integration remains experimental.

@@ -148,6 +148,15 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         weight_norm = torch.linalg.norm(weight, dim=1)
         return weight_norm
 
+    def _scale_from_weight_norm(self, weight_norm):
+        # Structural zero rows (e.g. padded FIBO2 MLPs) have no direction to
+        # normalize. Keep their initial adapter neutral, including any bias.
+        # Guard the denominator before division so backward never sees 0/0;
+        # every nonzero row retains the ordinary DoRA ratio exactly.
+        zero_norm = weight_norm == 0
+        denominator = torch.where(zero_norm, torch.ones_like(weight_norm), weight_norm)
+        return torch.where(zero_norm, torch.ones_like(weight_norm), self.magnitude / denominator)
+
     def get_dora_scale(self, scaled_lora_weight):
         # DoRA explicitly treats the adapted weight norm as detached. Keeping
         # this under no_grad avoids building a graph through full base weights.
@@ -165,7 +174,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             self.magnitude.device,
             dtype=self.magnitude.dtype,
         )
-        return self.magnitude / weight_norm
+        return self._scale_from_weight_norm(weight_norm)
 
     def get_dora_scale_from_low_rank(self, multiplier_scale):
         # Same detached DoRA norm as get_dora_scale(), but avoid materializing the
@@ -191,7 +200,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             self.magnitude.device,
             dtype=self.magnitude.dtype,
         )
-        return self.magnitude / weight_norm
+        return self._scale_from_weight_norm(weight_norm)
 
     def apply_dora(self, x, scaled_lora_weight):
         # ref https://github.com/huggingface/peft/blob/1e6d1d73a0850223b0916052fd8d2382a90eae5a/src/peft/tuners/lora/layer.py#L192

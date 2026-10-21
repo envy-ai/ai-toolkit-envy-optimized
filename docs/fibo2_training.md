@@ -116,6 +116,11 @@ In image sliders Control Dataset 1 is the negative target, never an edit source.
 Fizgig, SliderSpace and KTO retain their text-to-image restrictions. Preservation
 targets have their own captions and are independent of edit sources.
 
+Each prompt retains six conditioning bundles inside one `AdvancedPromptEmbeds`
+list entry. The outer list determines the sample batch size; the bundle axis
+does not. The ordinary trainer's shared prediction/CFG entry point preserves
+this layout, including cached embeddings and unequal prompt lengths.
+
 CFG negatives are text-only VLM inputs. An empty negative is the trained JSON
 null caption; an edit's positive and negative predictions share its clean
 reference latents. Text-to-image glyph prompts have base/glyph conditioning

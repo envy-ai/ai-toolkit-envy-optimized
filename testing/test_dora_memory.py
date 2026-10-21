@@ -68,6 +68,57 @@ class DoRAMemoryTests(unittest.TestCase):
         self.assertIsNotNone(module.lora_up.weight.grad)
         self.assertIsNotNone(module.magnitude.grad)
 
+    def test_zero_base_rows_have_neutral_finite_dora_scale(self):
+        network = FakeNetwork()
+        linear = torch.nn.Linear(3, 2, bias=True)
+        with torch.no_grad():
+            linear.weight[0].zero_()
+            linear.weight[1].copy_(torch.tensor([1.0, -2.0, 3.0]))
+            linear.bias.copy_(torch.tensor([2.0, -1.0]))
+
+        module = DoRAModule(
+            "zero-row",
+            linear,
+            lora_dim=2,
+            alpha=2,
+            network=network,
+            dora_scale_chunk_size=1,
+        )
+        module.org_forward = linear.forward
+        x = torch.tensor([[0.5, -1.0, 2.0], [1.0, 0.0, -0.5]], requires_grad=True)
+
+        dense_scale = module.get_dora_scale(torch.zeros_like(linear.weight))
+        chunked_scale = module.get_dora_scale_from_low_rank(
+            network.torch_multiplier.mean()
+        )
+        self.assertTrue(torch.isfinite(dense_scale).all())
+        self.assertTrue(torch.isfinite(chunked_scale).all())
+        torch.testing.assert_close(dense_scale, chunked_scale)
+        torch.testing.assert_close(dense_scale, torch.ones_like(dense_scale))
+
+        output = module.forward(x)
+        expected = torch.nn.functional.linear(x, linear.weight, linear.bias)
+        torch.testing.assert_close(output, expected)
+        output.square().sum().backward()
+        self.assertTrue(torch.isfinite(x.grad).all())
+        for parameter in (module.lora_up.weight, module.lora_down.weight, module.magnitude):
+            self.assertIsNotNone(parameter.grad)
+            self.assertTrue(torch.isfinite(parameter.grad).all())
+
+        # Once the low-rank delta is nonzero, nonzero rows keep the original
+        # exact magnitude/norm arithmetic in both dense and chunked paths.
+        with torch.no_grad():
+            module.lora_up.weight[1].fill_(0.25)
+            delta = module.lora_up.weight @ module.lora_down.weight
+            adapted_norm = torch.linalg.norm(linear.weight + delta, dim=1)
+            previous_ratio = module.magnitude / adapted_norm
+            dense_scale = module.get_dora_scale(delta)
+            chunked_scale = module.get_dora_scale_from_low_rank(
+                network.torch_multiplier.mean()
+            )
+        torch.testing.assert_close(dense_scale[1], previous_ratio[1], rtol=0, atol=0)
+        torch.testing.assert_close(chunked_scale[1], previous_ratio[1], rtol=0, atol=0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,7 @@ from toolkit.config_modules import ModelConfig, GenerateImageConfig, ModelArch
 from toolkit.models.decorator import Decorator
 from toolkit.paths import KEYMAPS_ROOT, get_path
 from toolkit.prompt_utils import inject_trigger_into_prompt, PromptEmbeds, concat_prompt_embeds
+from toolkit.advanced_prompt_embeds import AdvancedPromptEmbeds
 from toolkit.reference_adapter import ReferenceAdapter
 from toolkit.sd_device_states_presets import empty_preset
 from toolkit.train_tools import get_torch_dtype, apply_noise_offset
@@ -940,7 +941,11 @@ class BaseModel:
         # then we are doing it, otherwise we are not and takes half the time.
         do_classifier_free_guidance = True
 
-        if isinstance(text_embeddings.text_embeds, list):
+        if isinstance(text_embeddings, AdvancedPromptEmbeds):
+            # Advanced containers store one list item per example, regardless
+            # of tensor rank (FIBO2 keeps six text bundles in each item).
+            te_batch_size = len(text_embeddings.text_embeds)
+        elif isinstance(text_embeddings.text_embeds, list):
             if len(text_embeddings.text_embeds[0].shape) == 2:
                 # handle list of embeddings
                 te_batch_size = len(text_embeddings.text_embeds)
