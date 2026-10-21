@@ -369,6 +369,9 @@ def quantize_module(
     rather than burning every cpu core."""
     from toolkit.dequantize import patch_dequantization_on_save
 
+    if hasattr(module, "aitk_quantization_from_checkpoint"):
+        module.aitk_quantization_from_checkpoint = False
+        module.aitk_checkpoint_quantization_retained = False
     patch_dequantization_on_save(module)
     quantization_type = get_qtype(qtype)
     exclude = list(exclude or [])
@@ -537,6 +540,9 @@ def attach_ara_and_quantize(
     from toolkit.config_modules import NetworkConfig
     from toolkit.lora_special import LoRASpecialNetwork
 
+    if hasattr(model_to_quantize, "aitk_quantization_from_checkpoint"):
+        model_to_quantize.aitk_quantization_from_checkpoint = False
+        model_to_quantize.aitk_checkpoint_quantization_retained = False
     exclude_modules = list(exclude or [])
     load_lora_path = ara_path
 

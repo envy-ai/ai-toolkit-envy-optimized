@@ -47,6 +47,11 @@ format with `qtype: convrot8` for the local int8 checkpoint. Selecting a differe
 supported quantization format is an explicit conversion choice. Full finetuning
 requires an unquantized base and has a substantially different memory cost;
 the Hunyuan immutable shared-weight handoff is not supported here.
+When a checkpoint already uses the selected quantization and the loader reports
+`Checkpoint is pre-quantized (...); keeping it`, no redundant persistent module
+cache is written. This applies to both the transformer and text encoder, even
+with **Cache Quantized Models** enabled. Fresh quantization and conversion to a
+different format can still be cached. Existing cache files are left in place.
 An accuracy-recovery adapter can be used with the persistent quantized-module
 cache disabled. FIBO2 rejects combining that adapter with the persistent cache
 to prevent stale or doubly applied recovery weights; ordinary quantized caching

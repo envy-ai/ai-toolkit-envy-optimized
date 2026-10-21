@@ -1930,6 +1930,11 @@ class BaseModel:
     ):
         if cache_path is None:
             return
+        if getattr(module, "aitk_checkpoint_quantization_retained", False):
+            self.print_and_status_update(
+                f"Skipping quantized {component_name} cache: matching checkpoint quantization was retained"
+            )
+            return
 
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         tmp_cache_path = cache_path + ".tmp"

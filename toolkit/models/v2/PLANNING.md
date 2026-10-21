@@ -425,6 +425,14 @@ Loading policy moved out of the holders into the mixin. The surface:
   model_config for roles "transformer" / "te" / "vae" (qtype/qtype_te, ARA
   recombination, offload percents, low_vram, te/vae devices).
 
+Persistent module caching distinguishes checkpoint quantization retained as-is
+from quantization performed by the toolkit. The loader records checkpoint
+provenance, and the matching `aitk_post_load` branch marks it retained. The
+shared cache writer skips retained checkpoint quantization before CPU parking,
+state-dict patch changes or filesystem writes. Quantization/conversion clears
+that provenance so the resulting module remains cacheable, including after
+repeated post-load calls. Cache reads and existing cache files are unchanged.
+
 All holders converted (transformer + TE quantize/offload/placement blocks
 deleted): krea2, z_image, qwen_image, chroma ×2, flux_kontext, f_light,
 nucleus, zeta_chroma, z_image_l2p, wan21 (+ subclasses), wan22_14b (dual:

@@ -125,6 +125,10 @@ class OstrisModelMixin:
     # ---- state set by the loader / quantizer ----
     aitk_is_quantized: bool = False
     aitk_qtype: Optional[str] = None
+    # Quantized at source, rather than produced by a later quantization pass.
+    # The retained flag is confirmed only by a matching post-load policy.
+    aitk_quantization_from_checkpoint: bool = False
+    aitk_checkpoint_quantization_retained: bool = False
 
     # ------------------------------------------------------------------
     # extendable hooks
@@ -324,6 +328,7 @@ class OstrisModelMixin:
         if qtype is not None and "|" in qtype:
             qtype, ara_path = qtype.split("|", 1)
 
+        self.aitk_checkpoint_quantization_retained = False
         # pre-quantized checkpoint: keep the shipped quantization IFF it
         # exactly matches the request. Anything else — no quantization
         # requested (full finetuning), a different backend, or an ARA —
@@ -354,10 +359,12 @@ class OstrisModelMixin:
                 and qtype in shipped
             )
             if matches:
+                self.aitk_checkpoint_quantization_retained = self.aitk_quantization_from_checkpoint
                 status_fn(
                     f"Checkpoint is pre-quantized ({'/'.join(shipped)}); keeping it"
                 )
             else:
+                self.aitk_quantization_from_checkpoint = False
                 target_is_ostris = qtype is not None and isinstance(
                     get_qtype(qtype), ostristype
                 )
@@ -378,6 +385,7 @@ class OstrisModelMixin:
                 self.aitk_qtype = None
 
         if qtype and not getattr(self, "aitk_is_quantized", False):
+            self.aitk_quantization_from_checkpoint = False
             from toolkit.util.quantize import (
                 attach_ara_and_quantize,
                 quantize_module,
@@ -702,6 +710,7 @@ class OstrisModelMixin:
                     if isinstance(m, OstrisLinear) and m.bias is not None:
                         m.bias.data = m.bias.data.to(dtype=dtype)
             model.aitk_is_quantized = True
+            model.aitk_quantization_from_checkpoint = True
         elif cls.aitk_cast_on_load:
             for key, value in state_dict.items():
                 if value.is_floating_point():
@@ -935,6 +944,8 @@ class OstrisModelMixin:
         from toolkit.dequantize import patch_dequantization_on_save
         from toolkit.util.quantize import get_qtype, quantize
 
+        self.aitk_quantization_from_checkpoint = False
+        self.aitk_checkpoint_quantization_retained = False
         # make full-model saves emit plain full precision weights
         patch_dequantization_on_save(self)
 
