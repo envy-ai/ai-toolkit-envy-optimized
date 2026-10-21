@@ -145,7 +145,11 @@ class AdvancedPromptEmbeds:
                 raise ValueError(
                     f"Cannot save key {key!r}: expected list of length 1, got {len(value)}"
                 )
-            data[key] = value[0]
+            # Safetensors requires independent contiguous storage per key.
+            # Snapshot on CPU without cloning live aliases on the GPU.
+            data[key] = value[0].detach().to(
+                device="cpu", copy=True, memory_format=torch.contiguous_format
+            )
         os.makedirs(os.path.dirname(path), exist_ok=True)
         save_file(data, path, metadata=metadata)
 

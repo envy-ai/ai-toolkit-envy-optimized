@@ -66,8 +66,8 @@ def make_model():
 
 def cached_single_prompt(embeds, index, path):
     single = AdvancedPromptEmbeds(
-        text_embeds=[embeds.text_embeds[index].clone()],
-        base_text_embeds=[embeds.base_text_embeds[index].clone()],
+        text_embeds=[embeds.text_embeds[index]],
+        base_text_embeds=[embeds.base_text_embeds[index]],
     )
     single.save(str(path))
     return AdvancedPromptEmbeds.load(str(path))
@@ -80,6 +80,9 @@ class Fibo2PredictNoiseBatchTests(unittest.TestCase):
         negative = model.get_prompt_embeds('', is_unconditional=True)
 
         with tempfile.TemporaryDirectory(dir='tmp') as directory:
+            positive = cached_single_prompt(
+                positive, 0, Path(directory) / 'positive.safetensors'
+            )
             negative = cached_single_prompt(
                 negative, 0, Path(directory) / 'negative.safetensors'
             )

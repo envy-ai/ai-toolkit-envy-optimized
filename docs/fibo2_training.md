@@ -120,6 +120,10 @@ Each prompt retains six conditioning bundles inside one `AdvancedPromptEmbeds`
 list entry. The outer list determines the sample batch size; the bundle axis
 does not. The ordinary trainer's shared prediction/CFG entry point preserves
 this layout, including cached embeddings and unequal prompt lengths.
+When base and glyph conditioning are identical, their live tensors can share
+storage. Saving the prompt cache takes independent contiguous CPU snapshots
+for every key without changing those live aliases, tensor dtypes or cache
+metadata. Existing caches keep the same format.
 
 CFG negatives are text-only VLM inputs. An empty negative is the trained JSON
 null caption; an edit's positive and negative predictions share its clean
