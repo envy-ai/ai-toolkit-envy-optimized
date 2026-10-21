@@ -548,6 +548,16 @@ export interface CaptionProcessConfig {
     vision_bf16?: boolean;
     video_fps?: number;
     system_prompt?: string;
+    api_url?: string;
+    api_credential_id?: string;
+    api_timeout?: number;
+    api_max_tokens_field?: 'max_tokens' | 'max_completion_tokens';
+    temperature?: number;
+    top_p?: number;
+    frequency_penalty?: number;
+    presence_penalty?: number;
+    seed?: number;
+    stop?: string[];
   }
 }
 

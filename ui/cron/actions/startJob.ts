@@ -6,6 +6,8 @@ import fs from 'fs';
 import { TOOLKIT_ROOT, getTrainingFolder, getHFToken, getModelsPath } from '../paths';
 import { resolveDetachedPythonPath } from '../pythonPath';
 import { acquireGpuLocks, gpuKeys, GpuBusyError, SAMPLE_RENDER_GATE } from '../sampleRenderLocks';
+import { isApiCaptionJob } from '../captionApiConfig';
+import { apiCaptionChildEnvironment } from '../captionApiCredentials';
 const isWindows = process.platform === 'win32';
 
 const appendJobLog = (logPath: string, message: string) => {
@@ -218,6 +220,23 @@ const startAndWatchJob = (job: Job) => {
 
     // update the config dataset path
     const jobConfig = JSON.parse(job.job_config);
+    let captionEnvironment: Record<string, string> = {};
+    if (isApiCaptionJob(job)) {
+      try {
+        captionEnvironment = await apiCaptionChildEnvironment(TOOLKIT_ROOT, jobConfig.config.process[0]);
+      } catch (cause) {
+        // Credential helpers expose only static validation messages and filesystem
+        // paths, never the key or file contents. Do not log the original object.
+        const detail = cause instanceof Error ? cause.message : 'Unknown private credential error';
+        const message = `API captioning setup failed: ${detail}`;
+        const stack = cause instanceof Error ? cause.stack : undefined;
+        console.error('Cannot start API captioner:', { message, stack });
+        appendJobLog(logPath, message + '\n' + (stack ? stack + '\n' : ''));
+        await prisma.job.update({ where: { id: jobID }, data: { status: 'error', info: message, pid: null } });
+        resolve();
+        return;
+      }
+    }
     jobConfig.config.process[0].sqlite_db_path = path.join(TOOLKIT_ROOT, 'aitk_db.db');
     if (job.job_type === 'inference') {
       // the engine publishes engine.json (endpoint + token) and writes its
@@ -252,6 +271,7 @@ const startAndWatchJob = (job: Job) => {
       CUDA_VISIBLE_DEVICES: `${job.gpu_ids}`,
       IS_AI_TOOLKIT_UI: '1',
       PYTHONUNBUFFERED: '1', // write Python output immediately so it is not lost on a crash
+      ...captionEnvironment,
     };
 
     // HF_TOKEN
@@ -410,6 +430,21 @@ export default async function startJob(jobID: string) {
   });
   if (!job) {
     console.error(`Job with ID ${jobID} not found`);
+    return;
+  }
+  if (job.gpu_ids === 'cpu' && !isApiCaptionJob(job)) {
+    await prisma.job.update({
+      where: { id: jobID },
+      data: { status: 'error', info: 'Invalid CPU/API captioning configuration; edit its setup before restarting.' },
+    });
+    return;
+  }
+  if (isApiCaptionJob(job)) {
+    const claimed = await prisma.job.updateMany({
+      where: { id: jobID, status: 'queued' },
+      data: { status: 'running', stop: false, return_to_queue: false, info: 'Starting API captioner (CPU)...' },
+    });
+    if (claimed.count === 1) startAndWatchJob(job);
     return;
   }
   // Comfy's GPU is configured in that server, independently of this job's

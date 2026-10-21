@@ -1,6 +1,16 @@
 from toolkit.extension import Extension
 
 
+class APICaptionerExtension(Extension):
+    uid = "APICaptioner"
+    name = "API Image Captioner"
+
+    @classmethod
+    def get_process(cls):
+        from .APICaptioner import APICaptioner
+        return APICaptioner
+
+
 class AceStepCaptionerExtension(Extension):
     uid = "AceStepCaptioner"
     name = "Ace Step Captioner"
@@ -86,6 +96,7 @@ class Ideogram4CaptionerExtension(Extension):
 
 
 AI_TOOLKIT_EXTENSIONS = [
+    APICaptionerExtension,
     AceStepCaptionerExtension,
     MossMusicCaptionerExtension,
     Qwen3VLCaptionerExtension,

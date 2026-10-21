@@ -104,6 +104,13 @@ function loadRoute(jobRows) {
     if (id === '@/helpers/sampleOnlyJobConfig') return { mergeSampleOnlyJobConfig: (_old, next) => next };
     if (id === '@/app/jobs/new/trainingCapabilities') return { validateTrainingCapabilities: () => [] };
     if (id === '@/app/jobs/new/sliderspace') return { validateSliderSpace: () => [] };
+    if (id === '../../../../cron/captionApiConfig') return {
+      API_CAPTIONER: 'APICaptioner', API_CAPTION_QUEUE: 'cpu',
+      apiCaptionSettingsSchema: { parse: value => value },
+      assertNoCaptionCredentials: () => {}, isApiCaptionJob: () => false,
+    };
+    if (id === '../../../../cron/captionApiCredentials') return { readCaptionApiCredential: async () => '' };
+    if (id === '@/server/settings') return { getDatasetsRoot: async () => '' };
     if (id === '@/server/jobFork') return {
       createJobFork: async () => ({}),
       previewJobFork: async id => ({ id }),

@@ -9,6 +9,9 @@ import { validateTrainingCapabilities } from '@/app/jobs/new/trainingCapabilitie
 import { validateSliderSpace } from '@/app/jobs/new/sliderspace';
 import { createJobFork, JobForkError, previewJobFork } from '@/server/jobFork';
 import { matchesSearch } from '@/utils/search';
+import { API_CAPTIONER, API_CAPTION_QUEUE, apiCaptionSettingsSchema, assertNoCaptionCredentials } from '../../../../cron/captionApiConfig';
+import { readCaptionApiCredential } from '../../../../cron/captionApiCredentials';
+import { getDatasetsRoot } from '@/server/settings';
 
 const TOOLKIT_ROOT = path.resolve('@', '..', '..');
 const defaultTrainFolder = path.join(TOOLKIT_ROOT, 'output');
@@ -214,9 +217,32 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   let isForkRequest = false;
+  let isApiCaptionRequest = false;
   try {
     const body = await request.json();
     const { id, name, job_config, sample_only, fork_from_id } = body;
+    const processes = job_config?.config?.process;
+    const apiCaption = Array.isArray(processes) && processes.some((process: any) => process.type === API_CAPTIONER);
+    isApiCaptionRequest = apiCaption;
+    if (apiCaption) {
+      if (body.job_type !== 'caption' || processes.length !== 1 || sample_only || fork_from_id)
+        return NextResponse.json({ error: 'API captioning requires one caption process.' }, { status: 400 });
+      assertNoCaptionCredentials(job_config);
+      const caption = apiCaptionSettingsSchema.parse(processes[0].caption);
+      const [folder, root] = await Promise.all([fs.promises.realpath(caption.path_to_caption), getDatasetsRoot().then(value => fs.promises.realpath(value))]);
+      if (folder !== root && !folder.startsWith(root + path.sep))
+        return NextResponse.json({ error: 'Caption folder must be inside the configured dataset root.' }, { status: 400 });
+      if (caption.api_credential_id) await readCaptionApiCredential(TOOLKIT_ROOT, caption.api_credential_id, caption.api_url);
+      if (id) {
+        const existing = await prisma.job.findUnique({ where: { id } });
+        if (existing && ['running', 'stopping'].includes(existing.status))
+          return NextResponse.json({ error: 'Stop API captioning before editing its configuration.' }, { status: 409 });
+      }
+      processes[0].device = 'cpu';
+      processes[0].caption = { ...caption, device: 'cpu', quantize: false, compile: false, loras: [] };
+    } else if (body.gpu_ids === API_CAPTION_QUEUE) {
+      return NextResponse.json({ error: 'The CPU/API queue is reserved for API image captioning.' }, { status: 400 });
+    }
     isForkRequest = Boolean(fork_from_id);
     if (fork_from_id && (id || sample_only || body.job_type && body.job_type !== 'train')) {
       return NextResponse.json({ error: 'Fork creates a new training job; it cannot update an existing job' }, { status: 400 });
@@ -225,9 +251,9 @@ export async function POST(request: Request) {
       const errors = [...validateTrainingCapabilities(job_config), ...validateSliderSpace(job_config)];
       if (errors.length) return NextResponse.json({ error: [...new Set(errors)].join('\n') }, { status: 400 });
     }
-    let gpu_ids: string = body.gpu_ids;
+    let gpu_ids: string = apiCaption ? API_CAPTION_QUEUE : body.gpu_ids;
 
-    if (isMac()) {
+    if (isMac() && !apiCaption) {
       gpu_ids = 'mps';
     }
 
@@ -311,6 +337,11 @@ export async function POST(request: Request) {
       return NextResponse.json(training);
     }
   } catch (error: any) {
+    if (isApiCaptionRequest) {
+      const details = { error: error instanceof Error ? error.message : 'API captioning configuration failed.', stack: error instanceof Error ? error.stack : undefined };
+      console.error('API captioning setup failed:', details);
+      return NextResponse.json(details, { status: error.code === 'ENOENT' || error.code === 'EACCES' ? 500 : 400 });
+    }
     console.error(error);
     if (error instanceof JobForkError) {
       return NextResponse.json({ error: error.message, stack: error.stack }, { status: error.status });

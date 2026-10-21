@@ -32,6 +32,7 @@ export default function CaptionMonitor({ datasetPath, onHeightChange }: CaptionM
 
   const gpuIds = useMemo(() => {
     if (!job) return [];
+    if (job.gpu_ids === 'cpu') return [];
     if (job.gpu_ids === 'mps') return [0];
     return job.gpu_ids.split(',').map(id => parseInt(id));
   }, [job?.gpu_ids]);
@@ -142,15 +143,17 @@ export default function CaptionMonitor({ datasetPath, onHeightChange }: CaptionM
               </div>
             </div>
           </div>
-          <div className="w-96 flex-shrink-0 overflow-y-auto p-3 pl-0 hidden md:block">
-            {isGPUInfoLoaded && gpuList.length > 0 ? (
-              <GPUWidget gpu={gpuList[0]} />
-            ) : (
-              <div className="flex items-center gap-2 text-xs text-gray-500 p-2">
-                <Cpu className="w-4 h-4" /> Loading GPU info...
-              </div>
-            )}
-          </div>
+          {job?.gpu_ids !== 'cpu' && (
+            <div className="w-96 flex-shrink-0 overflow-y-auto p-3 pl-0 hidden md:block">
+              {isGPUInfoLoaded && gpuList.length > 0 ? (
+                <GPUWidget gpu={gpuList[0]} />
+              ) : (
+                <div className="flex items-center gap-2 text-xs text-gray-500 p-2">
+                  <Cpu className="w-4 h-4" /> Loading GPU info...
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

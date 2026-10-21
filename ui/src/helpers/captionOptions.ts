@@ -1,4 +1,5 @@
 import { CloudLora, GroupedSelectOption, SelectOption } from "@/types";
+import { API_CAPTION_PROMPT } from '../../cron/captionApiConfig';
 
 type CaptionGroup = 'image' | 'music' | 'video' | 'image/video' | 'image/video/sound';
 type AdditionalSections = 'caption.model_name_or_path2' | 'caption.caption_prompt' | 'caption.max_res' | 'caption.max_new_tokens' | 'caption.fixed_caption' | 'caption.caption_format' | 'caption.extract_vocals_before_transcribe' | 'caption.keep_timestamps' | 'caption.thinking' | 'caption.batch_size' | 'caption.layer_offloading' | 'caption.mtp' | 'caption.cuda_graph' | 'caption.vision_bf16' | 'caption.video_fps' | 'caption.system_prompt';
@@ -101,6 +102,24 @@ const mossMusicTagsPrompt = "Describe this music as a single line of comma-separ
 const defaultIdeogramCaptionPrompt = "Describe only what is actually visible in the image — never invent, add, or infer content that is not present. Identify the medium (photograph, illustration, 3D render, or graphic design) and name any recognizable people, brands, characters, or landmarks. Be decisive and specific: commit to one concrete value per attribute (one color, one material, one pose) and avoid hedging. Transcribe every piece of legible text verbatim.";
 
 export const captionerTypes: CaptionOption[] = [
+    {
+        name: 'APICaptioner', label: 'API (OpenAI-compatible)', group: 'image', noCompile: true,
+        defaults: {
+            'device': ['cpu', 'cuda'],
+            'caption.device': ['cpu', undefined],
+            'caption.model_name_or_path': ['', defaultNameOrPath],
+            'caption.extensions': [['jpg', 'jpeg', 'png', 'bmp', 'webp', 'gif', 'avif'], defaultExtensions],
+            'caption.api_url': ['', undefined],
+            'caption.api_credential_id': [undefined, undefined],
+            'caption.api_timeout': [300, undefined],
+            'caption.api_max_tokens_field': ['max_tokens', undefined],
+            'caption.max_new_tokens': [4096, 512],
+            'caption.caption_prompt': [API_CAPTION_PROMPT, defaultImageCaptionPrompt],
+            'caption.system_prompt': ['', undefined],
+            'caption.compile': [false, false],
+            'caption.quantize': [false, true],
+        },
+    },
     {
         name: 'AceStepCaptioner',
         label: 'Ace Step',

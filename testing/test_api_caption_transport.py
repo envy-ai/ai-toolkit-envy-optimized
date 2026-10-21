@@ -1,0 +1,320 @@
+"""Offline contract tests for the OpenAI-compatible caption transport."""
+
+import base64
+import importlib.util
+import io
+import json
+import runpy
+import ssl
+import sys
+import threading
+import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+from PIL import Image
+
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "extensions_built_in/captioner/api_caption.py"
+API = runpy.run_path(str(MODULE_PATH))
+generate_api_caption = API["generate_api_caption"]
+validate_api_settings = API["validate_api_settings"]
+
+
+class CaptionServer:
+    def __init__(self, *, status=200, response=None, location=None):
+        self.requests = []
+        self.status = status
+        self.response = response if response is not None else {
+            "choices": [{"finish_reason": "stop", "message": {"content": "  a green glass vase  "}}]
+        }
+        self.location = location
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                size = int(self.headers.get("Content-Length", "0"))
+                owner.requests.append({
+                    "path": self.path,
+                    "authorization": self.headers.get("Authorization"),
+                    "payload": json.loads(self.rfile.read(size)),
+                })
+                self.send_response(owner.status)
+                if owner.location:
+                    self.send_header("Location", owner.location)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                body = owner.response if isinstance(owner.response, bytes) else json.dumps(owner.response).encode()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @property
+    def url(self):
+        return f"http://127.0.0.1:{self.server.server_port}/v1"
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+
+def image_fixture(tmp_path):
+    path = tmp_path / "edge-fixture.png"
+    Image.new("RGBA", (11, 7), (20, 100, 220, 127)).save(path)
+    return path
+
+
+def config(server, **overrides):
+    result = {
+        "api_url": server.url,
+        "model_name_or_path": "fixture-model",
+        "caption_prompt": "Describe the blue fixture.",
+        "system_prompt": "Return one concise caption.",
+        "max_new_tokens": 4096,
+        "api_timeout": 3,
+        "api_max_tokens_field": "max_tokens",
+    }
+    result.update(overrides)
+    return result
+
+
+def test_openai_compatible_request_has_image_prompts_auth_and_selected_limit(tmp_path):
+    with CaptionServer() as server:
+        caption = generate_api_caption(
+            image_fixture(tmp_path),
+            config(server, api_max_tokens_field="max_completion_tokens", max_new_tokens=16384, temperature=0.25,
+                   top_p=0.8, frequency_penalty=-0.2, presence_penalty=0.3, seed=7,
+                   stop=["END"]),
+            api_key="fixture-secret",
+        )
+
+    assert caption == "a green glass vase"
+    assert len(server.requests) == 1
+    request = server.requests[0]
+    assert request["path"] == "/v1/chat/completions"
+    assert request["authorization"] == "Bearer fixture-secret"
+    payload = request["payload"]
+    assert payload["model"] == "fixture-model"
+    assert payload["stream"] is False
+    assert payload["max_completion_tokens"] == 16384
+    assert "max_tokens" not in payload
+    assert {key: payload[key] for key in ("temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop")} == {
+        "temperature": 0.25, "top_p": 0.8, "frequency_penalty": -0.2,
+        "presence_penalty": 0.3, "seed": 7, "stop": ["END"],
+    }
+    assert payload["messages"] == [
+        {"role": "system", "content": "Return one concise caption."},
+        {"role": "user", "content": [
+            {"type": "text", "text": "Describe the blue fixture."},
+            {"type": "image_url", "image_url": {"url": payload["messages"][1]["content"][1]["image_url"]["url"]}},
+        ]},
+    ]
+    data_url = payload["messages"][1]["content"][1]["image_url"]["url"]
+    prefix, encoded = data_url.split(",", 1)
+    assert prefix == "data:image/png;base64"
+    with Image.open(io.BytesIO(base64.b64decode(encoded))) as sent_image:
+        assert sent_image.format == "PNG"
+        assert sent_image.size == (11, 7)
+        assert sent_image.mode == "RGBA"
+
+
+def test_blank_key_omits_auth_and_unset_sampling_options_are_not_injected(tmp_path):
+    with CaptionServer() as server:
+        generate_api_caption(image_fixture(tmp_path), config(server), api_key="")
+
+    request = server.requests[0]
+    assert request["authorization"] is None
+    payload = request["payload"]
+    assert payload["max_tokens"] == 4096
+    assert not ({"temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop"} & payload.keys())
+
+
+@pytest.mark.parametrize("finish_reason,message,pattern", [
+    ("length", {"content": "partial"}, "truncated"),
+    ("stop", {"content": "  "}, "empty"),
+    ("content_filter", {"content": "refused"}, "did not complete"),
+    ("stop", {"content": "ignored", "refusal": "blocked"}, "refused"),
+])
+def test_incomplete_or_missing_caption_is_a_hard_error(tmp_path, finish_reason, message, pattern):
+    with CaptionServer(response={"choices": [{"finish_reason": finish_reason, "message": message}]}) as server:
+        with pytest.raises(RuntimeError, match=pattern):
+            generate_api_caption(image_fixture(tmp_path), config(server))
+
+
+@pytest.mark.parametrize("response", [
+    {"choices": []},
+    {"choices": [{"finish_reason": "stop", "message": {"content": "ok"}},
+                  {"finish_reason": "stop", "message": {"content": "extra"}}]},
+    {"error": {"message": "provider echoed private detail"}},
+    b"not-json",
+])
+def test_malformed_provider_responses_fail_closed(tmp_path, response):
+    with CaptionServer(response=response) as server:
+        with pytest.raises(RuntimeError):
+            generate_api_caption(image_fixture(tmp_path), config(server))
+
+
+def test_http_error_body_is_not_echoed_and_redirect_is_not_followed(tmp_path):
+    secret = "fixture-secret-do-not-log"
+    with CaptionServer(status=401, response={"error": secret}) as server:
+        with pytest.raises(RuntimeError) as error:
+            generate_api_caption(image_fixture(tmp_path), config(server), api_key=secret)
+        assert secret not in str(error.value)
+        assert len(server.requests) == 1
+    with CaptionServer(status=302, location="http://127.0.0.1:1/stolen") as server:
+        with pytest.raises(RuntimeError, match="redirects are disabled"):
+            generate_api_caption(image_fixture(tmp_path), config(server), api_key=secret)
+        assert len(server.requests) == 1
+
+
+def test_caption_text_that_echoes_the_api_key_is_withheld(tmp_path):
+    secret = "caption-key-fixture"
+    with CaptionServer(response={"choices": [{
+        "finish_reason": "stop", "message": {"content": f"caption containing {secret}"},
+    }]}) as server:
+        with pytest.raises(RuntimeError, match="echoed its credential") as error:
+            generate_api_caption(image_fixture(tmp_path), config(server), api_key=secret)
+        assert secret not in str(error.value)
+
+
+def test_https_uses_python_default_certificate_verification():
+    handlers = API["build_opener"](API["NoCaptionRedirects"]()).handlers
+    https = next(handler for handler in handlers if handler.__class__.__name__ == "HTTPSHandler")
+    assert https._context is None, "urllib should create its normal verified TLS context"
+    default_context = ssl._create_default_https_context()
+    assert default_context.verify_mode == ssl.CERT_REQUIRED
+    assert default_context.check_hostname is True
+
+
+@pytest.mark.parametrize("bad_url", [
+    "https://user:pass@example.test/v1", "https://example.test/v1?key=x",
+    "https://example.test/v1#fragment", "file:///tmp/model",
+])
+def test_invalid_api_urls_are_rejected_before_network_io(tmp_path, bad_url):
+    with pytest.raises(ValueError):
+        validate_api_settings(config(type("Server", (), {"url": bad_url})()))
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5, 9_007_199_254_740_992])
+def test_response_token_limit_must_be_a_positive_safe_integer(limit):
+    with pytest.raises(ValueError, match="safe integer"):
+        validate_api_settings({
+            "api_url": "http://127.0.0.1:12345/v1", "model_name_or_path": "fixture",
+            "max_new_tokens": limit,
+        })
+
+
+def test_response_token_limit_over_default_is_valid_and_kept_exact():
+    settings = {"api_url": "http://127.0.0.1:12345/v1", "model_name_or_path": "fixture", "max_new_tokens": 16384}
+    assert validate_api_settings(settings) == "http://127.0.0.1:12345/v1/chat/completions"
+
+
+def _load_api_captioner_with_test_base():
+    """Load the real run loop while stubbing BaseCaptioner to avoid model/toolkit startup."""
+    package_name = "_api_captioner_test_pkg"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(MODULE_PATH.parent)]
+    sys.modules[package_name] = package
+    base = types.ModuleType(package_name + ".BaseCaptioner")
+
+    class CaptionConfig:
+        def __init__(self, **kwargs):
+            self.recaption = kwargs.get("recaption", False)
+
+    class BaseCaptioner:
+        caption_config_class = CaptionConfig
+
+    base.CaptionConfig = CaptionConfig
+    base.BaseCaptioner = BaseCaptioner
+    sys.modules[base.__name__] = base
+
+    def load(name, filename):
+        spec = importlib.util.spec_from_file_location(name, filename)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    load(package_name + ".api_caption", MODULE_PATH)
+    return load(package_name + ".APICaptioner", MODULE_PATH.parent / "APICaptioner.py")
+
+
+def _fake_run_loop(captioner, *, should_stop=False, fail=None):
+    statuses, saved, called = [], [], []
+    captioner.start_stop_watcher = lambda: None
+    captioner.update_status = lambda status, _message: statuses.append(status)
+    captioner.find_files = lambda: None
+    captioner.file_paths = ["synthetic-image.png"]
+    captioner.update_db_key = lambda *_args: None
+    captioner.update_step = lambda: None
+    captioner.step_num = 0
+    captioner.maybe_stop = lambda: (_ for _ in ()).throw(KeyboardInterrupt()) if should_stop else None
+
+    def get_caption(filename):
+        called.append(filename)
+        if fail:
+            raise fail
+        return "caption"
+
+    captioner.get_caption_for_file = get_caption
+    captioner.save_caption_for_file = lambda *_args: saved.append(True)
+    return statuses, saved, called
+
+
+def test_api_captioner_failure_and_stop_never_write_completion_status():
+    module = _load_api_captioner_with_test_base()
+    captioner = module.APICaptioner.__new__(module.APICaptioner)
+    statuses, saved, called = _fake_run_loop(captioner, fail=RuntimeError("synthetic 401"))
+    with pytest.raises(RuntimeError, match="synthetic 401"):
+        captioner.run()
+    assert "completed" not in statuses
+    assert saved == []
+    assert called == ["synthetic-image.png"]
+
+    captioner = module.APICaptioner.__new__(module.APICaptioner)
+    statuses, saved, called = _fake_run_loop(captioner, should_stop=True)
+    with pytest.raises(KeyboardInterrupt):
+        captioner.run()
+    assert "completed" not in statuses
+    assert saved == []
+    assert called == []
+
+
+def test_api_captioner_defaults_to_preserving_existing_sidecars_and_recaptions_when_enabled(tmp_path):
+    from extensions_built_in.captioner.APICaptioner import APICaptionConfig, APICaptioner
+
+    image = tmp_path / "already-captioned.png"
+    Image.new("RGB", (3, 2), (10, 20, 30)).save(image)
+    image.with_suffix(".txt").write_text("existing caption", encoding="utf-8")
+    common = {
+        "path_to_caption": str(tmp_path), "extensions": ["png"], "caption_extension": "txt",
+        "model_name_or_path": "fixture-model", "api_url": "http://127.0.0.1:12345/v1",
+        "caption_prompt": "fixture", "max_new_tokens": 4096,
+    }
+
+    default_config = APICaptionConfig(**common)
+    assert default_config.recaption is False
+    default_run = APICaptioner.__new__(APICaptioner)
+    default_run.caption_config = default_config
+    default_run.file_paths = []
+    default_run.find_files()
+    assert default_run.file_paths == []
+
+    overwrite_config = APICaptionConfig(**common, recaption=True)
+    overwrite_run = APICaptioner.__new__(APICaptioner)
+    overwrite_run.caption_config = overwrite_config
+    overwrite_run.file_paths = []
+    overwrite_run.find_files()
+    assert overwrite_run.file_paths == [str(image)]
+    overwrite_run.save_caption_for_file(str(image), "fresh API caption")
+    assert image.with_suffix(".txt").read_text(encoding="utf-8") == "fresh API caption"

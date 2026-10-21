@@ -24,6 +24,13 @@ does not exist. Ordinary `?thumb=1`
 gallery thumbnails keep their existing square crop. First-image discovery
 supports PNG, JPEG, WebP, GIF, BMP, and AVIF.
 
+Dataset **AutoCaption** includes **API (OpenAI-compatible)**. Enter the API URL, optional key, model ID, system prompt,
+and caption prompt; **Advanced options** contains sampling settings, timeout, and the response-token limit (4096 by
+default, configurable). Click the Advanced summary or focus it and press Enter/Space to expand it. API captioning uses
+its own CPU/API queue alongside training and loads no captioning model onto this toolkit's GPUs. Keys are saved
+privately on the server, separately from job configurations. See the [API captioner guide](../docs/api_captioner.md) for
+authentication, endpoint compatibility, supported images, and failure behavior.
+
 The **Queue** page (`/jobs`) initially loads the 100 newest jobs by creation
 time. Scrolling down to the end loads the next 100; the **Load more** button
 also works with Tab and Enter/Space. Search checks every job name in the database

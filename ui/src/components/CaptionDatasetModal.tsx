@@ -17,6 +17,7 @@ import CaptionSimpleJob from '@/components/CaptionSimpleJob';
 import AdvancedConfigEditor from '@/components/AdvancedConfigEditor';
 import { SelectInput } from '@/components/formInputs';
 import { Loader2 } from 'lucide-react';
+import { API_CAPTIONER, apiCaptionSettingsSchema, assertNoCaptionCredentials } from '../../cron/captionApiConfig';
 
 export interface CaptionDatasetModalState {
   datasetPath: string;
@@ -53,6 +54,10 @@ export const CaptionDatasetModal: React.FC = () => {
   const open = modalInfo !== null;
   const isSavingRef = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [apiKey, setApiKey] = useState('');
+  const [clearApiKey, setClearApiKey] = useState(false);
+  const [saveError, setSaveError] = useState<{ message: string; stack?: string } | null>(null);
+  const isApi = jobConfig.config.process[0].type === API_CAPTIONER;
   const showGPUSelect = !isMac();
   const isLoadingExistingJob = !!(modalInfo?.jobId || modalInfo?.cloneId) && !hasLoadedExistingJob;
   const showLoadingOverlay = isLoadingExistingJob || isSaving;
@@ -62,6 +67,9 @@ export const CaptionDatasetModal: React.FC = () => {
     setJobConfig(objectCopy(defaultCaptionJobConfig));
     setActiveTab('simple');
     setExistingJobName(null);
+    setApiKey('');
+    setClearApiKey(false);
+    setSaveError(null);
     // set the path_to_caption
     if (modalInfo?.datasetPath) {
       setJobConfig(modalInfo.datasetPath, 'config.process[0].caption.path_to_caption');
@@ -115,11 +123,15 @@ export const CaptionDatasetModal: React.FC = () => {
   }, [gpuList, isGPUInfoLoaded]);
 
   const handleClose = () => {
+    if (isSavingRef.current) return;
     if (modalInfo?.onClose) {
       modalInfo.onClose();
     }
     setHasLoadedExistingJob(false);
     setModalInfo(null);
+    setApiKey('');
+    setClearApiKey(false);
+    setSaveError(null);
   };
 
   const saveJob = async () => {
@@ -130,37 +142,50 @@ export const CaptionDatasetModal: React.FC = () => {
     }
     isSavingRef.current = true;
     setIsSaving(true);
+    setSaveError(null);
 
     const isEdit = !!modalInfo.jobId;
 
-    apiClient
-      .post('/api/jobs', {
+    try {
+      const snapshot = objectCopy(jobConfig);
+      if (isApi) {
+        assertNoCaptionCredentials(snapshot);
+        const caption = apiCaptionSettingsSchema.parse(snapshot.config.process[0].caption);
+        if (clearApiKey) delete caption.api_credential_id;
+        else if (apiKey.trim()) {
+          caption.api_credential_id = (
+            await apiClient.post('/api/caption/credentials', { apiUrl: caption.api_url, apiKey })
+          ).data.id;
+        }
+        snapshot.config.process[0].caption = { ...snapshot.config.process[0].caption, ...caption };
+        snapshot.config.process[0].device = 'cpu';
+      }
+      const response = await apiClient.post('/api/jobs', {
         id: isEdit ? modalInfo.jobId : null,
         name: isEdit && existingJobName ? existingJobName : uuidv4(),
         gpu_ids: gpuIDs,
-        job_config: jobConfig,
+        job_config: snapshot,
         job_type: 'caption',
         job_ref: modalInfo.datasetPath,
-      })
-      .then(async res => {
-        const jobId = res.data.id;
-        await startJob(jobId);
-        // start the queue as well
-        await startQueue(gpuIDs || '');
-        isSavingRef.current = false;
-        setIsSaving(false);
-        handleClose();
-      })
-      .catch(error => {
-        if (error.response?.status === 409) {
-          alert('A caption job for this dataset already exists. Please check your jobs list.');
-        } else {
-          alert('Failed to save job. Please try again.');
-        }
-        console.log('Error saving training:', error);
-        isSavingRef.current = false;
-        setIsSaving(false);
       });
+      const jobId = response.data.id;
+      await startJob(jobId);
+      // start the queue as well
+      await startQueue(response.data.gpu_ids);
+      isSavingRef.current = false;
+      setIsSaving(false);
+      handleClose();
+    } catch (error: any) {
+      const details = {
+        message: error.response?.data?.error || error.message || 'Failed to save caption job.',
+        stack: error.response?.data?.stack || error.stack,
+      };
+      setSaveError(details);
+      // Axios errors include request bodies; never log the raw error/key form.
+      console.error('Failed to save caption job:', details);
+      isSavingRef.current = false;
+      setIsSaving(false);
+    }
   };
 
   const tabButtonClass = (tab: 'simple' | 'advanced') =>
@@ -186,7 +211,7 @@ export const CaptionDatasetModal: React.FC = () => {
             Advanced
           </button>
           <div className="flex-1" />
-          {activeTab === 'advanced' && showGPUSelect && (
+          {activeTab === 'advanced' && showGPUSelect && !isApi && (
             <div className="pb-2">
               <SelectInput
                 value={`${gpuIDs}`}
@@ -197,6 +222,7 @@ export const CaptionDatasetModal: React.FC = () => {
           )}
         </div>
         <form
+          noValidate={isApi}
           onSubmit={e => {
             e.preventDefault();
             saveJob();
@@ -210,10 +236,23 @@ export const CaptionDatasetModal: React.FC = () => {
               setGpuIDs={setGpuIDs}
               gpuList={gpuList}
               showGPUSelect={showGPUSelect}
+              apiKey={apiKey}
+              onApiKeyChange={setApiKey}
+              clearApiKey={clearApiKey}
+              onClearApiKeyChange={setClearApiKey}
             />
           ) : (
             <div className="h-[60vh] mt-2">
               <AdvancedConfigEditor config={jobConfig} setConfig={setJobConfig} />
+            </div>
+          )}
+          {saveError && (
+            <div role="alert" className="mt-4 rounded-md border border-red-700 bg-red-950 p-3 text-sm text-red-200">
+              <p>{saveError.message}</p>
+              <details className="mt-2">
+                <summary>Error details</summary>
+                <pre className="overflow-auto whitespace-pre-wrap text-xs">{saveError.stack}</pre>
+              </details>
             </div>
           )}
 

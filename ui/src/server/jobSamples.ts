@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { isApiCaptionJob } from '../../cron/captionApiConfig';
 import { createHash, randomUUID } from 'crypto';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -80,7 +81,7 @@ export async function startSampleRender(job: Job): Promise<SampleRenderState> {
     // Finished jobs retain their last PID in the database. That PID can be
     // reused by an unrelated process long after training ends, so only an
     // active job status may block a saved sample render.
-    const conflict = jobs.find(other => ['running', 'stopping'].includes(other.status));
+    const conflict = jobs.find(other => ['running', 'stopping'].includes(other.status) && !isApiCaptionJob(other));
     if (conflict)
       throw new Error(
         `Job "${conflict.name}" is active. Wait for active jobs to stop before rendering saved samples: ComfyUI's GPU is configured independently of the training job. Queued jobs will wait for the render to finish.`,
