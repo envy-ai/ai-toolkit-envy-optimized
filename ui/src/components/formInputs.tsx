@@ -16,6 +16,7 @@ const inputClasses =
   'w-full text-sm px-3 py-1 bg-gray-950 dark:bg-gray-800 border border-gray-700 rounded-sm text-gray-100 placeholder:text-gray-500 focus:ring-2 focus:ring-gray-600 focus:border-transparent';
 
 export interface InputProps {
+  id?: string;
   label?: string;
   docKey?: string | null;
   doc?: ConfigDoc | null;
@@ -52,7 +53,7 @@ export const TextInput = forwardRef<HTMLInputElement, TextInputProps>((props: Te
   return (
     <div className={classNames(className)}>
       {label && (
-        <label className={labelClasses}>
+        <label htmlFor={props.id} className={labelClasses}>
           {label}{' '}
           {doc && (
             <div className="inline-block ml-1 text-xs text-gray-500 cursor-pointer" onClick={() => openDoc(doc)}>
@@ -69,6 +70,7 @@ export const TextInput = forwardRef<HTMLInputElement, TextInputProps>((props: Te
           )}
         >
           <input
+            id={props.id}
             ref={ref}
             type={type}
             value={value}
@@ -86,6 +88,7 @@ export const TextInput = forwardRef<HTMLInputElement, TextInputProps>((props: Te
         </div>
       ) : (
         <input
+          id={props.id}
           ref={ref}
           type={type}
           value={value}
@@ -160,7 +163,19 @@ export interface NumberInputProps extends InputProps {
 }
 
 export const NumberInput = (props: NumberInputProps) => {
-  const { label, value, onChange, placeholder, required, min, max, allowEmpty, step = 'any', clampOnBlur = true, docKey = null } = props;
+  const {
+    label,
+    value,
+    onChange,
+    placeholder,
+    required,
+    min,
+    max,
+    allowEmpty,
+    step = 'any',
+    clampOnBlur = true,
+    docKey = null,
+  } = props;
   let { doc } = props;
   if (!doc && docKey) {
     doc = getDoc(docKey);
@@ -177,7 +192,7 @@ export const NumberInput = (props: NumberInputProps) => {
   return (
     <div className={classNames(props.className)}>
       {label && (
-        <label className={labelClasses}>
+        <label htmlFor={props.id} className={labelClasses}>
           {label}{' '}
           {doc && (
             <div className="inline-block ml-1 text-xs text-gray-500 cursor-pointer" onClick={() => openDoc(doc)}>
@@ -187,6 +202,7 @@ export const NumberInput = (props: NumberInputProps) => {
         </label>
       )}
       <input
+        id={props.id}
         type="number"
         value={inputValue}
         onChange={e => {
@@ -285,7 +301,7 @@ export const SelectInput = (props: SelectInputProps) => {
       })}
     >
       {label && (
-        <label className={labelClasses}>
+        <label htmlFor={props.id} className={labelClasses}>
           {label}{' '}
           {doc && (
             <div className="inline-block ml-1 text-xs text-gray-500 cursor-pointer" onClick={() => openDoc(doc)}>
@@ -295,6 +311,8 @@ export const SelectInput = (props: SelectInputProps) => {
         </label>
       )}
       <Select
+        inputId={props.id}
+        instanceId={props.id}
         filterOption={filterSelectOption}
         value={selectedOption}
         options={options}

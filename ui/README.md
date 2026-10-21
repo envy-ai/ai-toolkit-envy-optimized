@@ -4,6 +4,28 @@ The eye icon beside a training job on the dashboard, queue, or jobs list opens
 its **Samples** tab directly (`/jobs/<id>?tab=samples`). Click it or focus it with
 Tab and press Enter. Job-name links still open the overview.
 
+Each safetensors checkpoint has a **Trim** button. Open it with a click or
+Tab then Enter/Space, choose retained energy (99.99% by default) or maximum
+relative reconstruction error, and click **Analyze**. **Advanced rank limits**
+expands with a click or Enter/Space. The CPU analysis writes nothing and shows
+estimated file size, per-layer ranks, retained energy, and reconstruction error.
+Changing analysis settings clears the preview. Enter in a text/number field
+analyzes; **Create trimmed copy** requires its own explicit button activation
+after a current analysis. Use a new `.safetensors` filename in the source
+folder; existing files cannot be overwritten. Escape or the backdrop closes an
+idle dialog and returns focus to Trim. While analysis or creation runs, closing
+and duplicate submissions are disabled. Errors persist with expandable stderr
+and stack details, and a failed save keeps the preview for retry. Numerical
+reconstruction measurements do not predict visual quality. See
+[supported formats, scaling, and trimming limits](../docs/lora_trimming.md).
+
+Shared form controls in `src/components/formInputs.tsx` supply the existing
+text, number, and searchable-select appearance. `TextInput`, `NumberInput`,
+and `SelectInput` accept an optional `id` that associates their visible label
+with the native input (`inputId` for react-select). The trimming workflow uses
+these controls and the shared `Modal`; numeric validation uses
+`clampOnBlur={false}` to reject invalid values without silently changing them.
+
 The AI assistant drawer autosaves titled chats on this toolkit server. Open
 **Chat history** to search recent sessions, resume one, rename it, or delete it.
 **New conversation** preserves the previous chat. Titles are generated locally

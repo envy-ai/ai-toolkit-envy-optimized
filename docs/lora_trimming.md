@@ -104,13 +104,15 @@ There is no fixed output precision override or silent threshold adjustment.
 
 ## UI workflow
 
-In a job's file list, open a safetensors checkpoint's **Trim LoRA** action.
+Open **Jobs → job → Overview → Checkpoints**, then click a safetensors
+checkpoint's **Trim** button to open **Trim LoRA**.
 Set the energy/error criterion, preview the per-layer ranks/errors and size,
 then choose a new output filename and save. The UI requires a successful preview
 with unchanged source/settings. Errors remain visible with details; the original
 file and normal download actions remain available. Use the existing controls'
 Tab/Enter keyboard behavior. See the UI README for the final interaction and
-release verification.
+release verification. See [the recorded checks](lora_trimming_validation.md) for
+synthetic reconstruction, loader, transport, browser and build evidence.
 
 ## Backend/transport contract
 

@@ -1,7 +1,8 @@
 # Adaptive LoRA trimming plan
 
-Status: backend implemented; integration and verification are in progress. The coordinator owns
-integration, UI, release verification and commits; the test agent owns tests.
+Status: implemented and verified locally. The coordinator owns integration,
+UI, release verification and commits; the test agent owns tests. See
+[validation evidence](lora_trimming_validation.md). No remote push is included.
 
 ## Scope and acceptance
 
@@ -71,12 +72,16 @@ CLI: `trim_lora.py INPUT [--retained-energy X | --relative-error E]
 [--expected-preview TOKEN] [--json]`. JSON mode emits a compact final stdout
 line; progress goes to stderr. Errors propagate with a traceback/nonzero exit.
 
-## Coordinator integration (pending)
+## Integration and verification
 
-- UI: existing FilesWidget checkpoint action and shared Modal; preview first,
-  then an explicit new-output save using the preview token.
-- Verification: factor mathematics/rounding/scaling, real toolkit load/export,
-  rejection cases, exact sizes, stale source and no-clobber races; production UI
-  build and available browser coverage.
-- Activation and user documentation: coordinator records final evidence and any
-  service activation separately. No restart is required by the backend module.
+- UI: Jobs → job → Overview → Checkpoints → Trim uses the existing FilesWidget,
+  shared Modal and form controls; preview precedes explicit creation of a new
+  output with the preview token. Keyboard and error behavior are documented in
+  the UI README.
+- Verification: 16 Python tests, real script-route integration, synthetic browser
+  workflow, source typecheck and the production UI build pass. Coverage includes
+  scaling/dtype rounding, real toolkit load/export, format rejection, metadata
+  and exact size/hash parity, source changes and competing no-clobber writers.
+- Activation: reloaded only the UI branch, preserving the running queue worker
+  and training process. Backend commands need no service restart. Original
+  checkpoints remain unchanged; no user checkpoint was executed through trimming.

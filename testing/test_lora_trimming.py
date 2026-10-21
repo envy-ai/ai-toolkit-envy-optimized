@@ -3,16 +3,18 @@ import json
 import tempfile
 import threading
 import unittest
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file, save, save_file
 
 from toolkit.config_modules import NetworkConfig
 from toolkit.lora_special import LoRASpecialNetwork
 from toolkit.lora_trimming import trim_lora, trim_lora_factors
+from toolkit.metadata import add_model_hash_to_meta
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +119,36 @@ class LoraTrimmingTests(unittest.TestCase):
         self.assertEqual(new_down.dtype, down.dtype)
         self.assertEqual(new_up.dtype, up.dtype)
 
+    def test_supported_storage_dtypes_and_mixed_factor_dtypes_measure_written_values(self):
+        cases = [
+            (torch.float16, torch.float16),
+            (torch.bfloat16, torch.bfloat16),
+            (torch.float32, torch.float32),
+            (torch.float64, torch.float64),
+            (torch.bfloat16, torch.float32),
+            (torch.float16, torch.float64),
+        ]
+        for down_dtype, up_dtype in cases:
+            with self.subTest(down=down_dtype, up=up_dtype):
+                down, up = make_spectral_factors(dtype=torch.float32, rank=4, width=8)
+                down = down.to(down_dtype)
+                up = up.to(up_dtype)
+                alpha = 5.25
+                new_down, new_up, metrics = trim_lora_factors(
+                    down, up, alpha=alpha, relative_error=0.04, max_rank=2
+                )
+
+                old_update = (up.double() @ down.double()) * (alpha / down.shape[0])
+                actual_new_update = (new_up.double() @ new_down.double()) * (alpha / new_down.shape[0])
+                measured_error = torch.linalg.vector_norm(old_update - actual_new_update) / torch.linalg.vector_norm(old_update)
+                self.assertEqual(new_down.dtype, down_dtype)
+                self.assertEqual(new_up.dtype, up_dtype)
+                self.assertEqual(new_down.shape[0], 2)
+                self.assertLessEqual(float(measured_error), 0.04)
+                self.assertAlmostEqual(metrics["relative_error"], float(measured_error), places=7)
+                self.assertAlmostEqual(metrics["old_scale"], alpha / 4, places=7)
+                self.assertAlmostEqual(metrics["new_scale"], alpha / 2, places=7)
+
     def test_rank_limit_that_cannot_meet_requested_error_is_rejected(self):
         down, up = make_spectral_factors()
         with self.assertRaises(ValueError):
@@ -211,28 +243,88 @@ class LoraTrimmingTests(unittest.TestCase):
                     self.assertEqual(source.read_bytes(), original_source)
                     self.assertFalse(destination.exists())
 
-    def test_convolution_factors_keep_supported_kernel_shapes(self):
-        down = torch.zeros((2, 2, 3, 3), dtype=torch.float32)
-        up = torch.zeros((4, 2, 1, 1), dtype=torch.float32)
-        down[0, 0, 0, 0] = 3.0
+    def test_convolution_factors_reduce_rank_and_preserve_kernel_shapes(self):
+        down = torch.zeros((3, 2, 3, 3), dtype=torch.float32)
+        up = torch.zeros((4, 3, 1, 1), dtype=torch.float32)
+        down[0, 0, 0, 0] = 5.0
         down[1, 1, 1, 1] = 2.0
-        up[0, 0, 0, 0] = 3.0
-        up[1, 1, 0, 0] = 2.0
+        down[2, 0, 2, 2] = 0.1
+        up[0, 0, 0, 0] = 1.0
+        up[1, 1, 0, 0] = 1.0
+        up[2, 2, 0, 0] = 1.0
 
         new_down, new_up, metrics = trim_lora_factors(
             down,
             up,
-            relative_error=0.0,
+            relative_error=0.03,
+            max_rank=2,
             alpha=2.0,
         )
 
-        self.assertEqual(new_down.shape, down.shape)
-        self.assertEqual(new_up.shape, up.shape)
-        self.assertEqual(metrics["relative_error"], 0.0)
-        torch.testing.assert_close(
-            new_up[:, :, 0, 0] @ new_down.flatten(1),
-            up[:, :, 0, 0] @ down.flatten(1),
-        )
+        self.assertEqual(new_down.shape, (2, 2, 3, 3))
+        self.assertEqual(new_up.shape, (4, 2, 1, 1))
+        self.assertLessEqual(metrics["relative_error"], 0.03)
+        original_update = (up[:, :, 0, 0].double() @ down.flatten(1).double()) * (2 / 3)
+        trimmed_update = (new_up[:, :, 0, 0].double() @ new_down.flatten(1).double()) * (2 / 2)
+        measured_error = torch.linalg.vector_norm(original_update - trimmed_update) / torch.linalg.vector_norm(original_update)
+        self.assertAlmostEqual(float(measured_error), metrics["relative_error"], places=6)
+
+    def test_large_unicode_archive_size_and_hashes_match_toolkit_helpers(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "unicode-source.safetensors"
+            destination = root / "unicode-trimmed.safetensors"
+            # Rank two output is about 1.1 MiB, enough for the legacy hash's
+            # 1 MiB window without materializing the dense output-by-input map.
+            rank, width = 8, 72000
+            down = torch.zeros((rank, width), dtype=torch.float32)
+            up = torch.zeros((width, rank), dtype=torch.float32)
+            singular = torch.tensor([10.0, 5.0] + [0.1] * (rank - 2))
+            roots = singular.sqrt()
+            for index, value in enumerate(roots):
+                down[index, index] = value
+                up[index, index] = value
+            metadata = {
+                "ss_base_model": "synthetic/模型-Δ",
+                "ss_training_comment": "naïve café 🐈 — проверка",
+                "custom_note": "metadata with non-ASCII: 東京",
+                "sshs_model_hash": "old-model-hash",
+                "sshs_legacy_hash": "old-legacy",
+            }
+            save_file(
+                {
+                    "diffusion_model.block.proj.lora_down.weight": down,
+                    "diffusion_model.block.proj.lora_up.weight": up,
+                },
+                source,
+                metadata=metadata,
+            )
+            preview = trim_lora(source, relative_error=0.04, max_rank=2)
+            written = trim_lora(
+                source,
+                relative_error=0.04,
+                max_rank=2,
+                output=destination,
+                expected_preview=preview["preview_token"],
+            )
+            self.assertEqual(written["estimated_output_bytes"], destination.stat().st_size)
+            self.assertGreater(destination.stat().st_size, 0x110000)
+
+            output_state = load_file(destination)
+            with safe_open(str(destination), framework="pt", device="cpu") as handle:
+                output_metadata = handle.metadata() or {}
+            self.assertEqual(output_metadata["ss_training_comment"], metadata["ss_training_comment"])
+            self.assertEqual(output_metadata["custom_note"], metadata["custom_note"])
+            # This uses toolkit.metadata's real Safetensors serialization plus
+            # the Additional Networks full-data and legacy-window hash helpers.
+            expected_metadata = OrderedDict(
+                (key, value) for key, value in metadata.items() if key.startswith("ss_")
+            )
+            add_model_hash_to_meta(output_state, expected_metadata)
+            self.assertEqual(output_metadata["sshs_model_hash"], expected_metadata["sshs_model_hash"])
+            self.assertEqual(output_metadata["sshs_legacy_hash"], expected_metadata["sshs_legacy_hash"])
+            serialized = save(output_state, expected_metadata)
+            self.assertGreater(len(serialized), 0x110000)
 
     def test_preview_write_preserves_metadata_size_and_loads_in_toolkit_network(self):
         with self.temporary_directory() as temp_dir:
@@ -513,6 +605,36 @@ class LoraTrimmingTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "DoRA"):
                 trim_lora(metadata_dora)
+
+            metadata_rslora = root / "metadata-rslora.safetensors"
+            save_file(
+                {
+                    "diffusion_model.block.proj.lora_down.weight": down,
+                    "diffusion_model.block.proj.lora_up.weight": up,
+                },
+                metadata_rslora,
+                metadata={"ss_network_args": json.dumps({"use_rslora": True})},
+            )
+            with self.assertRaisesRegex(ValueError, "rsLoRA"):
+                trim_lora(metadata_rslora)
+
+    def test_peft_sidecar_is_rejected_before_trimming(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "peft-adapter.safetensors"
+            down, up = make_spectral_factors()
+            save_file(
+                {
+                    "diffusion_model.block.proj.lora_down.weight": down,
+                    "diffusion_model.block.proj.lora_up.weight": up,
+                },
+                source,
+            )
+            (root / "adapter_config.json").write_text(
+                json.dumps({"r": 8, "lora_alpha": 8}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "sidecar"):
+                trim_lora(source, relative_error=0.1)
 
 
 if __name__ == "__main__":

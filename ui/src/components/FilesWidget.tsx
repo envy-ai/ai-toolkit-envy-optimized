@@ -2,11 +2,20 @@ import React from 'react';
 import useFilesList from '@/hooks/useFilesList';
 import { Loader2, AlertCircle, Download, Box, Brain, Trash2, SlidersHorizontal } from 'lucide-react';
 import { openMergeLoRAsModal } from './MergeLoRAsModal';
+import { openTrimLoRAModal } from './TrimLoRAModal';
 import { getFilename, getFoldername, encodeFilePathForUrl } from '@/utils/basic';
 import { openConfirm } from './ConfirmModal';
 import { apiClient } from '@/utils/api';
 
-export default function FilesWidget({ jobID, jobName, isSliderSpace = false }: { jobID: string; jobName: string; isSliderSpace?: boolean }) {
+export default function FilesWidget({
+  jobID,
+  jobName,
+  isSliderSpace = false,
+}: {
+  jobID: string;
+  jobName: string;
+  isSliderSpace?: boolean;
+}) {
   const { files, status, refreshFiles } = useFilesList(jobID, 5000);
 
   const isOptimizerFile = (filePath: string) => getFilename(filePath) === 'optimizer.pt';
@@ -74,10 +83,12 @@ export default function FilesWidget({ jobID, jobName, isSliderSpace = false }: {
       </div>
 
       <div className="p-2">
-        {isSliderSpace && <p className="px-2 py-2 text-xs text-gray-400">
-          Load a direction LoRA at positive or negative strength to explore it; 0 returns to the base model.
-          All directions are exported, regardless of preview selection.
-        </p>}
+        {isSliderSpace && (
+          <p className="px-2 py-2 text-xs text-gray-400">
+            Load a direction LoRA at positive or negative strength to explore it; 0 returns to the base model. All
+            directions are exported, regardless of preview selection.
+          </p>
+        )}
         {status === 'loading' && (
           <div className="flex items-center justify-center py-4">
             <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
@@ -93,12 +104,12 @@ export default function FilesWidget({ jobID, jobName, isSliderSpace = false }: {
 
         {['success', 'refreshing'].includes(status) && (
           <div className="space-y-1">
-            {checkpointFiles.map((file, index) => {
+            {checkpointFiles.map(file => {
               const fileName = getFilename(file.path);
               const nameWithoutExt = fileName.replace('.safetensors', '');
               return (
                 <div
-                  key={index}
+                  key={file.path}
                   className="group flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-gray-800 transition-all duration-200"
                 >
                   <a
@@ -118,6 +129,16 @@ export default function FilesWidget({ jobID, jobName, isSliderSpace = false }: {
                   </a>
                   <div className="flex items-center space-x-3 flex-shrink-0">
                     <span className="text-xs text-gray-400">{cleanSize(file.size)}</span>
+                    {file.path.toLowerCase().endsWith('.safetensors') && (
+                      <button
+                        type="button"
+                        onClick={() => openTrimLoRAModal(file.path, refreshFiles)}
+                        className="text-xs text-blue-400 hover:text-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        aria-label={`Trim ${fileName}`}
+                      >
+                        Trim
+                      </button>
+                    )}
                     <a
                       target="_blank"
                       href={`/api/files/${encodeFilePathForUrl(file.path)}`}

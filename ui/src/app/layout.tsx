@@ -13,6 +13,7 @@ import DocModal from '@/components/DocModal';
 import os from 'os';
 import { CaptionDatasetModal } from '@/components/CaptionDatasetModal';
 import MergeLoRAsModal from '@/components/MergeLoRAsModal';
+import TrimLoRAModal from '@/components/TrimLoRAModal';
 import UpsamplePromptsModal from '@/components/UpsamplePromptsModal';
 import PromptBoxEditorModal from '@/components/PromptBoxEditorModal';
 import TrainingProgressFavicon from '@/components/TrainingProgressFavicon';
@@ -77,6 +78,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <DocModal />
         <CaptionDatasetModal />
         <MergeLoRAsModal />
+        <TrimLoRAModal />
         <UpsamplePromptsModal />
         <PromptBoxEditorModal />
       </body>
