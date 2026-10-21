@@ -700,11 +700,11 @@ class BaseModel:
 
                         if isinstance(self.adapter, CustomAdapter):
                             self.adapter.is_unconditional_run = True
-                        unconditional_embeds = self.encode_prompt(
+                        unconditional_embeds = self.encode_unconditional_prompt(
                             gen_config.negative_prompt,
                             gen_config.negative_prompt_2,
                             force_all=True,
-                            control_images=ctrl_img,
+                            control_images=ctrl_img if getattr(self, 'unconditional_text_uses_control_images', True) else None,
                             target_size=(gen_config.width, gen_config.height),
                         )
                         if isinstance(self.adapter, CustomAdapter):
@@ -1184,6 +1184,10 @@ class BaseModel:
         if return_first_prediction:
             return latents, first_prediction
         return latents
+
+    def encode_unconditional_prompt(self, *args, **kwargs):
+        """Model hook for CFG text policy; ordinary models retain their encoding."""
+        return self.encode_prompt(*args, **kwargs)
 
     def encode_prompt(
             self,
@@ -1868,6 +1872,7 @@ class BaseModel:
         self,
         cache_path: Optional[str],
         component_name: str,
+        *, strict: bool = False,
     ):
         if cache_path is None or not os.path.exists(cache_path):
             return None
@@ -1883,6 +1888,8 @@ class BaseModel:
                 patch_dequantization_on_save(module)
             return module
         except Exception as e:
+            if strict:
+                raise RuntimeError(f'Failed to load requested quantized {component_name} cache {cache_path}: {e}') from e
             self.print_and_status_update(
                 f"Failed to load cached quantized {component_name}: {e}"
             )
@@ -1919,6 +1926,7 @@ class BaseModel:
         module: torch.nn.Module,
         cache_path: Optional[str],
         component_name: str,
+        *, strict: bool = False,
     ):
         if cache_path is None:
             return
@@ -1942,6 +1950,8 @@ class BaseModel:
             )
             if os.path.exists(tmp_cache_path):
                 os.remove(tmp_cache_path)
+            if strict:
+                raise RuntimeError(f'Failed to save requested quantized {component_name} cache {cache_path}: {e}') from e
         finally:
             if had_dequant_patch and not hasattr(module, "orig_state_dict"):
                 patch_dequantization_on_save(module)

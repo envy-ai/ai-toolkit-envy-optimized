@@ -543,6 +543,20 @@ def patch_krea_edit_preview(workflow, request):
 
 def validate_model_workflow(workflow, request):
     """Reject incompatible CFG references and specialized native schedules."""
+    if request.model_arch.split(':')[0] == 'fibo2':
+        try:
+            caption = json.loads(request.negative_prompt)
+        except (ValueError, TypeError):
+            caption = None
+        if isinstance(caption, dict) and 'structured_caption' in caption:
+            caption = caption['structured_caption']
+        entries = caption.get('text_render') if isinstance(caption, dict) else None
+        if isinstance(entries, list) and any(isinstance(entry, dict) and isinstance(entry.get('text'), str) and entry['text']
+                for entry in entries):
+            raise ValueError('FIBO2 Comfy previews cannot use glyph text_render entries in negative prompts; use native previews or a plain/empty negative prompt')
+        if not any(node.get('class_type') == 'CLIPLoader' and node.get('inputs', {}).get('type') == 'fibo2'
+                   for node in workflow.values()) or not any(node.get('class_type') == 'TextEncodeFibo2' for node in workflow.values()):
+            raise ValueError('FIBO2 previews require CLIPLoader type fibo2 and TextEncodeFibo2 conditioning')
     if request.model_arch.split(':')[0] == 'moss_image':
         if request.specialized_flow:
             raise ValueError('MOSS-Image specialized modes require native previews; disable the ComfyUI renderer')

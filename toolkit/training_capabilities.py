@@ -24,6 +24,7 @@ class FlowTrainingCapability:
 
 FLOW_TRAINING_MODELS = {
     'qwen_image_2': FlowTrainingCapability('Qwen Image 2.1', 32, edit_references=True),
+    'fibo2': FlowTrainingCapability('FIBO2 Dev', 16, edit_references=True),
     'krea2': FlowTrainingCapability('Krea 2', 16, edit_references=True),
     'anima': FlowTrainingCapability('Anima', 32),
     'ideogram4': FlowTrainingCapability('Ideogram 4', 16, image_only_cfg=True),
@@ -82,8 +83,13 @@ def validate_specialized_model(config, mode=None):
     model = config.get('model') or {}
     arch = model.get('arch')
     capability = FLOW_TRAINING_MODELS.get(arch)
+    if arch == 'fibo2':
+        if not model.get('vae_path'):
+            raise ValueError('FIBO2 requires an explicit FLUX.2 VAE path')
+        if (config.get('train') or {}).get('train_text_encoder'):
+            raise ValueError('FIBO2 requires a frozen Qwen3-VL text encoder')
     if capability is None:
-        raise ValueError(f'{mode} supports Qwen Image 2.1, Krea 2, Anima, Ideogram 4 and MOSS-Image')
+        raise ValueError(f'{mode} supports Qwen Image 2.1, FIBO2 Dev, Krea 2, Anima, Ideogram 4 and MOSS-Image')
     networks = ('lora', 'dora') if mode.startswith('fizgig_') else ('lora',)
     if (config.get('network') or {}).get('type') not in networks:
         labels = {'lora': 'LoRA', 'dora': 'DoRA'}
@@ -118,7 +124,7 @@ def validate_specialized_model(config, mode=None):
         # A frozen Qwen helper is part of both the policy and its reference.
         # Preview-only inference adapters do not alter the training reference.
         auxiliary_paths = ['unconditional_lora_path']
-        if arch != 'qwen_image_2':
+        if arch not in ('qwen_image_2', 'fibo2'):
             auxiliary_paths.append('assistant_lora_path')
         if any(model.get(key) for key in auxiliary_paths):
             if arch == 'qwen_image_2':
@@ -126,7 +132,7 @@ def validate_specialized_model(config, mode=None):
             paths = ', '.join(f'model.{key}' for key in auxiliary_paths if model.get(key))
             raise ValueError(f'{mode} does not support auxiliary LoRA paths: {paths}')
         name = str(model.get('name_or_path', ''))
-        if kwargs.get('is_distilled') or re.search(r'(?i)(?:^|[\W_])(?:turbo|lightning|distilled)(?:$|[\W_])', name):
+        if kwargs.get('is_distilled') or (arch == 'fibo2' and kwargs.get('turbo')) or re.search(r'(?i)(?:^|[\W_])(?:turbo|lightning|distilled)(?:$|[\W_])', name):
             raise ValueError(f'{mode} currently requires a base checkpoint, not a turbo/step-distilled variant')
         if arch == 'krea2' and mode in ('fizgig_image_slider', 'fizgig_prompt_slider', 'sliderspace'):
             if kwargs.get('edit') or kwargs.get('kv_cache'):

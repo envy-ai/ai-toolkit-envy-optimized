@@ -264,6 +264,12 @@ class SDTrainer(BaseSDTrainProcess):
                         ctrl_img = ctrl_img_list
                     else:
                         ctrl_img = ctrl_img_list[0] if len(ctrl_img_list) > 0 else None
+                    if getattr(self.sd, 'arch', None) == 'fibo2':
+                        # Use the same path/alias ordering as live previews and
+                        # their VAE references, including intentionally repeated slots.
+                        ctrl_img = [TF.to_tensor(self.sd.load_sample_control_image(source)).unsqueeze(0)
+                            .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
+                            for source in self.sd.get_sample_control_image_paths(gen_img_config)]
                     
                     
                     target_size = (gen_img_config.width, gen_img_config.height)
@@ -272,14 +278,14 @@ class SDTrainer(BaseSDTrainProcess):
                         control_images=ctrl_img,
                         target_size=target_size,
                     ).to('cpu')
-                    negative = self.sd.encode_prompt(
+                    negative = getattr(self.sd, 'encode_unconditional_prompt', self.sd.encode_prompt)(
                         gen_img_config.negative_prompt,
-                        control_images=ctrl_img,
+                        control_images=ctrl_img if getattr(self.sd, 'unconditional_text_uses_control_images', True) else None,
                         target_size=target_size,
                     ).to('cpu')
                 else:
                     positive = self.sd.encode_prompt(gen_img_config.prompt).to('cpu')
-                    negative = self.sd.encode_prompt(gen_img_config.negative_prompt).to('cpu')
+                    negative = getattr(self.sd, 'encode_unconditional_prompt', self.sd.encode_prompt)(gen_img_config.negative_prompt).to('cpu')
                 
                 self.sd.sample_prompts_cache.append({
                     'conditional': positive,

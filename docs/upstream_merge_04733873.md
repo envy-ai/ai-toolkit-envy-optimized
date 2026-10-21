@@ -21,4 +21,7 @@ No global Diffusers or Transformers dependency is replaced for FIBO 2.
 The preservation requirements and earlier qualification evidence in
 `upstream_merge_31f4d92f.md` continue to apply.
 
-Focused merge verification is recorded with the FIBO 2 integration results.
+Focused verification passed: `test_moss_image_modes.py` and
+`test_moss_image_text_encoder_path.py` (19 tests, 30 subtests), plus a fresh
+Qwen 3.8 module import with `_FLA` still unset and no `fla` module imported.
+These CPU checks ran in a 16 GB, no-swap systemd scope (595 MB peak).

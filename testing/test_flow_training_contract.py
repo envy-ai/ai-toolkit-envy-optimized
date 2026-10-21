@@ -19,7 +19,10 @@ from toolkit.training_capabilities import (FLOW_TRAINING_MODELS, SPECIALIZED_MOD
 
 class CapabilityTests(unittest.TestCase):
     def config(self, arch, mode='flow_dpo', **kwargs):
-        return {'type': mode, 'model': {'arch': arch, 'model_kwargs': kwargs},
+        model = {'arch': arch, 'model_kwargs': kwargs}
+        if arch == 'fibo2':
+            model['vae_path'] = '/fixture/flux2-vae.safetensors'
+        return {'type': mode, 'model': model,
                 'network': {'type': 'lora'}}
 
     def test_all_architectures_modes_and_legacy_aliases(self):
@@ -36,13 +39,13 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(canonical_training_mode('qwen_flow_dpo'), 'flow_dpo')
         validate_specialized_model(self.config('qwen_image_2', 'qwen_guidance_distillation'))
 
-    def test_frozen_training_helpers_supported_in_all_qwen_modes_only(self):
+    def test_frozen_training_helpers_supported_in_qwen_and_fibo_modes_only(self):
         for arch in FLOW_TRAINING_MODELS:
             for mode in SPECIALIZED_MODES:
                 config = self.config(arch, mode)
                 config['model']['assistant_lora_path'] = '/helper.safetensors'
                 with self.subTest(arch=arch, mode=mode):
-                    if arch == 'qwen_image_2':
+                    if arch in ('qwen_image_2', 'fibo2'):
                         validate_specialized_model(config)
                     else:
                         with self.assertRaisesRegex(ValueError, 'auxiliary LoRA'):

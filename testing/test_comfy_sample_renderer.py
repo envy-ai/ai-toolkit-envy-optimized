@@ -324,6 +324,46 @@ class ComfySampleWorkflowTests(unittest.TestCase):
             for node in rendered.values()
         ))
 
+    def test_fibo2_template_renders_no_refs_three_refs_and_both_inference_lora_sources(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        template = "config/comfy_templates/fibo2_lora_sample.json.njk"
+        base = replace(self.request, model_arch="fibo2", model="fibo2_dev.safetensors",
+            vae="flux2_vae.safetensors", text_encoder="qwen3vl_4b.safetensors",
+            inference_lora="preview.safetensors", inference_lora_absolute_path="")
+        requests = [
+            replace(base, control_image=None, control_image_2=None, control_image_3=None),
+            replace(base, inference_lora_absolute_path="/models/preview.safetensors",
+                control_image="ai-toolkit/ref1.png", control_image_2="ai-toolkit/ref2.png",
+                control_image_3="ai-toolkit/ref3.png"),
+        ]
+        for request in requests:
+            with self.subTest(references=bool(request.control_image), absolute=bool(request.inference_lora_absolute_path)):
+                rendered = comfy_sample.get_workflow_for_sample(template, request)
+                json.dumps(rendered)  # The project's actual Nunjucks renderer must produce serializable JSON.
+                self.assertEqual(rendered["1"]["inputs"]["unet_name"], "fibo2_dev.safetensors")
+                self.assertEqual(rendered["2"]["inputs"]["type"], "fibo2")
+                self.assertEqual(rendered["4"]["inputs"]["absolute_path"], request.training_lora_path)
+                if request.inference_lora_absolute_path:
+                    self.assertEqual(rendered["5"]["class_type"], "load_lora_from_absolute_path")
+                    self.assertEqual(rendered["5"]["inputs"]["absolute_path"], request.inference_lora_absolute_path)
+                else:
+                    self.assertEqual(rendered["5"]["class_type"], "LoraLoaderModelOnly")
+                    self.assertEqual(rendered["5"]["inputs"]["lora_name"], "preview.safetensors")
+                encoder = rendered["6"]["inputs"]
+                self.assertEqual(encoder["vae"], ["3", 0])
+                for index in range(1, 4):
+                    image_path = getattr(request, "control_image" if index == 1 else f"control_image_{index}")
+                    node_id = str(19 + index)
+                    self.assertEqual(encoder.get(f"images.image_{index}"), [node_id, 0] if image_path else None)
+                    if image_path:
+                        self.assertEqual(rendered[node_id]["class_type"], "LoadImage")
+                        self.assertEqual(rendered[node_id]["inputs"]["image"], image_path)
+
+        invalid = replace(base, negative_prompt='{"structured_caption":{"text_render":[{"text":"glyph"}]}}')
+        with self.assertRaisesRegex(ValueError, "cannot use glyph text_render"):
+            comfy_sample.get_workflow_for_sample(template, invalid)
+
     def test_qwen_image_2_single_template_accepts_three_reference_images(self):
         import toolkit.comfy_sample as comfy_sample
 

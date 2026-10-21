@@ -1336,8 +1336,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         return self._run_with_models_offloaded_for_comfy(render)
 
     def _render_comfy_sample_batch(self, gen_img_config_list: List[GenerateImageConfig], sample_config: SampleConfig, step=None):
-        if getattr(self.model_config, 'arch', '').split(':')[0] == 'moss_image':
-            print_acc('MOSS-Image ComfyUI previews use individual prompts; no batch workflow is provided.')
+        if getattr(self.model_config, 'arch', '').split(':')[0] in ('moss_image', 'fibo2'):
+            print_acc(f'{self.model_config.arch} ComfyUI previews use individual prompts; no batch workflow is provided.')
             return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
         if (getattr(self, 'flow_profile', None) is not None and self.model_config.arch == 'krea2'
                 and self.model_config.model_kwargs.get('edit', False)):
@@ -3268,7 +3268,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.sd.load_model()
         profile = getattr(self, 'flow_profile', None)
         kto_cache = self.get_conf('type') == 'diffusion_kto'
-        if profile is not None and (profile.arch in ('krea2', 'anima', 'ideogram4', 'moss_image') or kto_cache):
+        if profile is not None and (profile.arch in ('krea2', 'anima', 'ideogram4', 'moss_image', 'fibo2') or kto_cache):
             from toolkit.flow_cache_identity import specialized_text_cache_identity, prepare_specialized_conditioning
             prepare_specialized_conditioning(self.sd)
             self.sd._specialized_text_cache_identity = specialized_text_cache_identity(self.sd, include_qwen=kto_cache)

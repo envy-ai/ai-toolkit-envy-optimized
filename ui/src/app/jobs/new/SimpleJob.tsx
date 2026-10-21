@@ -93,6 +93,7 @@ const comfyWorkflowOptions: SelectOption[] = [
   { value: 'config/comfy_templates/iris_lora_sample.json.njk', label: 'Iris 3B LoRA image' },
   { value: 'config/comfy_templates/anima_lora_sample.json.njk', label: 'Anima LoRA image' },
   { value: 'config/comfy_templates/ideogram4_lora_sample.json.njk', label: 'Ideogram 4 LoRA image' },
+  { value: 'config/comfy_templates/fibo2_lora_sample.json.njk', label: 'FIBO2 LoRA image / edit' },
   { value: 'config/comfy_templates/moss_image_lora_sample.json.njk', label: 'MOSS-Image LoRA image' },
   {
     value: 'config/comfy_templates/krea2_lora_sample.json.njk',
@@ -773,12 +774,17 @@ export default function SimpleJob({
                   value,
                   jobConfig,
                   setJobConfig,
+                  { preserveTrainingChoices: value === 'fibo2' || trainingModel.arch === 'fibo2' },
                 );
+                if (value === 'fibo2' || trainingModel.arch === 'fibo2') {
+                  alert('Architecture changed. Select compatible base, text encoder and VAE paths; pretrained/auxiliary adapters and edit references were cleared. Prompts, anchors, ranks and memory settings were retained.'
+                    + (value === 'fibo2' ? ' Select FIBO2 Dev, a Qwen3-VL-4B text encoder and a FLUX.2 VAE. Edit Turbo is inference-only.' : ''));
+                }
               }}
               options={specializedMode ? flowTrainingModelOptions.filter(option => trainingModeSupported(option.value, jobConfig.config.process[0].type)) : groupedModelOptions}
             />
             {specializedMode && <p className="my-3 text-xs text-gray-400">
-              Krea 2, Anima, Ideogram 4 and MOSS-Image ports are experimental until actual-checkpoint validation.
+              Krea 2, Anima, Ideogram 4, MOSS-Image and FIBO2 ports are experimental until actual-checkpoint validation.
               Training uses the model-native flow profile; practice and previews use its native generation schedule.
             </p>}
             {specializedMode && trainingModel.arch === 'ideogram4' && <details className="my-3 rounded border border-gray-700 p-3">
@@ -810,7 +816,7 @@ export default function SimpleJob({
               }
               required
             />
-            {(!isSliderSpace || modelArch?.name === 'qwen_image_2') && modelArch?.additionalSections?.includes('model.assistant_lora_path') && (
+            {(!isSliderSpace || ['qwen_image_2', 'fibo2'].includes(modelArch?.name ?? '')) && modelArch?.additionalSections?.includes('model.assistant_lora_path') && (
               <TextInput
                 label="Helper LoRA Path"
                 value={jobConfig.config.process[0].model.assistant_lora_path ?? ''}
@@ -832,7 +838,9 @@ export default function SimpleJob({
                 onChange={(value: string | undefined) => {
                   setJobConfig(value?.trim() || undefined, 'config.process[0].model.text_encoder_path');
                 }}
-                placeholder={effectiveTrainingModel.arch === 'moss_image'
+                placeholder={effectiveTrainingModel.arch === 'fibo2'
+                  ? '/absolute/path/to/qwen3vl_4b_bf16.safetensors'
+                  : effectiveTrainingModel.arch === 'moss_image'
                   ? '/absolute/path/to/qwen3.5_9b.safetensors'
                   : '/absolute/path/to/qwen3vl_8b.safetensors'}
               />
@@ -842,7 +850,9 @@ export default function SimpleJob({
                 label="Image VAE Checkpoint"
                 value={jobConfig.config.process[0].model.vae_path ?? ''}
                 onChange={(value: string | undefined) => setJobConfig(value?.trim() || undefined, 'config.process[0].model.vae_path')}
-                placeholder="/absolute/path/to/hunyuan_image_3_vae_fp16.safetensors"
+                placeholder={effectiveTrainingModel.arch === 'fibo2'
+                  ? '/absolute/path/to/flux2-vae.safetensors'
+                  : '/absolute/path/to/hunyuan_image_3_vae_fp16.safetensors'}
                 required
               />
             )}
@@ -1467,7 +1477,7 @@ export default function SimpleJob({
                 {isMultipoint ? 'Each nonzero strength learns its own target using one LoRA or DoRA. The base model defines neutral.'
                   : '+1 and −1 are trained as opposite strengths of one LoRA or DoRA. The three sample prompts use the same seed at strengths −1, 0 and +1.'}
               </p>
-              {trainingModel.arch === 'ideogram4' && <p className="mb-3 text-xs text-amber-400">For structured JSON captions, use complete specific prompts or multipoint targets. Prepending a simple text prefix makes JSON no longer a standalone structured caption; strings are not silently rewritten.</p>}
+              {['ideogram4', 'fibo2'].includes(trainingModel.arch) && <p className="mb-3 text-xs text-amber-400">For structured JSON captions, use complete specific prompts or multipoint targets. Prepending a simple text prefix makes JSON no longer a standalone structured caption; strings are not silently rewritten.</p>}
               {isFizgigImageSlider ? (
                 <>
                   <p className="text-sm text-gray-400 mb-4">

@@ -57,6 +57,10 @@ def resolved_flow_components(model):
         'precision': {key: getattr(config, key, None) for key in ('quantize', 'qtype', 'quantize_te', 'qtype_te')},
         'dtype': str(getattr(model, 'torch_dtype', None)),
         'vae_dtype': str(getattr(model, 'vae_torch_dtype', None))}
+    if model.arch == 'fibo2':
+        helper = getattr(model, '_resolved_helper_path', None) or getattr(config, 'assistant_lora_path', None)
+        payload['helper'] = {'source': helper, 'local': local_component_identity(helper)}
+        payload['fibo_conditioning'] = model.get_text_embedding_space_version()
     return payload
 
 
@@ -90,6 +94,8 @@ def resolved_semantic_components(model, processor, name_or_path):
 def specialized_text_cache_identity(model, *, include_qwen=False):
     """Call once after loading components, before constructing dataset cache keys."""
     arch = getattr(model, 'arch', None)
+    if arch == 'fibo2':
+        return model.get_text_embedding_space_version()
     if arch not in ('krea2', 'anima', 'ideogram4', 'moss_image') and not (include_qwen and arch == 'qwen_image_2'):
         return None
     config = model.model_config

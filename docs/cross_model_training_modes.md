@@ -1,11 +1,11 @@
-# Specialized flow training: Qwen 2.1, Krea 2, Anima, Ideogram 4 and MOSS-Image
+# Specialized flow training: Qwen 2.1, Krea 2, Anima, Ideogram 4, MOSS-Image and FIBO2
 
-The form uses the same workflow cards for these five architectures. Newly created
+The form uses the same workflow cards for these six architectures. Newly created
 jobs use `flow_dpo` and `guidance_distillation`; the earlier `qwen_flow_dpo` and
 `qwen_guidance_distillation` process IDs remain valid aliases. Existing Qwen
 discovery signatures and checkpoint names are retained.
 
-The Krea, Anima, Ideogram and MOSS ports are **experimental**. CPU contract tests prove
+The Krea, Anima, Ideogram, MOSS and FIBO2 ports are **experimental**. CPU contract tests prove
 specific code paths, not image quality or memory fit at production resolutions.
 Separately approved, opt-in GPU smoke tests now exercise local Qwen and Krea
 checkpoints; their configurations and results are recorded in the progress ledger.
@@ -32,7 +32,7 @@ Saved YAML prompt sets remain shared text, not architecture-specific embeddings.
 Both simplified and specific/multipoint prompts, prefixes and anchors retain the
 existing load/search/save/delete behavior.
 
-Diffusion-KTO is a new experimental flow-velocity adaptation on all five models.
+Diffusion-KTO is a new experimental flow-velocity adaptation on all six models.
 Use dataset feedback labels rather than paired controls; see
 [the KTO guide](diffusion_kto_training.md) for its estimator/window configuration,
 restrictions and four examples. Its CPU replay evidence is not actual-model
@@ -45,6 +45,16 @@ the frozen reference or the dataset repeat count.
 
 ## Model boundaries
 
+- FIBO2 Dev: 16-pixel alignment and packed 128-channel FLUX.2 latents. Its
+  image-token count is the packed latent area. The flow adaptation interpolates
+  shift 0.5 to 1.15 over 256 to 4096 image tokens; this is not a claim about an
+  unreleased vendor training sampler. Qwen3-VL-4B conditioning retains six
+  hidden-state bundles, real-token masks and base/glyph variants. Empty CFG
+  captions use trained JSON null; edit negatives remain text-only but share
+  clean reference latents. Select explicit training encoder and FLUX.2 VAE
+  paths. Only non-distilled Dev is a training base; Edit Turbo is inference-only.
+  See [FIBO2 setup, examples and previews](fibo2_training.md) and its separate
+  [validation ledger](fibo2_validation.md).
 - Krea: 16-pixel bucket alignment. Training shifts use image-token counts, not
   Qwen latent area; `schedule_mu` fixes the shift, or `schedule_min_res`,
   `schedule_max_res`, `schedule_y1`, `schedule_y2` set its endpoints. The native
@@ -124,7 +134,7 @@ requires text-negative mode and nonempty teacher negative text; it learns
 `v_positive + (CFG-1)*(v_image_only-v_negative)`. Other models use the encoded
 blank-caption prediction in that baseline term.
 
-Keep complete Ideogram structured JSON in specific prompts, multipoint targets,
+Keep complete Ideogram/FIBO2 structured JSON in specific prompts, multipoint targets,
 anchors or dataset captions. A simple text prefix followed by JSON is not a
 standalone structured caption. The form warns; it does not silently rewrite
 strings. Native and provided Ideogram Comfy templates use the existing caption
@@ -178,10 +188,24 @@ import preserves split/fused MLP layers and per-layer ranks/scales. With layer
 offloading enabled it attaches before streaming starts, keeping the transformer
 on CPU during setup to avoid a temporary full-model GPU allocation.
 
+FIBO2 Dev supports the same optional frozen-helper separation across applicable
+ordinary and specialized workflows. The helper is excluded from previews and
+exports; the inference adapter remains preview-only. No FIBO2 Turbo training
+helper has been validated. FIBO2 ordinary training, DPO and distillation can use
+actual edit sources: DPO reserves Control Dataset 1 for rejected output and
+Controls 2/3 for sources. Fizgig, SliderSpace and KTO remain text-to-image.
+
 ## Preview renderers
 
 Practice/discovery generation remains native even when previews use Comfy.
 Select a compatible workflow and component files explicitly:
+
+FIBO2 uses [`fibo2_lora_sample.json.njk`](fibo2_training.md#comfyui-previews)
+with `CLIPLoader` type `fibo2` and installed `TextEncodeFibo2`. The combined
+encoder node supplies positive/negative conditioning and the packed latent,
+including glyph noise scheduling and shared edit reference latents. Existing
+ordered sample references and signed adapter strengths are retained. Prompts
+render individually; practice/discovery generation remains native.
 
 Ordinary MOSS-Image training can use native previews or the dedicated
 [`moss_image_lora_sample.json.njk` workflow](moss_image_comfy_samples.md).
@@ -268,7 +292,7 @@ Do not install dependencies or restart Comfy during training.
 ## Examples and validation
 
 `config/examples/train_{mode}_{arch}.yaml` covers each of the six modes for
-`krea2`, `anima`, `ideogram4`, and `moss_image`. Replace all placeholder data/component paths.
+`krea2`, `anima`, `ideogram4`, `moss_image`, and `fibo2`. Replace all placeholder data/component paths.
 Their counts/ranks/steps are engineering examples, not measured quality advice.
 
 MOSS CPU coverage uses contracts and tiny native transformers; no full checkpoint

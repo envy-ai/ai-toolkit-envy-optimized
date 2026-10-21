@@ -1,4 +1,16 @@
-import type { JobConfig, DatasetConfig, DiffusionKTOConfig } from '@/types';
+import type { JobConfig, DatasetConfig, DiffusionKTOConfig, SampleItem } from '@/types';
+
+export const architectureModelSourceFields = ['text_encoder_path', 'te_name_or_path', 'vae_path',
+  'extras_name_or_path', 'assistant_lora_path', 'inference_lora_path', 'unconditional_lora_path',
+  'lora_path', 'unet_path', 'refiner_name_or_path', 'model_paths'] as const;
+export const architectureComfyAdapterSourceFields = ['inference_lora_absolute_path', 'inference_lora_path', 'inference_lora_enabled'] as const;
+
+/** Keep preview prompt/settings while removing references to the old architecture. */
+export function clearArchitectureSampleReferences(sample: SampleItem): SampleItem {
+  const next = { ...sample };
+  for (const key of ['ctrl_img', 'ctrl_img_1', 'ctrl_img_2', 'ctrl_img_3'] as const) delete next[key];
+  return next;
+}
 
 /** Mirrored by toolkit/training_capabilities.py; tested against that table. */
 export const flowTrainingModels: Record<string, { label: string; bucketDivisibility: number; editReferences: boolean }> = {
@@ -7,6 +19,7 @@ export const flowTrainingModels: Record<string, { label: string; bucketDivisibil
   anima: { label: 'Anima', bucketDivisibility: 32, editReferences: false },
   ideogram4: { label: 'Ideogram 4', bucketDivisibility: 16, editReferences: false },
   moss_image: { label: 'MOSS-Image', bucketDivisibility: 16, editReferences: true },
+  fibo2: { label: 'FIBO2 Dev', bucketDivisibility: 16, editReferences: true },
 };
 const mossVariants = ['moss_image', 'moss_image:base', 'moss_image:edit', 'moss_image:base_edit'];
 export const canonicalFlowArch = (arch: string) => mossVariants.includes(arch) ? 'moss_image' : arch;
@@ -39,6 +52,20 @@ export const trainingModeVisible = (arch: string, mode: string, selected: string
 export const cfgNegativeTextEnabled = (model: { arch: string; model_kwargs?: Record<string, unknown> }) =>
   model.arch !== 'ideogram4' || model.model_kwargs?.ideogram_cfg_reference === 'negative_prompt';
 
+/** Installed TextEncodeFibo2 has no switch to disable glyph images in negatives. */
+const fibo2ComfyNegativeHasGlyphs = (prompt: string) => {
+  try {
+    const parsed = JSON.parse(prompt);
+    const caption = parsed && Object.prototype.hasOwnProperty.call(parsed, 'structured_caption') ? parsed.structured_caption : parsed;
+    return Array.isArray(caption?.text_render) && caption.text_render.some((entry: unknown) =>
+      !!entry && typeof entry === 'object' && typeof (entry as { text?: unknown }).text === 'string'
+      && (entry as { text: string }).text.length > 0);
+  } catch {
+    // Invalid JSON is a supported plain prompt and contains no glyph entries.
+    return false;
+  }
+};
+
 /** Pure pre-load checks used by imports, both save buttons and the API. */
 export function validateTrainingCapabilities(config: JobConfig): string[] {
   const process = config?.config?.process?.[0];
@@ -51,6 +78,20 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
   }
   if (process.logging?.record_training_rng && process.logging?.record_training_examples === false) errors.push('Recording noise RNG state requires per-image loss logging.');
   if (process.model?.arch === 'krea2_edit') errors.push(...validateKrea2Edit(config));
+  if (process.model?.arch === 'fibo2') {
+    const kwargs = process.model.model_kwargs ?? {};
+    if (!process.model.vae_path) errors.push('FIBO2 requires an explicit FLUX.2 VAE checkpoint in model.vae_path.');
+    if (process.train?.train_text_encoder) errors.push('FIBO2 training requires a frozen Qwen3-VL-4B text encoder.');
+    if (kwargs.turbo || kwargs.is_distilled || /(?:^|[\W_])(?:turbo|lightning|distilled)(?:$|[\W_])/i.test(process.model.name_or_path ?? '')) {
+      errors.push('FIBO2 training requires the non-distilled Dev checkpoint. Edit Turbo is inference-only; select it only in an inference workflow.');
+    }
+    if (process.sample?.comfy?.enabled && (process.sample.comfy.workflow_path ?? '').replaceAll('\\', '/').split('/').pop() !== 'fibo2_lora_sample.json.njk') {
+      errors.push('FIBO2 Comfy previews require fibo2_lora_sample.json.njk and compatible FIBO2, Qwen3-VL-4B and FLUX.2 VAE files.');
+    }
+    if (process.sample?.comfy?.enabled && fibo2ComfyNegativeHasGlyphs(process.sample.comfy.negative_prompt ?? '')) {
+      errors.push('Installed ComfyUI FIBO2 cannot keep glyph-bearing structured negatives text-only. Use an empty/plain Comfy negative prompt or native previews.');
+    }
+  }
   if (canonicalFlowArch(process.model?.arch ?? '') === 'moss_image' && process.sample?.comfy?.enabled) {
     const workflow = (process.sample.comfy.workflow_path ?? 'config/comfy_templates/krea2_lora_sample.json.njk')
       .replaceAll('\\', '/').split('/').pop() ?? '';
@@ -60,7 +101,7 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
   }
   if (!isSpecializedTrainingMode(mode)) return errors;
   const model = process.model && effectiveFlowModel(process.model);
-  if (!model || !flowTrainingModels[model.arch]) return [...errors, `${mode} supports Qwen Image 2.1, Krea 2, Anima, Ideogram 4 and MOSS-Image.`];
+  if (!model || !flowTrainingModels[model.arch]) return [...errors, `${mode} supports Qwen Image 2.1, Krea 2, Anima, Ideogram 4, MOSS-Image and FIBO2 Dev.`];
   const networks = mode.startsWith('fizgig_') ? ['lora', 'dora'] : ['lora'];
   if (!networks.includes(process.network?.type ?? '')) errors.push(`${mode} requires ${networks.length === 1 ? 'LoRA only' : 'LoRA or DoRA'}.`);
   const kwargs = model.model_kwargs ?? {};
@@ -89,9 +130,9 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
   if (model.arch === 'ideogram4' && !['image_only', 'negative_prompt'].includes(String(kwargs.ideogram_cfg_reference ?? 'image_only'))) errors.push('Choose image-only or text-negative Ideogram CFG reference.');
   if (model.arch !== 'qwen_image_2' || mode === 'diffusion_kto') {
     const unsupportedPaths = ['unconditional_lora_path',
-      ...(model.arch !== 'qwen_image_2' ? ['assistant_lora_path'] : [])] as const;
+      ...(!['qwen_image_2', 'fibo2'].includes(model.arch) ? ['assistant_lora_path'] : [])] as const;
     const configuredPaths = unsupportedPaths.filter(key => model[key as keyof typeof model]);
-    if (configuredPaths.length) errors.push(`Unsupported auxiliary LoRA paths: ${configuredPaths.map(key => `model.${key}`).join(', ')}. Frozen Qwen training helpers and preview-only inference LoRAs are supported.`);
+    if (configuredPaths.length) errors.push(`Unsupported auxiliary LoRA paths: ${configuredPaths.map(key => `model.${key}`).join(', ')}. Frozen Qwen/FIBO2 training helpers and preview-only inference LoRAs are supported.`);
     if (kwargs.is_distilled || /(?:^|[\W_])(?:turbo|lightning|distilled)(?:$|[\W_])/i.test(model.name_or_path ?? '')) errors.push('Specialized training currently requires a base checkpoint, not a turbo/step-distilled variant.');
     if (model.arch === 'krea2' && (mode.startsWith('fizgig_') || mode === 'sliderspace') && (kwargs.edit || kwargs.kv_cache)) errors.push('Fizgig and SliderSpace are text-to-image objectives. Disable Krea edit and kv_cache.');
   }
@@ -163,7 +204,7 @@ export function validateDiffusionKTO(config: JobConfig): string[] {
   if (settings.reference_estimator === 'score_window' && (settings.score_window_size < 2 || accumulation < settings.score_window_size)) errors.push(`KTO score windows require at least 2 batches and Gradient Accumulation >= ${settings.score_window_size}.`);
   if ((train.gradient_accumulation_steps ?? 1) !== 1) errors.push('KTO uses Gradient Accumulation within one optimizer step, not gradient_accumulation_steps.');
   const network = raw.network ?? {};
-  if (network.pretrained_lora_path || (process.model.arch !== 'qwen_image_2' && process.model.assistant_lora_path) || process.model.unconditional_lora_path) errors.push('KTO supports frozen Qwen training helpers and preview-only inference LoRAs, but no pretrained or other auxiliary LoRAs.');
+  if (network.pretrained_lora_path || (!['qwen_image_2', 'fibo2'].includes(process.model.arch) && process.model.assistant_lora_path) || process.model.unconditional_lora_path) errors.push('KTO supports frozen Qwen/FIBO2 training helpers and preview-only inference LoRAs, but no pretrained or other auxiliary LoRAs.');
   const networkOptions = network.network_kwargs ?? {};
   if (typeof networkOptions !== 'object' || Array.isArray(networkOptions)) errors.push('KTO network_kwargs must be an object.');
   if ([network, networkOptions].some(values => ['dropout', 'rank_dropout', 'module_dropout'].some(key => values[key] != null && values[key] !== 0))) errors.push('KTO requires zero adapter dropout for exact replay.');
@@ -232,12 +273,19 @@ export function switchSpecializedArchitecture(config: JobConfig, arch: string): 
   if (!isSpecializedTrainingMode(process.type) || !trainingModeSupported(arch, process.type)) throw new Error('Unsupported specialized training architecture.');
   process.model.arch = arch;
   process.model.name_or_path = '';
-  delete process.model.text_encoder_path;
-  delete process.model.te_name_or_path;
-  delete process.model.vae_path;
-  delete process.model.assistant_lora_path;
-  delete process.model.unconditional_lora_path;
+  for (const key of architectureModelSourceFields) delete (process.model as unknown as Record<string, unknown>)[key];
   process.model.model_kwargs = mossVariantKwargs(arch);
+  process.sample.samples = process.sample.samples.map(clearArchitectureSampleReferences);
+  if (process.sample.comfy) {
+    process.sample.comfy.inference_lora = '';
+    for (const key of architectureComfyAdapterSourceFields) delete (process.sample.comfy as unknown as Record<string, unknown>)[key];
+  }
+  if (arch === 'fibo2') {
+    process.train.noise_scheduler = 'flowmatch';
+    process.train.timestep_type = 'shift';
+    process.sample.sampler = 'flowmatch';
+    if (process.sample.comfy) process.sample.comfy.workflow_path = 'config/comfy_templates/fibo2_lora_sample.json.njk';
+  }
   if (process.network) delete process.network.pretrained_lora_path;
   const paired = ['flow_dpo', 'fizgig_image_slider'].includes(canonicalTrainingMode(process.type));
   for (const dataset of process.datasets ?? []) {
@@ -248,6 +296,7 @@ export function switchSpecializedArchitecture(config: JobConfig, arch: string): 
     dataset.controls = [];
   }
   const source = canonicalFlowArch(arch) === 'moss_image'
-    ? ` For this variant select OpenMOSS-Team/MOSS-Image-${['moss_image:base', 'moss_image:base_edit'].includes(arch) ? 'Base' : 'SFT'} or compatible weights.` : '';
+    ? ` For this variant select OpenMOSS-Team/MOSS-Image-${['moss_image:base', 'moss_image:base_edit'].includes(arch) ? 'Base' : 'SFT'} or compatible weights.`
+    : arch === 'fibo2' ? ' Select FIBO2 Dev, a Qwen3-VL-4B text encoder and a FLUX.2 VAE. Edit Turbo is inference-only.' : '';
   return { config: next, notice: 'Architecture changed. Select compatible base, text encoder and VAE paths; model-specific overrides, pretrained/auxiliary adapters and edit references were cleared. Prompts, paired targets, anchors, ranks and memory settings were retained.' + source };
 }

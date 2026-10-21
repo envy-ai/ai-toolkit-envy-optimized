@@ -2,6 +2,19 @@ import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
 import { ModelArch } from './options';
 import { objectCopy } from '@/utils/basic';
 import { getDatasetControlPaths } from '@/helpers/datasetControls';
+import { architectureComfyAdapterSourceFields, architectureModelSourceFields, clearArchitectureSampleReferences } from './trainingCapabilities';
+
+const retainedTrainingFields = new Set([
+  'model.quantize', 'model.quantize_te', 'model.qtype', 'model.qtype_te',
+  'model.low_vram', 'model.low_vram_layer_streaming', 'model.layer_offloading',
+  'model.layer_offloading_transformer_percent', 'model.layer_offloading_text_encoder_percent',
+  'model.compile', 'model.block_compile', 'model.compile_mode', 'model.compile_fullgraph',
+  'model.compile_dynamic', 'model.cache_size_limit',
+  'model.cache_quantized_models',
+  'train.gradient_checkpointing', 'train.cache_text_embeddings', 'train.unload_text_encoder',
+  'network.linear', 'network.linear_alpha', 'network.conv', 'network.conv_alpha',
+  'network.lokr_full_rank', 'network.lokr_factor',
+]);
 
 const expandDatasetDefaults = (
   defaults: { [key: string]: any },
@@ -28,6 +41,7 @@ export const handleModelArchChange = (
   newArchName: string,
   jobConfig: JobConfig,
   setJobConfig: (value: any, key: string) => void,
+  options: { preserveTrainingChoices?: boolean } = {},
 ) => {
   const currentArch = modelArchs.find(a => a.name === currentArchName);
   if (currentArchName === newArchName) {
@@ -40,14 +54,25 @@ export const handleModelArchChange = (
     console.error(`Unknown model architecture: ${newArchName}`);
     return;
   }
+  const retainedSamples = jobConfig.config.process[0].sample.samples.map(clearArchitectureSampleReferences);
+
+  // Components change identity across architectures; user training choices do not.
+  const setArchitectureValue = (value: any, key: string) => {
+    if (options.preserveTrainingChoices) {
+      if (retainedTrainingFields.has(key.replace('config.process[0].', ''))) return;
+      if (key === 'config.process[0].sample') value = { ...value, samples: retainedSamples };
+      if (key === 'config.process[0].sample.samples') return;
+    }
+    setJobConfig(value, key);
+  };
 
   // update vram setting
-  if (!newArch?.additionalSections?.includes('model.low_vram')) {
+  if (!options.preserveTrainingChoices && !newArch?.additionalSections?.includes('model.low_vram')) {
     setJobConfig(false, 'config.process[0].model.low_vram');
   }
 
   // handle layer offloading setting
-  if (!newArch?.additionalSections?.includes('model.layer_offloading')) {
+  if (!options.preserveTrainingChoices && !newArch?.additionalSections?.includes('model.layer_offloading')) {
     if ('layer_offloading' in jobConfig.config.process[0].model) {
       const newModel = objectCopy(jobConfig.config.process[0].model);
       delete newModel.layer_offloading;
@@ -55,7 +80,7 @@ export const handleModelArchChange = (
       delete newModel.layer_offloading_transformer_percent;
       setJobConfig(newModel, 'config.process[0].model');
     }
-  } else {
+  } else if (!options.preserveTrainingChoices) {
     // set to false if not set
     if (!('layer_offloading' in jobConfig.config.process[0].model)) {
       setJobConfig(false, 'config.process[0].model.layer_offloading');
@@ -145,6 +170,12 @@ export const handleModelArchChange = (
     if (!hasAutoFrameCount) {
       delete newDataset.auto_frame_count;
     }
+    if (options.preserveTrainingChoices) {
+      delete newDataset.control_path;
+      delete newDataset.control_path_1;
+      delete newDataset.control_path_2;
+      delete newDataset.control_path_3;
+    }
     return newDataset;
   });
   setJobConfig(datasets, 'config.process[0].datasets');
@@ -158,14 +189,29 @@ export const handleModelArchChange = (
     }
     return newSample;
   });
-  setJobConfig(samples, 'config.process[0].sample.samples');
+  setArchitectureValue(samples, 'config.process[0].sample.samples');
+
+  const kwargsKey = 'config.process[0].model.model_kwargs';
+  if (options.preserveTrainingChoices) setJobConfig({}, kwargsKey);
 
   // revert defaults from previous model
   for (const key in currentDefaults) {
-    setJobConfig(currentDefaults[key][1], key);
+    if (options.preserveTrainingChoices && (key === kwargsKey || key.startsWith(kwargsKey + '.'))) continue;
+    setArchitectureValue(currentDefaults[key][1], key);
   }
 
   for (const key in newDefaults) {
-    setJobConfig(newDefaults[key][0], key);
+    setArchitectureValue(newDefaults[key][0], key);
+  }
+
+  if (options.preserveTrainingChoices) {
+    setJobConfig('', 'config.process[0].model.name_or_path');
+    for (const key of architectureModelSourceFields) {
+      setJobConfig(undefined, `config.process[0].model.${key}`);
+    }
+    setJobConfig(retainedSamples, 'config.process[0].sample.samples');
+    setJobConfig('', 'config.process[0].sample.comfy.inference_lora');
+    for (const key of architectureComfyAdapterSourceFields) setJobConfig(undefined, `config.process[0].sample.comfy.${key}`);
+    setJobConfig(undefined, 'config.process[0].network.pretrained_lora_path');
   }
 };

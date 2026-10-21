@@ -106,6 +106,8 @@ class ConceptSliderTrainer(DiffusionTrainer):
         unconditional_embeds: Optional[PromptEmbeds] = None,
         **kwargs,
     ):
+        if getattr(self.sd, 'arch', None) == 'fibo2':
+            return self._fibo_guided_loss(noisy_latents, timesteps, batch)
         # todo for embeddings, we need to run without trigger words
         was_unet_training = self.sd.unet.training
         was_network_active = False
@@ -300,3 +302,51 @@ class ConceptSliderTrainer(DiffusionTrainer):
         # add a grad so backward works right
         total_loss.requires_grad_(True)
         return total_loss
+
+    def _fibo_guided_loss(self, noisy_latents, timesteps, batch):
+        """Legacy objective with sequential FIBO references and six-bundle inputs.
+
+        Keep the historical Qwen path untouched. Each polarity completes its
+        backward before the network changes strength, including checkpoint replay.
+        """
+        dtype = get_torch_dtype(self.train_config.dtype)
+        noisy = noisy_latents.to(self.device_torch, dtype).detach()
+        count = noisy.shape[0]
+        expand = lambda value: concat_prompt_embeds([value] * count).to(self.device_torch, dtype)
+        positive, neutral, negative = map(expand, (self.positive_prompt_embeds,
+            self.target_class_embeds, self.negative_prompt_embeds))
+        anchor = expand(self.anchor_class_embeds) if self.anchor_class_embeds is not None else None
+        def predict(embeds):
+            return self.sd.predict_noise(latents=noisy, timestep=timesteps,
+                conditional_embeddings=embeds, unconditional_embeddings=None,
+                guidance_scale=1., guidance_embedding_scale=1., batch=batch).float()
+        active, strength = self.network.is_active, self.network.multiplier
+        training = self.sd.unet.training
+        try:
+            self.network.is_active = False
+            self.sd.unet.eval()
+            with torch.no_grad():
+                pos, center, neg = predict(positive), predict(neutral), predict(negative)
+                anchor_target = predict(anchor) if anchor is not None else None
+                delta = self.slider.guidance_strength * (pos-neg)
+                plus = norm_like_tensor(center+delta, center)
+                minus = norm_like_tensor(center-delta, center)
+            self.network.is_active = active
+            self.sd.unet.train(training)
+            losses = []
+            for polarity, target in ((1., plus), (-1., minus)):
+                self.network.set_multiplier(polarity)
+                pred = predict(neutral)
+                # Enhance-positive and erase-negative share the same target in
+                # the original Concept Slider formulation (and conversely -1).
+                loss = 2 * torch.nn.functional.mse_loss(pred, target)
+                if anchor is not None:
+                    loss = loss + self.slider.anchor_strength * torch.nn.functional.mse_loss(predict(anchor), anchor_target)
+                loss = loss/3.
+                loss.backward()
+                losses.append(loss.detach())
+            return ((losses[0]+losses[1])/2).requires_grad_(True)
+        finally:
+            self.network.is_active = active
+            self.network.set_multiplier(strength)
+            self.sd.unet.train(training)

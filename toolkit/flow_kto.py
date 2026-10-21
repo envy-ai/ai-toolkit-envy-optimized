@@ -93,10 +93,10 @@ def validate_kto_config(config):
     model, network = config['model'], config['network']
     kwargs = model.get('model_kwargs') or {}
     auxiliary_paths = ['unconditional_lora_path']
-    if model['arch'] != 'qwen_image_2':
+    if model['arch'] not in ('qwen_image_2', 'fibo2'):
         auxiliary_paths.append('assistant_lora_path')
     if any(model.get(key) for key in auxiliary_paths):
-        raise ValueError('Diffusion-KTO supports frozen Qwen training helpers and preview-only inference LoRAs, but no other training adapters')
+        raise ValueError('Diffusion-KTO supports frozen Qwen/FIBO2 training helpers and preview-only inference LoRAs, but no other training adapters')
     if kwargs.get('edit') or kwargs.get('kv_cache'):
         raise ValueError('Diffusion-KTO initially supports text-to-image only; disable edit/kv_cache')
     if network.get('pretrained_lora_path'):

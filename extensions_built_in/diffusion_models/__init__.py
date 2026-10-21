@@ -27,6 +27,7 @@ from .minimax_h3 import MinimaxH3Model, MinimaxH3Ref2VAModel, MinimaxH3FastModel
 from .hunyuan_image_3 import HunyuanImage3InstructModel, HunyuanImage3BaseModel
 from .flux3 import Flux3Model
 from .moss_image import MossImageModel
+from .fibo2 import Fibo2Model
 
 AI_TOOLKIT_MODELS = [
     # put a list of models here
@@ -74,4 +75,5 @@ AI_TOOLKIT_MODELS = [
     HunyuanImage3BaseModel,
     Flux3Model,
     MossImageModel,
+    Fibo2Model,
 ]

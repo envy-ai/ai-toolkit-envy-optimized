@@ -159,6 +159,10 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
                         for caption in captions:
                             identity = json.dumps(item.get_text_embedding_info_dict(caption_override=caption), sort_keys=True)
                             path = paths_by_identity.setdefault(identity, item._build_text_embedding_path(caption_override=caption))
+                            if getattr(self.sd, 'arch', None) == 'fibo2':
+                                # A CFG caption omits glyph/reference VLM images;
+                                # never alias its positive-caption disk cache.
+                                path = os.path.splitext(path)[0] + '_fibo_cfg.safetensors'
                             prompt_paths.append(path)
                         missing = [(path, caption) for path, caption in zip(prompt_paths, captions) if not os.path.exists(path)]
                         if missing:
@@ -191,8 +195,8 @@ class QwenGuidanceDistillationTrainer(DiffusionTrainer):
                                             with Image.open(control_path) as image:
                                                 controls.append(to_tensor(ImageOps.exif_transpose(image).convert("RGB")))
                                 for path, caption in missing:
-                                    embeds = self.sd.encode_prompt(
-                                        caption, control_images=controls,
+                                    embeds = getattr(self.sd, 'encode_unconditional_prompt', self.sd.encode_prompt)(
+                                        caption, control_images=controls if getattr(self.sd, 'unconditional_text_uses_control_images', True) else None,
                                         target_size=(item.crop_width, item.crop_height),
                                     ).detach().to("cpu")
                                     embeds.save(path)

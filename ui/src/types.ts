@@ -257,6 +257,7 @@ export interface ModelConfig {
   text_encoder_path?: string;
   te_name_or_path?: string;
   vae_path?: string;
+  extras_name_or_path?: string;
   inference_lora_path?: string;
   unconditional_lora_path?: string;
   compile?: boolean;

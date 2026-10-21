@@ -132,9 +132,9 @@ const docs: { [key: string]: ConfigDoc } = {
     description: (
       <>
         Optional full path to a helper LoRA safetensors file. Its weights stay frozen while your separate LoRA
-        trains. All Qwen Image 2.1 training modes support this helper, including teacher/reference passes and
+        trains. Qwen Image 2.1 and FIBO2 Dev training modes support this helper, including teacher/reference passes and
         generated practice/discovery images. The helper is disabled for sample generation and is not included
-        in your saved LoRA.
+        in your saved LoRA. FIBO2 requires a non-distilled Dev base; no Turbo training helper is supplied.
       </>
     ),
   },
@@ -143,9 +143,10 @@ const docs: { [key: string]: ConfigDoc } = {
     description: (
       <>
         Optional full path to a compatible ComfyUI text encoder safetensors file, including files outside the
-        ComfyUI models folder. MOSS-Image uses Qwen3.5-9B; Qwen Image 2.1 uses Qwen3-VL-8B. Leave empty to use the
+        ComfyUI models folder. MOSS-Image uses Qwen3.5-9B; Qwen Image 2.1 uses Qwen3-VL-8B; FIBO2 uses Qwen3-VL-4B. Leave empty to use the
         default encoder. MOSS-Image keeps its Qwen3.5-9B config and vendor tokenizer; an explicit
-        model.te_name_or_path takes precedence. Other models keep their base model config and processor.
+        model.te_name_or_path takes precedence. FIBO2 keeps its Qwen3-VL-4B config and explicit/default processor assets.
+        Other models keep their base model config and processor.
         This controls the training encoder and native previews; ComfyUI sample rendering has its own Text Encoder setting.
       </>
     ),

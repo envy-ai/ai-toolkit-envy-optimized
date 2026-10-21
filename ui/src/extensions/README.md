@@ -50,3 +50,13 @@ numbered fields and sample controls. Incomplete slots stay visible while editing
 model validation determines allowed reference counts. Training-only model
 packages can set `generate: { disabled: true }` to omit their unsupported native
 pipeline from the Generate page while keeping the training selector.
+
+`handleModelArchChange` accepts an optional `{ preserveTrainingChoices: true }`
+for component changes that retain an existing training setup (used when entering
+or leaving FIBO2). It still applies the destination architecture's controls and
+schedule defaults, but retains sample prompts, adapter ranks and memory/cache/
+offload choices. It rebuilds model kwargs from the destination defaults, clearing
+imported component overrides while retaining destination mode flags. It clears
+component paths, pretrained/training/preview adapters, and dataset/sample
+references; other sample settings (prompt, seed, strength) stay intact. The caller presents the existing architecture-change
+notice. The default call retains previous architecture-switch behavior.

@@ -52,6 +52,9 @@ class FlowTrainingProfile:
             # EXACT legacy Qwen arithmetic and raw latent-area interpretation.
             slope = (.9 - .5) / (8192 - 256)
             return height * width * slope + .5 - slope * 256
+        if self.arch == 'fibo2':
+            # Already 2x2-packed FLUX.2 latents: H*W is the image-token count.
+            return .5 + (height * width - 256) * (.65 / (4096 - 256))
         if height % 2 or width % 2:
             raise ValueError('Krea latent dimensions must be divisible by its 2x2 patch size')
         tokens = (height // 2) * (width // 2)
@@ -209,7 +212,7 @@ def scoped_training_references(function):
     @wraps(function)
     def wrapped(self, batch, *args, **kwargs):
         model = getattr(self, 'sd', None)
-        if getattr(model, 'arch', None) not in ('krea2', 'moss_image') or not getattr(model, 'is_edit', False):
+        if getattr(model, 'arch', None) not in ('krea2', 'moss_image', 'fibo2') or not getattr(model, 'is_edit', False):
             return function(self, batch, *args, **kwargs)
         with model.training_reference_context(batch):
             return function(self, batch, *args, **kwargs)

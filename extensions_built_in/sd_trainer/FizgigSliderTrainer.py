@@ -397,19 +397,19 @@ class FizgigSliderTrainer(DiffusionTrainer):
                         ]
                         if self.slider_cfg_negative_prompts is not None and text_negatives:
                             self.slider_cfg_negative_embeds = [
-                                tuple(self.sd.encode_prompt([prompt]).detach().to("cpu") for prompt in triplet)
+                                tuple(getattr(self.sd, 'encode_unconditional_prompt', self.sd.encode_prompt)([prompt]).detach().to("cpu") for prompt in triplet)
                                 for triplet in self.slider_cfg_negative_prompts
                             ]
                         if getattr(self, "slider_multipoint", False):
                             self.slider_target_embeds = [{
                                 point["id"]: (
                                     self.sd.encode_prompt([entry["targets"][point["id"]][0]]).detach().to("cpu"),
-                                    self.sd.encode_prompt([entry["targets"][point["id"]][1]]).detach().to("cpu") if text_negatives else None,
+                                    getattr(self.sd, 'encode_unconditional_prompt', self.sd.encode_prompt)([entry["targets"][point["id"]][1]]).detach().to("cpu") if text_negatives else None,
                                 ) for point in self.slider_points if point["strength"] != 0
                             } for entry in self.slider_multipoint_prompts]
                     self.slider_anchor_embeds = [
                         (self.sd.encode_prompt([positive]).detach().to("cpu"),
-                         self.sd.encode_prompt([negative]).detach().to("cpu") if text_negatives else None)
+                         getattr(self.sd, 'encode_unconditional_prompt', self.sd.encode_prompt)([negative]).detach().to("cpu") if text_negatives else None)
                         for positive, negative in getattr(self, "slider_anchor_prompts", [])
                         if self.slider_preservation_weight
                     ]

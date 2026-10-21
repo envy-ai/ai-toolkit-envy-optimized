@@ -118,6 +118,7 @@ test('switching to Krea edit keeps all pre-existing ordered references without t
   const utils = load('../src/app/jobs/new/utils.ts', {
     '@/utils/basic': { objectCopy: value => structuredClone(value) },
     '@/helpers/datasetControls': datasets,
+    './trainingCapabilities': capabilities,
   });
 
   utils.handleModelArchChange(modelArchs, 'legacy', 'krea2_edit', config, set);

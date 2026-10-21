@@ -26,8 +26,10 @@ function load(file, overrides = {}, jsx = false) {
 const caps = load('../src/app/jobs/new/trainingCapabilities.ts');
 const modes = caps.specializedTrainingModes;
 function config(arch, type, network = 'lora') {
-  const job = { config: { process: [{ type, model: { arch, name_or_path: '/models/base', model_kwargs: {} },
-    network: { type: network, linear: 4 }, datasets: [] }] } };
+  const model = { arch, name_or_path: '/models/base', model_kwargs: {} };
+  if (arch === 'fibo2') model.vae_path = '/fixture/flux2-vae.safetensors';
+  const job = { config: { process: [{ type, model,
+    network: { type: network, linear: 4 }, datasets: [], train: {}, sample: { samples: [], comfy: {} } }] } };
   if (type === 'diffusion_kto') {
     job.config.process[0].train = { cache_text_embeddings: true, noise_scheduler: 'flowmatch' };
     job.config.process[0].datasets = [{ folder_path: '/liked', kto_label: 'liked', cache_latents_to_disk: true }];
@@ -52,7 +54,7 @@ test('ordinary MOSS jobs reject the bundled Krea preview workflow before saving'
 test('capability matrix agrees with Python and supports all objectives without duplicate legacy choices', () => {
   const backend = fs.readFileSync(path.resolve(__dirname, '../../toolkit/training_capabilities.py'), 'utf8');
   const declarations = [...backend.matchAll(/'([^']+)': FlowTrainingCapability\('([^']+)', (\d+)([^\n]*)/g)];
-  assert.equal(declarations.length, 5);
+  assert.equal(declarations.length, 6);
   for (const [, arch, label, bucket, options] of declarations) {
     assert.deepEqual(caps.flowTrainingModels[arch], { label, bucketDivisibility: Number(bucket), editReferences: options.includes('edit_references=True') });
     for (const mode of modes) {
@@ -78,7 +80,7 @@ test('all Qwen modes and aliases allow frozen helpers; other model restrictions 
       job.config.process[0].type = mode;
       job.config.process[0].model.assistant_lora_path = '/helper.safetensors';
       const errors = caps.validateTrainingCapabilities(job);
-      if (arch === 'qwen_image_2') assert.deepEqual(errors, [], mode);
+      if (['qwen_image_2', 'fibo2'].includes(arch)) assert.deepEqual(errors, [], mode);
       else assert.match(errors.join('\n'), /auxiliary/, `${arch}: ${mode}`);
     }
   }
@@ -129,7 +131,7 @@ test('paired targets are not edit references and unsupported actual edit fields 
     assert.deepEqual(caps.validateTrainingCapabilities(job), []);
     process.datasets[0].control_path_2 = '/source';
     if (arch === 'krea2' || arch === 'moss_image') process.model.model_kwargs.edit = true;
-    assert.equal(caps.validateTrainingCapabilities(job).length, ['krea2', 'qwen_image_2', 'moss_image'].includes(arch) ? 0 : 1);
+    assert.equal(caps.validateTrainingCapabilities(job).length, ['krea2', 'qwen_image_2', 'moss_image', 'fibo2'].includes(arch) ? 0 : 1);
   }
 });
 
@@ -229,8 +231,79 @@ test('architecture switching preserves pairs, prompts and memory options but nev
   assert.equal(updated.datasets[0].anchor_path, '/anchors');
   assert.equal(updated.datasets[0].control_path_2, undefined);
   assert.equal(updated.model.text_encoder_path, undefined);
-  assert.equal(updated.model.inference_lora_path, '/preview.safetensors');
+  assert.equal(updated.model.inference_lora_path, undefined);
   assert.match(notice, /cleared/);
+});
+
+test('ordinary switch to FIBO2 retains user choices and prompts while clearing architecture-bound sources', () => {
+  const utils = load('../src/app/jobs/new/utils.ts', {
+    '@/utils/basic': { objectCopy: value => structuredClone(value) },
+    '@/helpers/datasetControls': { getDatasetControlPaths: () => [] },
+    './trainingCapabilities': caps,
+  });
+  const sample = { prompt: 'keep prompt', negative_prompt: 'keep negative', seed: 123,
+    network_multiplier: -0.5, ctrl_img: '/old/ref.png', ctrl_img_1: '/old/ref1.png' };
+  const job = { config: { process: [{ type: 'diffusion_trainer',
+    model: { arch: 'legacy', model_kwargs: { legacy_option: true }, quantize: true, qtype: 'int8', cache_quantized_models: false,
+      low_vram: true, layer_offloading: true, text_encoder_path: '/old/te', vae_path: '/old/vae',
+      inference_lora_path: '/old/inference.safetensors' },
+    network: { type: 'lora', linear: 16, linear_alpha: 8 },
+    train: { cache_text_embeddings: true, noise_scheduler: 'ddpm' }, datasets: [{ folder_path: '/data', control_path_1: '/old/control' }],
+    sample: { samples: [sample], comfy: { inference_lora: '/old/comfy.safetensors',
+      inference_lora_path: '/old/comfy.safetensors', inference_lora_enabled: true } } }] } };
+  const before = structuredClone(job);
+  const modelArchs = [
+    { name: 'legacy', defaults: { 'config.process[0].model.model_kwargs.legacy_option': [true, false] }, additionalSections: [] },
+    { name: 'fibo2', defaults: {
+      'config.process[0].model.model_kwargs.fibo_default': [true, false],
+      'config.process[0].train.noise_scheduler': ['flowmatch', 'ddpm'],
+      'config.process[0].train.timestep_type': ['shift', 'linear'],
+    }, additionalSections: [] },
+  ];
+  function set(value, dottedPath) {
+    const parts = dottedPath.replaceAll('[0]', '.0').split('.');
+    let target = job;
+    for (const key of parts.slice(0, -1)) target = target[key];
+    target[parts.at(-1)] = value;
+  }
+  utils.handleModelArchChange(modelArchs, 'legacy', 'fibo2', job, set, { preserveTrainingChoices: true });
+  const updated = job.config.process[0];
+  assert.notDeepEqual(job, before);
+  assert.equal(updated.network.type, 'lora');
+  assert.equal(updated.network.linear, 16);
+  assert.equal(updated.network.linear_alpha, 8);
+  assert.equal(updated.network.pretrained_lora_path, undefined);
+  assert.deepEqual(updated.model.quantize, true);
+  assert.equal(updated.model.qtype, 'int8');
+  assert.equal(updated.model.cache_quantized_models, false);
+  assert.equal(updated.model.low_vram, true);
+  assert.equal(updated.model.layer_offloading, true);
+  assert.equal(updated.model.name_or_path, '');
+  for (const field of ['text_encoder_path', 'te_name_or_path', 'vae_path', 'inference_lora_path']) {
+    assert.equal(updated.model[field], undefined, field);
+  }
+  assert.deepEqual(updated.model.model_kwargs, { fibo_default: true });
+  assert.equal(updated.train.cache_text_embeddings, true);
+  assert.equal(updated.train.noise_scheduler, 'flowmatch');
+  assert.equal(updated.train.timestep_type, 'shift');
+  assert.equal(updated.datasets[0].control_path_1, undefined);
+  assert.deepEqual(updated.sample.samples[0], { prompt: 'keep prompt', negative_prompt: 'keep negative',
+    seed: 123, network_multiplier: -0.5 });
+  assert.equal(updated.sample.comfy.inference_lora, '');
+  for (const field of ['inference_lora_path', 'inference_lora_enabled']) {
+    assert.equal(updated.sample.comfy[field], undefined, field);
+  }
+
+  const baseline = structuredClone(before);
+  const setBaseline = (value, dottedPath) => {
+    const parts = dottedPath.replaceAll('[0]', '.0').split('.');
+    let target = baseline;
+    for (const key of parts.slice(0, -1)) target = target[key];
+    target[parts.at(-1)] = value;
+  };
+  utils.handleModelArchChange(modelArchs, 'legacy', 'fibo2', baseline, setBaseline);
+  assert.equal(baseline.config.process[0].model.low_vram, false);
+  assert.equal(baseline.config.process[0].model.quantize, true);
 });
 
 test('imports and both selectors/save paths use shared checks; server protects ordinary and sample-only paths', () => {

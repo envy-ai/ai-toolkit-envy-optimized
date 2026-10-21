@@ -706,6 +706,38 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
     customModelSelectOptions: qwenImage21TransparencyOption,
   },
   {
+    name: "fibo2",
+    label: "FIBO2 Dev",
+    group: "image",
+    hasMultiLinePrompts: true,
+    defaults: {
+      "config.process[0].model.name_or_path": ["briaai/Fibo-2.0-dev", defaultNameOrPath],
+      "config.process[0].model.text_encoder_path": [undefined, undefined],
+      "config.process[0].model.vae_path": [undefined, undefined],
+      "config.process[0].sample.sampler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.noise_scheduler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.timestep_type": ["shift", "sigmoid"],
+      "config.process[0].model.qtype": ["convrot8", "qfloat8"],
+      "config.process[0].sample.guidance_scale": [4, 4],
+      "config.process[0].sample.comfy.workflow_path": [
+        "config/comfy_templates/fibo2_lora_sample.json.njk",
+        defaultComfySampleConfig.workflow_path,
+      ],
+    },
+    disableSections: ["network.conv"],
+    additionalSections: [
+      "datasets.multi_control_paths", "sample.multi_ctrl_imgs",
+      "model.text_encoder_path", "model.vae_path", "model.assistant_lora_path",
+      "model.low_vram", "model.layer_offloading",
+    ],
+    modelNotes: <p>
+      Train the non-distilled FIBO2 Dev model with Qwen3-VL-4B and the FLUX.2 VAE.
+      Edit Turbo is inference-only. A helper LoRA is optional and frozen during training;
+      preview-only inference LoRAs are configured separately under Samples.
+      Structured JSON captions and plain prompts are supported; do not prepend text to a JSON caption.
+    </p>,
+  },
+  {
     name: "qwen_image_2:turbo",
     label: "Qwen-Image-2.1 Turbo (w/ Training Adapter)",
     generateNameOverride: "Qwen-Image-2.1 Turbo",

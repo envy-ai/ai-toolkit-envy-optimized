@@ -456,6 +456,7 @@ class SliderSpaceTrainerTests(unittest.TestCase):
                                      decode_latents=lambda latent: latent[:, :3],
                                      text_encoder_to=lambda device: None,
                                      save_device_state=lambda: None, restore_device_state=lambda: None)
+        trainer.model_config = SimpleNamespace(arch='qwen_image_2', model_kwargs={})
         trainer.semantic_encoder = lambda pixels: pixels.mean((2, 3))
         return trainer, calls
 

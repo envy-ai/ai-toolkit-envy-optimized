@@ -140,7 +140,7 @@ class SliderSpaceTrainer(DiffusionTrainer):
                         self._stage(f'Caching discovery captions ({index + 1}/{len(self.discovery_entries)})')
                         by_caption[entry['caption']] = self.sd.encode_prompt([entry['caption']]).detach().to('cpu')
                 self.bank_embeds = [by_caption[entry['caption']] for entry in self.discovery_entries]
-                self.negative_embeds = (self.sd.encode_prompt([self.sliderspace.negative_prompt]).detach().to('cpu')
+                self.negative_embeds = (getattr(self.sd, 'encode_unconditional_prompt', self.sd.encode_prompt)([self.sliderspace.negative_prompt]).detach().to('cpu')
                                         if self.sliderspace.cfg_scale > 1 and getattr(self, 'cfg_reference', None) != 'image_only' else None)
                 self.cache_sample_prompts()
         finally:
