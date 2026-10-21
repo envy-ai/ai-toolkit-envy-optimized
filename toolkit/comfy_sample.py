@@ -49,6 +49,7 @@ DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH = (
 DEFAULT_COMFY_ANIMA_WORKFLOW_PATH = 'config/comfy_templates/anima_lora_sample.json.njk'
 DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH = 'config/comfy_templates/ideogram4_lora_sample.json.njk'
 DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH = 'config/comfy_templates/moss_image_lora_sample.json.njk'
+DEFAULT_COMFY_FIBO2_TURBO_WORKFLOW_PATH = 'config/comfy_templates/fibo2_edit_turbo_lora_sample.json.njk'
 NUNJUCKS_RENDERER_PATH = "ui/scripts/render_comfy_template.mjs"
 
 
@@ -474,6 +475,9 @@ def get_workflow_for_sample(
     request: ComfySampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if os.path.basename(workflow_path.replace('\\', '/')) == os.path.basename(DEFAULT_COMFY_FIBO2_TURBO_WORKFLOW_PATH):
+        if request.model_arch.split(':')[0] != 'fibo2':
+            raise ValueError('The FIBO2 Edit Turbo preview workflow requires a FIBO2 training model.')
     if workflow_path == DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH:
         if request.model_arch.split(':')[0] != 'moss_image':
             raise ValueError('The MOSS-Image workflow requires a MOSS-Image model.')

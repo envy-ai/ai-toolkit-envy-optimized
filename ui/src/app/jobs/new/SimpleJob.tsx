@@ -39,7 +39,7 @@ import FizgigMultipointEditor, { MultipointStrengths } from './FizgigMultipointE
 import SliderSpaceEditor, { SliderSpacePreview } from './SliderSpaceEditor';
 import DiffusionKTOEditor from './DiffusionKTOEditor';
 import { multipointNeutralPrompt, sortedPoints, strengthLabel, toggleMultipoint, updateMultipointPoints } from './fizgigMultipoint';
-import { canonicalTrainingMode, cfgNegativeTextEnabled, effectiveFlowModel, flowTrainingModels, flowTrainingModelOptions, isSpecializedTrainingMode,
+import { applyComfyWorkflowSelection, FIBO2_TURBO_WORKFLOW_PATH, canonicalTrainingMode, cfgNegativeTextEnabled, effectiveFlowModel, flowTrainingModels, flowTrainingModelOptions, isSpecializedTrainingMode,
   switchSpecializedArchitecture, trainingModeVisible, trainingModeSupported } from './trainingCapabilities';
 
 type Props = {
@@ -94,6 +94,7 @@ const comfyWorkflowOptions: SelectOption[] = [
   { value: 'config/comfy_templates/anima_lora_sample.json.njk', label: 'Anima LoRA image' },
   { value: 'config/comfy_templates/ideogram4_lora_sample.json.njk', label: 'Ideogram 4 LoRA image' },
   { value: 'config/comfy_templates/fibo2_lora_sample.json.njk', label: 'FIBO2 LoRA image / edit' },
+  { value: FIBO2_TURBO_WORKFLOW_PATH, label: 'FIBO2 Edit Turbo LoRA image / edit' },
   { value: 'config/comfy_templates/moss_image_lora_sample.json.njk', label: 'MOSS-Image LoRA image' },
   {
     value: 'config/comfy_templates/krea2_lora_sample.json.njk',
@@ -3036,7 +3037,7 @@ export default function SimpleJob({
                 <CreatableSelectInput
                   label="Sample Renderer Workflow"
                   value={comfyConfig?.workflow_path || 'config/comfy_templates/krea2_lora_sample.json.njk'}
-                  onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.workflow_path')}
+                  onChange={value => setJobConfig(applyComfyWorkflowSelection(jobConfig, value))}
                   options={comfyWorkflowOptions}
                 />
                 <Checkbox

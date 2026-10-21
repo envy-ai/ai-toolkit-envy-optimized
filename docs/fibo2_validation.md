@@ -96,6 +96,28 @@ and the final production `npm run build` passed. The generated Next.js route
 type errors remain the established baseline; the production build follows the
 repository's existing type-validation configuration.
 
+## Supplied Edit Turbo preview
+
+The `tmp/FIBO2Turbo.json` source graph is available as the selectable
+`fibo2_edit_turbo_lora_sample.json.njk` variant. Focused renderer checks cover
+its core graph, standard VAE decoding, signed training-adapter strength,
+optional inference adapters, ordered references, sample parameters and
+architecture guard. The original Dev template still renders tiled decoding.
+The 13-test UI capability suite passed, including the explicit Turbo preset
+and preservation of the Dev training base and existing sample inputs.
+
+A read-only `/object_info` preflight validated the rendered eight-node Turbo
+graph against the installed ComfyUI registry with zero schema errors. No
+prompt was submitted, no image was uploaded and no model was loaded for this
+check. This verifies advertised node inputs and graph links, without claiming
+live adapter compatibility or rendered image quality. The temporary preflight
+script is `tmp/fibo2-turbo/schema_preflight.py`.
+
+Source TypeScript checks and the production UI build passed. The UI was
+restarted independently of the queue worker; the new-job page and the client
+asset containing the Turbo workflow choice both returned HTTP 200. No browser
+was connected for an interactive selector check.
+
 ## Qualification limits
 
 Full-checkpoint CUDA training, CUDA quantized forward/backward, normal-resolution

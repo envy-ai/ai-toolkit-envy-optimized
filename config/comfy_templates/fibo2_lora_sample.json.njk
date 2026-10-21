@@ -33,7 +33,8 @@
     "positive": ["6", 0], "negative": ["6", 1], "latent_image": ["6", 2],
     "seed": {{ seed_literal }}, "steps": {{ steps }}, "cfg": {{ cfg }},
     "sampler_name": {{ sampler | json }}, "scheduler": {{ scheduler | json }}, "denoise": 1}},
-  "8": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["7", 0], "vae": ["3", 0],
-    "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 8}},
+  "8": {"class_type": {% if fibo2_standard_decode %}"VAEDecode"{% else %}"VAEDecodeTiled"{% endif %},
+    "inputs": {"samples": ["7", 0], "vae": ["3", 0]
+    {% if not fibo2_standard_decode %}, "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 8{% endif %}}},
   "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": {{ filename_prefix | json }}}}
 }

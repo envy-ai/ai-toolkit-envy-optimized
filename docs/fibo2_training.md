@@ -174,6 +174,52 @@ reference counts and conditioning graphs can vary. Native prompt-slider practice
 and SliderSpace discovery still use the native pipeline regardless of preview
 renderer selection. This integration does not modify or restart ComfyUI.
 
+### Supplied Edit Turbo workflow
+
+To use the supplied `tmp/FIBO2Turbo.json` graph during training, enable
+**Use ComfyUI Renderer** and choose **FIBO2 Edit Turbo LoRA image / edit** in
+**Sample Renderer Workflow**. The tracked template is
+`config/comfy_templates/fibo2_edit_turbo_lora_sample.json.njk`. The existing
+selector supports mouse selection or Tab, arrow keys and Enter.
+
+Explicitly selecting this preset fills the preview settings from the supplied
+graph: model `d/fibo2_edit_turbo_int8_convrot.safetensors`, text encoder
+`d/qwen3vl_4b_instruct_heretic_7refusal_int8_convrot.safetensors`, VAE
+`flux2-vae.safetensors`, four steps, CFG 1, Euler and the simple scheduler.
+These values remain editable. Loading an already-saved job does not reapply
+the preset. Training components, prompts, seed, sample dimensions, per-sample
+overrides, reference images and adapter strengths are preserved. Switching
+back to the original workflow changes the template only; select the desired
+preview model and sampling values explicitly.
+
+Equivalent configuration:
+
+```yaml
+sample:
+  sample_steps: 4
+  guidance_scale: 1
+  comfy:
+    enabled: true
+    workflow_path: config/comfy_templates/fibo2_edit_turbo_lora_sample.json.njk
+    model: d/fibo2_edit_turbo_int8_convrot.safetensors
+    text_encoder: d/qwen3vl_4b_instruct_heretic_7refusal_int8_convrot.safetensors
+    vae: flux2-vae.safetensors
+    sampler: euler
+    scheduler: simple
+```
+
+This variant keeps the supplied graph's `VAEDecode` and `SaveImage` output,
+sharing the existing FIBO2 template's current-training-LoRA, optional inference
+adapter and ordered-reference wiring. The original workflow retains tiled
+decoding. The configured sample dimensions replace the source graph's zero
+width/height, so the training form's chosen canvas applies. The graph's example
+prompt, seed and output prefix are replaced by the current sample values.
+
+The preset selects Turbo for **preview inference**. The training base remains
+FIBO2 Dev; selecting this workflow does not turn the distilled Turbo checkpoint
+into a supported training base. Native previews, practice and discovery retain
+their existing Dev behavior. No new ComfyUI nodes or service restart are needed.
+
 The installed graph contract was inspected at ComfyUI
 `05a7131c19e23787a568b3a5127b78b5a4037597`. Native implementation provenance is
 recorded in the FIBO2 source headers and [integration plan](fibo2_training_plan.md).

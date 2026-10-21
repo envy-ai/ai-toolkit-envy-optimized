@@ -364,6 +364,128 @@ class ComfySampleWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot use glyph text_render"):
             comfy_sample.get_workflow_for_sample(template, invalid)
 
+    def test_fibo2_edit_turbo_template_renders_core_graph_and_keeps_dev_training_adapter(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        template = "config/comfy_templates/fibo2_edit_turbo_lora_sample.json.njk"
+        base = replace(
+            self.request,
+            model_arch="fibo2",
+            model="d/fibo2_edit_turbo_int8_convrot.safetensors",
+            vae="flux2-vae.safetensors",
+            text_encoder="qwen3vl_4b_bf16.safetensors",
+            prompt='{"structured_caption":{"caption":"warm glass vase"}}',
+            negative_prompt="soft focus",
+            inference_lora="preview.safetensors",
+            inference_lora_strength=0.35,
+            training_lora_path="/tmp/dev-training-adapter.safetensors",
+            training_lora_strength=-0.6,
+            width=768,
+            height=1024,
+            steps=7,
+            cfg=2.25,
+            seed=987,
+            sampler="euler",
+            scheduler="simple",
+            filename_prefix="ai-toolkit/fibo2-turbo-sample",
+        )
+        cases = [
+            (replace(base, inference_lora="", control_image=None, control_image_2=None, control_image_3=None), False),
+            (replace(base, control_image=None, control_image_2=None, control_image_3=None), False),
+            (replace(base, inference_lora_absolute_path="/tmp/preview-absolute.safetensors",
+                control_image="refs/one.png", control_image_2="refs/two.png", control_image_3="refs/three.png"), True),
+        ]
+        for request, has_refs in cases:
+            with self.subTest(has_refs=has_refs, inference=bool(request.inference_lora or request.inference_lora_absolute_path)):
+                graph = comfy_sample.get_workflow_for_sample(template, request)
+                json.dumps(graph)
+                self.assertEqual(graph["1"]["class_type"], "UNETLoader")
+                self.assertEqual(graph["1"]["inputs"]["unet_name"], request.model)
+                self.assertEqual(graph["2"]["class_type"], "CLIPLoader")
+                self.assertEqual(graph["2"]["inputs"]["type"], "fibo2")
+                self.assertEqual(graph["3"]["class_type"], "VAELoader")
+                self.assertEqual(graph["3"]["inputs"]["vae_name"], request.vae)
+                self.assertEqual(graph["4"]["class_type"], "load_lora_from_absolute_path")
+                self.assertEqual(graph["4"]["inputs"]["absolute_path"], request.training_lora_path)
+                self.assertEqual(graph["4"]["inputs"]["lora_strength"], -0.6)
+                self.assertEqual(graph["4"]["inputs"]["model"], ["1", 0])
+                self.assertEqual(graph["4"]["inputs"]["clip"], ["2", 0])
+
+                encoder = graph["6"]["inputs"]
+                self.assertEqual(graph["6"]["class_type"], "TextEncodeFibo2")
+                self.assertEqual(encoder["prompt"], request.prompt)
+                self.assertEqual(encoder["negative_prompt"], request.negative_prompt)
+                self.assertEqual(encoder["width"], 768)
+                self.assertEqual(encoder["height"], 1024)
+                self.assertEqual(encoder["vae"], ["3", 0])
+                self.assertEqual(encoder["clip"], ["4", 1])
+                for index, image in enumerate((request.control_image, request.control_image_2, request.control_image_3), 1):
+                    key = "images.image_" + str(index)
+                    node_id = str(19 + index)
+                    self.assertEqual(encoder.get(key), [node_id, 0] if image else None)
+                    if image:
+                        self.assertEqual(graph[node_id]["class_type"], "LoadImage")
+                        self.assertEqual(graph[node_id]["inputs"]["image"], image)
+
+                sampler = graph["7"]["inputs"]
+                self.assertEqual(graph["7"]["class_type"], "KSampler")
+                self.assertEqual(sampler["positive"], ["6", 0])
+                self.assertEqual(sampler["negative"], ["6", 1])
+                self.assertEqual(sampler["latent_image"], ["6", 2])
+                self.assertEqual(sampler["steps"], 7)
+                self.assertEqual(sampler["cfg"], 2.25)
+                self.assertEqual(sampler["seed"], 987)
+                self.assertEqual(sampler["sampler_name"], "euler")
+                self.assertEqual(sampler["scheduler"], "simple")
+                if request.inference_lora_absolute_path:
+                    self.assertEqual(graph["5"]["class_type"], "load_lora_from_absolute_path")
+                    self.assertEqual(graph["5"]["inputs"]["absolute_path"], request.inference_lora_absolute_path)
+                    self.assertEqual(graph["5"]["inputs"]["lora_strength"], 0.35)
+                    self.assertEqual(sampler["model"], ["5", 0])
+                elif request.inference_lora:
+                    self.assertEqual(graph["5"]["class_type"], "LoraLoaderModelOnly")
+                    self.assertEqual(graph["5"]["inputs"]["lora_name"], request.inference_lora)
+                    self.assertEqual(graph["5"]["inputs"]["strength_model"], 0.35)
+                    self.assertEqual(sampler["model"], ["5", 0])
+                else:
+                    self.assertNotIn("5", graph)
+                    self.assertEqual(sampler["model"], ["4", 0])
+                self.assertEqual(graph["8"]["class_type"], "VAEDecode")
+                self.assertEqual(graph["8"]["inputs"]["samples"], ["7", 0])
+                self.assertEqual(graph["8"]["inputs"]["vae"], ["3", 0])
+                self.assertEqual(graph["9"]["class_type"], "SaveImage")
+                self.assertEqual(graph["9"]["inputs"]["images"], ["8", 0])
+                self.assertEqual(graph["9"]["inputs"]["filename_prefix"], request.filename_prefix)
+
+        dev_graph = comfy_sample.get_workflow_for_sample(
+            "config/comfy_templates/fibo2_lora_sample.json.njk", base
+        )
+        self.assertEqual(dev_graph["8"]["class_type"], "VAEDecodeTiled")
+
+    def test_fibo2_edit_turbo_guard_uses_template_basename_before_rendering(self):
+        import toolkit.comfy_sample as comfy_sample
+
+        template = "config/comfy_templates/fibo2_edit_turbo_lora_sample.json.njk"
+        request = replace(self.request, model_arch="fibo2")
+        absolute_path = str((REPO_ROOT / template).resolve())
+        actual = comfy_sample.get_workflow_for_sample(absolute_path, request)
+        self.assertEqual(actual["6"]["class_type"], "TextEncodeFibo2")
+        self.assertEqual(actual["8"]["class_type"], "VAEDecode")
+
+        windows_path = r"Z:\ComfyUI\workflows\fibo2_edit_turbo_lora_sample.json.njk"
+        with mock.patch.object(comfy_sample, "render_nunjucks_workflow", return_value=actual) as render:
+            accepted = comfy_sample.get_workflow_for_sample(windows_path, request)
+            self.assertEqual(accepted, actual)
+            render.assert_called_once_with(windows_path, request)
+
+        incompatible = replace(request, model_arch="qwen_image_2")
+        for path in (absolute_path, windows_path):
+            with self.subTest(path=path):
+                with mock.patch.object(comfy_sample, "render_nunjucks_workflow") as render:
+                    with self.assertRaisesRegex(ValueError, "requires a FIBO2 training model"):
+                        comfy_sample.get_workflow_for_sample(path, incompatible)
+                    render.assert_not_called()
+
     def test_qwen_image_2_single_template_accepts_three_reference_images(self):
         import toolkit.comfy_sample as comfy_sample
 

@@ -306,6 +306,63 @@ test('ordinary switch to FIBO2 retains user choices and prompts while clearing a
   assert.equal(baseline.config.process[0].model.quantize, true);
 });
 
+test('FIBO2 Edit Turbo is selectable as a preview workflow while Dev remains the required training base', () => {
+  const workflows = caps;
+  const form = fs.readFileSync(path.resolve(__dirname, '../src/app/jobs/new/SimpleJob.tsx'), 'utf8');
+  const turboPath = 'config/comfy_templates/fibo2_edit_turbo_lora_sample.json.njk';
+  assert.deepEqual(workflows.fibo2WorkflowPaths, [
+    'config/comfy_templates/fibo2_lora_sample.json.njk',
+    turboPath,
+  ]);
+  assert.match(form, /FIBO2 Edit Turbo LoRA image \/ edit/);
+
+  const job = config('fibo2', 'diffusion_trainer');
+  const process = job.config.process[0];
+  process.model.name_or_path = '/models/fibo2_dev_int8_convrot.safetensors';
+  process.model.vae_path = '/models/flux2-vae.safetensors';
+  process.sample = {
+    samples: [{ prompt: 'keep positive', negative_prompt: 'keep negative', seed: 73, width: 768, height: 1024 }],
+    sample_steps: 9,
+    guidance_scale: 2.5,
+    comfy: {
+      enabled: true,
+      workflow_path: 'config/comfy_templates/fibo2_lora_sample.json.njk',
+      model: 'old-dev.safetensors',
+      text_encoder: 'old-encoder.safetensors',
+      vae: 'old-vae.safetensors',
+      sampler: 'dpmpp_2m',
+      scheduler: 'karras',
+    },
+  };
+  const before = structuredClone(job);
+  const selected = workflows.applyComfyWorkflowSelection(job, turboPath);
+  assert.deepEqual(job, before, 'selecting a preview must not mutate the source config');
+  const updated = selected.config.process[0];
+  assert.equal(updated.model.name_or_path, '/models/fibo2_dev_int8_convrot.safetensors');
+  assert.equal(updated.sample.comfy.workflow_path, turboPath);
+  assert.equal(updated.sample.comfy.model, 'd/fibo2_edit_turbo_int8_convrot.safetensors');
+  assert.equal(updated.sample.comfy.text_encoder, 'd/qwen3vl_4b_instruct_heretic_7refusal_int8_convrot.safetensors');
+  assert.equal(updated.sample.comfy.vae, 'flux2-vae.safetensors');
+  assert.equal(updated.sample.comfy.sampler, 'euler');
+  assert.equal(updated.sample.comfy.scheduler, 'simple');
+  assert.equal(updated.sample.sample_steps, 4);
+  assert.equal(updated.sample.guidance_scale, 1);
+  assert.deepEqual(updated.sample.samples, before.config.process[0].sample.samples);
+  assert.deepEqual(caps.validateTrainingCapabilities(selected), []);
+
+  const unrelated = structuredClone(selected);
+  unrelated.config.process[0].sample.comfy.workflow_path = 'config/comfy_templates/krea2_lora_sample.json.njk';
+  assert.match(caps.validateTrainingCapabilities(unrelated).join('\n'), /FIBO2 Comfy previews require/);
+  const turboTrainingBase = structuredClone(selected);
+  turboTrainingBase.config.process[0].model.name_or_path = '/models/fibo2_edit_turbo_int8_convrot.safetensors';
+  assert.match(caps.validateTrainingCapabilities(turboTrainingBase).join('\n'), /requires the non-distilled Dev checkpoint/);
+
+  const switchedBack = workflows.applyComfyWorkflowSelection(selected, 'config/comfy_templates/fibo2_lora_sample.json.njk');
+  assert.equal(switchedBack.config.process[0].sample.comfy.workflow_path, 'config/comfy_templates/fibo2_lora_sample.json.njk');
+  assert.equal(switchedBack.config.process[0].model.name_or_path, '/models/fibo2_dev_int8_convrot.safetensors');
+  assert.equal(switchedBack.config.process[0].sample.samples[0].negative_prompt, 'keep negative');
+});
+
 test('imports and both selectors/save paths use shared checks; server protects ordinary and sample-only paths', () => {
   const page = fs.readFileSync(path.resolve(__dirname, '../src/app/jobs/new/page.tsx'), 'utf8');
   const form = fs.readFileSync(path.resolve(__dirname, '../src/app/jobs/new/SimpleJob.tsx'), 'utf8');

@@ -1,5 +1,37 @@
 import type { JobConfig, DatasetConfig, DiffusionKTOConfig, SampleItem } from '@/types';
 
+export const FIBO2_WORKFLOW_PATH = 'config/comfy_templates/fibo2_lora_sample.json.njk';
+export const FIBO2_TURBO_WORKFLOW_PATH = 'config/comfy_templates/fibo2_edit_turbo_lora_sample.json.njk';
+export const fibo2WorkflowPaths = [FIBO2_WORKFLOW_PATH, FIBO2_TURBO_WORKFLOW_PATH];
+
+/** Apply graph defaults only on an explicit Turbo preview selection. */
+export function applyComfyWorkflowSelection(config: JobConfig, workflowPath: string): JobConfig {
+  const process = config.config.process[0];
+  const turboPreview = process.model.arch === 'fibo2' && workflowPath === FIBO2_TURBO_WORKFLOW_PATH;
+  const sample = {
+    ...process.sample,
+    ...(turboPreview ? { sample_steps: 4, guidance_scale: 1 } : {}),
+    comfy: {
+      ...process.sample.comfy,
+      workflow_path: workflowPath,
+      ...(turboPreview ? {
+        model: 'd/fibo2_edit_turbo_int8_convrot.safetensors',
+        text_encoder: 'd/qwen3vl_4b_instruct_heretic_7refusal_int8_convrot.safetensors',
+        vae: 'flux2-vae.safetensors',
+        sampler: 'euler',
+        scheduler: 'simple',
+      } : {}),
+    },
+  };
+  return {
+    ...config,
+    config: {
+      ...config.config,
+      process: config.config.process.map((entry, index) => index === 0 ? { ...entry, sample } : entry),
+    },
+  };
+}
+
 export const architectureModelSourceFields = ['text_encoder_path', 'te_name_or_path', 'vae_path',
   'extras_name_or_path', 'assistant_lora_path', 'inference_lora_path', 'unconditional_lora_path',
   'lora_path', 'unet_path', 'refiner_name_or_path', 'model_paths'] as const;
@@ -85,8 +117,9 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     if (kwargs.turbo || kwargs.is_distilled || /(?:^|[\W_])(?:turbo|lightning|distilled)(?:$|[\W_])/i.test(process.model.name_or_path ?? '')) {
       errors.push('FIBO2 training requires the non-distilled Dev checkpoint. Edit Turbo is inference-only; select it only in an inference workflow.');
     }
-    if (process.sample?.comfy?.enabled && (process.sample.comfy.workflow_path ?? '').replaceAll('\\', '/').split('/').pop() !== 'fibo2_lora_sample.json.njk') {
-      errors.push('FIBO2 Comfy previews require fibo2_lora_sample.json.njk and compatible FIBO2, Qwen3-VL-4B and FLUX.2 VAE files.');
+    if (process.sample?.comfy?.enabled && !fibo2WorkflowPaths.some(path => path.split('/').pop()
+      === (process.sample.comfy.workflow_path ?? '').replaceAll('\\', '/').split('/').pop())) {
+      errors.push('FIBO2 Comfy previews require the FIBO2 LoRA image / edit or FIBO2 Edit Turbo LoRA image / edit workflow and compatible FIBO2, Qwen3-VL-4B and FLUX.2 VAE files.');
     }
     if (process.sample?.comfy?.enabled && fibo2ComfyNegativeHasGlyphs(process.sample.comfy.negative_prompt ?? '')) {
       errors.push('Installed ComfyUI FIBO2 cannot keep glyph-bearing structured negatives text-only. Use an empty/plain Comfy negative prompt or native previews.');
