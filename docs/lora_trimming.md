@@ -1,10 +1,47 @@
 # Adaptive LoRA trimming
 
-Use `scripts/trim_lora.py` to reduce adapter ranks independently on CPU.
+Use `scripts/trim_lora.py` to reduce adapter ranks independently on CPU or CUDA.
 Ordinary LoRA and direction-only DoRA reduction need no base weights. Optional
-DoRA baking reads matching local base weights as tensors. No operation uses the
-GPU, downloads weights, executes adapter code, or changes the original checkpoint. Numerical similarity does not prove
+DoRA baking reads matching local base weights as tensors. No operation downloads
+weights, executes adapter code, or changes the original checkpoint. Numerical similarity does not prove
 identical generated images: compare your normal prompts after trimming.
+
+## Device and Python environment
+
+`--device auto` is the default: it selects the current CUDA device when the
+running Python's PyTorch reports CUDA available, and otherwise selects CPU.
+Use `--device cpu` to choose CPU explicitly, or `--device cuda` /
+`--device cuda:0` to require a visible CUDA device. An unavailable CUDA device or
+invalid index fails with a useful error. A CUDA allocation, OOM, QR/SVD or other
+runtime error is propagated; the reducer **does not retry on CPU**.
+
+QR/core SVD, storage-rounded error measurements, LoHa/LoKr factorized expansion,
+and DoRA/DoHa baking math run in float64 on the selected device. Safetensors
+reading and quantized checkpoint decoding remain on CPU. Only admitted layer
+weights/factors are transferred; no full model is instantiated or placed on the
+GPU. Completed factor and bias outputs return to CPU for safe serialization;
+working CUDA factors are released before admitting the next layer. Consumer
+GPUs can have slow float64 arithmetic, so CUDA does not guarantee a speedup for
+every layer size.
+
+The JSON/text preview reports `device_requested`, canonical `device_resolved`,
+and `runtime` with the Python executable, PyTorch version, CUDA availability/
+version, and GPU name when selected. Requested **and resolved** device are bound
+into the preview token. A preview made on CPU cannot be silently saved with
+CUDA, and an `auto` preview that resolves differently must be regenerated.
+CPU/CUDA numerical rounding can lead to different factors or threshold-boundary
+rank decisions; each report measures its own rounded output on its selected
+backend.
+
+```bash
+conda run -n ai-toolkit python scripts/trim_lora.py adapter.safetensors --device cuda:0
+conda run -n ai-toolkit python scripts/trim_lora.py adapter.safetensors --device cpu
+```
+
+The UI script bridge uses the project's configured Python interpreter (the same
+environment chosen by `run.sh`), with an explicit `AI_TOOLKIT_PYTHON` override
+when configured. The runtime report exposes the actual interpreter rather than
+guessing CUDA availability from a different shell environment.
 
 ## Preview and save
 
@@ -55,7 +92,7 @@ sd-scripts [`resize_lora.py`](https://github.com/kohya-ss/sd-scripts/blob/b1f32e
 They select a rank and report the resulting rounded error; they do **not** enforce
 an energy/error bound. `--min-rank`/`--max-rank` explicitly constrain them. The
 bounded energy/error modes instead reject a maximum that cannot meet the bound.
-We use exact CPU QR/core SVD rather than upstream's dense/randomized SVD, keep
+We use exact QR/core SVD rather than upstream's dense/randomized SVD, keep
 explicit alpha unchanged with factor compensation, and do not use an absolute
 small-singular-value cutoff. Exact zero updates use the minimum permitted rank.
 
@@ -304,7 +341,7 @@ record the base path, full SHA256, matched weight key and selected convention.
 The base hash includes all quantization codes, scales, markers and metadata;
 decoder/algorithm semantics and dtype also participate in preview identity.
 The base hash is rechecked before publication. The reported metric measures the
-CPU mathematical full-strength baked delta, including factor storage rounding;
+float64 mathematical full-strength baked delta, including factor storage rounding;
 it does not promise bit-exact low-precision/GPU arithmetic. Native DoRA strengths
 can be nonlinear, so other strengths need not match the baked LoRA.
 Originally absent alpha is explicitly written as the new rank here too, keeping
@@ -335,8 +372,8 @@ added metadata field with before/after values.
 For factors `B @ A`, thin QR decompositions reduce the SVD to a rank-sized
 core. Ordinary reduction and factorized LoHa/LoKr conversion never construct the
 output-by-input dense weight update. **DoRA baking necessarily constructs one
-dense effective-delta layer and its SVD on CPU.** Every path
-uses CPU float64 for decomposition, reconstructs balanced factors and measures
+dense effective-delta layer and its SVD on the selected device.** Every path
+uses float64 for decomposition, reconstructs balanced factors and measures
 their error **after storage-dtype rounding** through another small QR core.
 All layer results are held as ordinary CPU factors for final serialization;
 working memory scales with factor sizes/ranks, rather than full base weights.
@@ -344,8 +381,13 @@ LoHa/LoKr expansion and DoRA baking have a conservative per-layer preallocation
 admission estimate controlled by `--max-working-mb` (default **512 MiB**).
 Over-budget layers are rejected before expansion/base-weight loading; raise the
 explicit budget only when sufficient host memory is available. This estimate is
-not an OS-enforced peak limit: CPU library workspaces and retained output factors
-also consume memory. The GPU is never used.
+not an OS-enforced peak limit: library workspaces and retained CPU output factors
+also consume memory. CUDA additionally checks the estimated layer working set
+against current driver-free VRAM plus unused PyTorch allocator cache before
+transfer/allocation. Ordinary factor QR/SVD uses a rank-sized working-set
+estimate for this CUDA check; it never constructs a dense output-by-input
+update. Available memory can change after admission and allocator fragmentation
+can still cause an error; errors are not caught and redirected to CPU.
 Quantized baking indexes headers and small marker metadata without loading the
 model; the estimate includes one layer's decoder buffers and the regular
 Hadamard rotation matrix before weight payloads are read or dequantized. Logical
@@ -378,14 +420,18 @@ synthetic reconstruction, loader, transport, browser and build evidence.
 relative_error=None, min_rank=1, max_rank=None, output=None,
 expected_preview=None, progress=None, rank_policy=None, rank_value=None,
 convert_to_lora=False, max_working_mb=512, bake_dora_to_lora=False,
-base_model_path=None, dora_convention=None, base_dequant_dtype='float32')` returns a JSON-ready report. Both
+base_model_path=None, dora_convention=None, base_dequant_dtype='float32',
+device='auto')` returns a JSON-ready report. Both
 thresholds omitted selects energy 0.9999. `trim_lora_factors(down, up, *,
-alpha=None, ...)` exposes the same rank policy on CPU tensors, returning
+alpha=None, device='auto', ...)` accepts CPU or CUDA tensors with the same rank policy, returning
 `(new_down, new_up, metrics)` without modifying its arguments.
 
 Report schema version 1 includes:
 
 - `algorithm`, `input_path`, `source_sha256`, `preview_token`, `options`.
+- `device_requested`, `device_resolved`, and `runtime` (`python_executable`,
+  `torch_version`, `cuda_available`, `cuda_version`, `gpu_name`). Each layer also
+  reports its compute device and `compute_working_bytes` estimate.
 - `input_bytes`, `estimated_output_bytes`, `tensor_bytes_before`,
   `tensor_bytes_after`, `written`, `output_path` (null for preview).
 - `layers`: `name`, `old_rank`, `new_rank`, `relative_error`, `retained_energy`,

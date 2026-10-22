@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preview CPU adapter rank reduction; write only a new output."""
+"""Preview CPU/CUDA adapter rank reduction; write only a new output."""
 from __future__ import annotations
 
 import argparse
@@ -25,6 +25,7 @@ def build_parser():
     parser.add_argument('--rank-value', type=float, help='Value for --rank-policy (fixed rank, ratio, or retention/error fraction)')
     parser.add_argument('--convert-to-lora', action='store_true', help='Explicitly convert supported 2D LoHa/LoKr to ordinary LoRA')
     parser.add_argument('--max-working-mb', type=float, default=512, help='Conversion working-memory admission budget in MiB (default 512)')
+    parser.add_argument('--device', default='auto', help='Linear-algebra device: auto (CUDA when available, otherwise CPU), cpu, cuda, or cuda:<index>; CUDA errors do not retry on CPU')
     parser.add_argument('--bake-dora-to-lora', action='store_true', help='Bake full-strength DoRA with matching base weights before reducing to ordinary LoRA')
     parser.add_argument('--base-model-path', help='Single local floating or supported Comfy-quantized safetensors base checkpoint, required for DoRA baking')
     parser.add_argument('--dora-convention', choices=('comfy', 'toolkit'), help='Explicit usual DoRA consumer: ComfyUI or AI Toolkit/native (required for baking)')
@@ -52,6 +53,7 @@ def main(argv=None, *, require_preview=False, json_output=False):
         bake_dora_to_lora=args.bake_dora_to_lora, base_model_path=args.base_model_path,
         dora_convention=args.dora_convention,
         base_dequant_dtype=args.base_dequant_dtype,
+        device=args.device,
         output=args.output, expected_preview=args.expected_preview,
         progress=lambda message: print(message, file=sys.stderr, flush=True))
     if args.json or json_output:

@@ -7,20 +7,29 @@ const isWindows = process.platform === 'win32';
 // Shared resolver used by both the cron worker and Next.js API routes
 // so the Python interpreter is configured in exactly one place.
 export const resolvePythonPath = (): string => {
+  // run.sh captures the interpreter after activating ai-toolkit. An explicit
+  // launcher choice must never silently become a different Python environment.
+  const launcherPython = process.env.AI_TOOLKIT_PYTHON;
+  if (launcherPython) {
+    if (!path.isAbsolute(launcherPython) || !fs.existsSync(launcherPython)) {
+      throw new Error(`AI_TOOLKIT_PYTHON does not point to an existing absolute Python executable: ${launcherPython}`);
+    }
+    return launcherPython;
+  }
   const candidates: string[] = [];
 
   if (isWindows) {
-    candidates.push(path.join(TOOLKIT_ROOT, '.venv', 'Scripts', 'python.exe'));
-    candidates.push(path.join(TOOLKIT_ROOT, 'venv', 'Scripts', 'python.exe'));
     if (process.env.CONDA_PREFIX) {
       candidates.push(path.join(process.env.CONDA_PREFIX, 'python.exe'));
     }
+    candidates.push(path.join(TOOLKIT_ROOT, '.venv', 'Scripts', 'python.exe'));
+    candidates.push(path.join(TOOLKIT_ROOT, 'venv', 'Scripts', 'python.exe'));
   } else {
-    candidates.push(path.join(TOOLKIT_ROOT, '.venv', 'bin', 'python'));
-    candidates.push(path.join(TOOLKIT_ROOT, 'venv', 'bin', 'python'));
     if (process.env.CONDA_PREFIX) {
       candidates.push(path.join(process.env.CONDA_PREFIX, 'bin', 'python'));
     }
+    candidates.push(path.join(TOOLKIT_ROOT, '.venv', 'bin', 'python'));
+    candidates.push(path.join(TOOLKIT_ROOT, 'venv', 'bin', 'python'));
     candidates.push(path.join(process.env.HOME || '', '.conda', 'envs', 'ai-toolkit', 'bin', 'python'));
   }
 

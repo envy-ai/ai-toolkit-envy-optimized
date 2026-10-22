@@ -1,5 +1,45 @@
 # Adaptive LoRA trimming validation
 
+## CUDA selection and launcher interpreter
+
+Reducer algorithm `qr_core_svd_v5` adds `device=auto|cpu|cuda[:index]`.
+The small synthetic CUDA check ran in the `ai-toolkit` Conda environment on
+the RTX 4090 after confirming 8,758 MiB free VRAM. It passed CPU/CUDA rank and
+reconstruction comparisons, ordinary factor serialization back to CPU, and
+the complete DoRA bake path; CUDA peak allocated memory was below 64 MiB.
+An initial fixture-only rank/index error was corrected, then the affected case
+passed. No trained checkpoint, full model or training job was used.
+
+The full CPU regression command (`unittest testing.test_lora_trimming
+testing.test_checkpoint_weights`, CUDA hidden) completed **41 tests, one skipped,
+no failures**;
+the skipped GPU case passed separately above. Peak host memory was 837.7 MiB,
+swap zero. A real CLI subprocess with CUDA hidden verified `auto -> cpu` and
+reported the exact `sys.executable`; explicit unavailable CUDA rejects with an
+interpreter-specific error. The resolver's three Node tests passed explicit
+launcher override, invalid override rejection, active Conda priority over a
+repository virtual environment, and repository selection without a usable
+Conda candidate (80.6 MiB peak, zero swap).
+
+The final scoped browser preview used the real scripts API and resolver against
+an isolated synthetic-job database. It reported `auto -> cuda:0`, GPU
+`NVIDIA GeForce RTX 4090`, and Python
+`/home/bart/.conda/envs/ai-toolkit/bin/python`; the visible device summary and
+Python hover title matched. No output copy was created. Browser verification
+peaked at 361.7 MiB host memory with zero swap; Chromium itself used software
+rendering. The isolated server was stopped afterward.
+
+Standalone UI typecheck, shell syntax, diff checks and `npm run build` passed.
+The build took 6 min 29 s, peaked at 14.2 GiB and used no swap. Only the UI branch
+was reloaded; queue worker PID 656564 stayed running. A scoped live HTTP/asset
+check passed and confirmed the device summary replaced the old CPU-only status.
+
+All executed checks used transient systemd units/scopes capped at 16 GiB host
+memory with no swap. CUDA/library failures propagate without retrying on CPU;
+device selection is bound to the preview token. Source/base files remain
+unchanged, and earlier format, alpha/scaling and no-clobber checks remain in
+the regression suite.
+
 ## Quantized bases, MOSS and trainable DoRA families
 
 The quantized-base extension uses reducer algorithm `qr_core_svd_v4` and weight

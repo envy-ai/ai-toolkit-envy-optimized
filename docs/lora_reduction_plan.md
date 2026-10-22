@@ -178,3 +178,28 @@ Hadamard adapted-row norm with the module's FP32/FP64 tiny floor. Validate that
 known convention rather than normalizing exported magnitudes twice. For a
 matching 4D base, reshape baked ordinary factors using the explicit kernel
 dimensions; no guessed convolution layout, CP/Tucker or DoKr support.
+
+## CUDA computation and interpreter consistency
+
+The earlier CPU-only scope is superseded by additive `device='auto'` on both
+public reduction APIs and `--device auto|cpu|cuda[:index]`. Resolve auto to CUDA
+when available in the actual process, otherwise CPU. Snapshot a canonical
+explicit CUDA index and bind requested/resolved device plus algorithm version
+into preview identity. Report Python executable, PyTorch/CUDA versions,
+availability and GPU name. No silent CPU retry follows CUDA errors or OOM.
+
+Move admitted per-layer factors/weights to float64 on the selected backend for
+all QR/SVD, measured error, factorized conversion and baking math. Keep archive
+I/O and existing quantization codecs on CPU; return outputs to CPU and release
+working CUDA factors before processing the next layer. Preserve source tensor
+values, dtypes/scaling/metadata and atomic no-clobber publication.
+
+Retain explicit conversion/bake working-memory budgets and add CUDA admission
+against current driver-free memory plus reusable allocator cache. Ordinary QR
+admission uses a factor/core estimate, without dense base deltas. These estimates
+cannot guarantee allocator workspace/fragmentation or concurrent allocations;
+runtime failures remain explicit. CPU/CUDA tests compare effective updates and
+rank policies within measured floating precision, not arbitrary SVD factor signs.
+Coordinator owns the shared Python resolver/run.sh context and existing preview
+runtime display; test owner runs scoped CPU regressions and authorized small
+synthetic CUDA cases only, with no training/full-model/user checkpoint runs.

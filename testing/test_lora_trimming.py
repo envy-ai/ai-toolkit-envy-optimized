@@ -1,5 +1,8 @@
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -99,6 +102,97 @@ class LoraTrimmingTests(unittest.TestCase):
 
     def temporary_directory(self):
         return tempfile.TemporaryDirectory(dir=ARTIFACT_ROOT)
+
+    def test_auto_device_uses_cpu_when_cuda_is_unavailable_and_explicit_cuda_fails(self):
+        from unittest.mock import patch
+
+        down, up = make_spectral_factors(rank=3, width=32)
+        with patch("toolkit.lora_trimming.torch.cuda.is_available", return_value=False):
+            reduced_down, reduced_up, metrics = trim_lora_factors(
+                down, up, relative_error=0.1, device="auto"
+            )
+            self.assertEqual(metrics["device_requested"], "auto")
+            self.assertEqual(metrics["device_resolved"], "cpu")
+            self.assertEqual(reduced_down.device.type, "cpu")
+            self.assertEqual(reduced_up.device.type, "cpu")
+            with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+                trim_lora_factors(down, up, device="cuda")
+
+        with self.temporary_directory() as temp_dir:
+            source = Path(temp_dir) / "cli-input.safetensors"
+            save_file({
+                "diffusion_model.block.proj.lora_down.weight": down,
+                "diffusion_model.block.proj.lora_up.weight": up,
+            }, source)
+            child_env = os.environ.copy()
+            child_env["CUDA_VISIBLE_DEVICES"] = ""
+            completed = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts" / "trim_lora.py"),
+                 "--input", str(source), "--json"],
+                check=True, capture_output=True, text=True, env=child_env,
+            )
+            report = json.loads(completed.stdout.splitlines()[-1])
+            self.assertEqual(report["device_requested"], "auto")
+            self.assertEqual(report["device_resolved"], "cpu")
+            self.assertEqual(report["runtime"]["python_executable"], sys.executable)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_small_cuda_factorization_and_dora_bake_match_cpu_path(self):
+        if torch.cuda.mem_get_info(0)[0] < 1024**3:
+            self.skipTest("Less than 1 GiB of currently free VRAM")
+
+        down, up = make_spectral_factors(rank=3, width=32)
+        cpu_down, cpu_up, cpu_metrics = trim_lora_factors(
+            down, up, relative_error=0.04, alpha=6.0, device="cpu"
+        )
+        torch.cuda.reset_peak_memory_stats(0)
+        gpu_down, gpu_up, gpu_metrics = trim_lora_factors(
+            down, up, relative_error=0.04, alpha=6.0, device="cuda:0"
+        )
+        self.assertEqual(gpu_metrics["device_requested"], "cuda:0")
+        self.assertEqual(gpu_metrics["device_resolved"], "cuda:0")
+        self.assertEqual(gpu_down.device.type, "cpu")
+        self.assertEqual(gpu_up.device.type, "cpu")
+        self.assertEqual(gpu_metrics["new_rank"], cpu_metrics["new_rank"])
+        cpu_update = cpu_up.double() @ cpu_down.double() * (6.0 / cpu_down.shape[0])
+        gpu_update = gpu_up.double() @ gpu_down.double() * (6.0 / gpu_down.shape[0])
+        torch.testing.assert_close(gpu_update, cpu_update, rtol=2e-6, atol=2e-7)
+        self.assertLess(torch.cuda.max_memory_allocated(0), 64 * 1024**2)
+
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            base_path = root / "base.safetensors"
+            source_path = root / "dora.safetensors"
+            base = torch.eye(32, dtype=torch.float32) + 0.1
+            dora_down, dora_up = make_spectral_factors(rank=3, width=32)
+            magnitude = torch.linspace(0.7, 1.3, 32)
+            save_file({"diffusion_model.block.proj.weight": base}, base_path)
+            save_file({
+                "diffusion_model.block.proj.lora_down.weight": dora_down,
+                "diffusion_model.block.proj.lora_up.weight": dora_up,
+                "diffusion_model.block.proj.alpha": torch.tensor(3.0),
+                "diffusion_model.block.proj.dora_scale": magnitude,
+            }, source_path)
+
+            # This file path exercises CPU safetensors I/O, CUDA DoRA baking,
+            # then CUDA QR/SVD before returning CPU report factors.
+            report = trim_lora(
+                source_path,
+                bake_dora_to_lora=True,
+                base_model_path=base_path,
+                dora_convention="toolkit",
+                rank_policy="fixed",
+                rank_value=2,
+                device="cuda:0",
+            )
+            layer = report["layers"][0]
+            self.assertTrue(layer["baked"])
+            self.assertEqual(layer["device_requested"], "cuda:0")
+            self.assertEqual(layer["device_resolved"], "cuda:0")
+            self.assertEqual(report["device_resolved"], "cuda:0")
+            self.assertEqual(report["runtime"]["python_executable"], __import__("sys").executable)
+            self.assertEqual(report["runtime"]["torch_version"], torch.__version__)
+            self.assertLess(torch.cuda.max_memory_allocated(0), 64 * 1024**2)
 
     @staticmethod
     def _active_network():

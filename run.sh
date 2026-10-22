@@ -21,6 +21,7 @@ fi
 
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate ai-toolkit
+export AI_TOOLKIT_PYTHON="$(command -v python)"
 
 cd "$SCRIPT_DIR/ui"
 npm run install_deps

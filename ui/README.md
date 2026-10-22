@@ -16,13 +16,22 @@ rounding. Other policies select from the singular-value spectrum, with any
 rank limits applied, and report the resulting retention/error. Frobenius norm
 retention squares the requested norm fraction to select by energy.
 
-Click **Analyze** for a CPU preview that writes nothing and shows estimated
+Click **Analyze** for a preview that writes nothing and shows estimated
 file size, per-layer factor ranks, formats, measurement scopes, retained energy,
 and reconstruction error. **Advanced rank limits and memory** expands with a
 click or Enter/Space. By default, DoRA magnitude tensors remain unchanged;
 its visible warning and table identify measurements as direction-only, before
 normalization. They do
 not bound final normalized weight error or visual changes without the base.
+Analysis automatically selects CUDA when available, otherwise CPU. The existing
+layer-count summary identifies the actual device/GPU; its hover title shows the
+Python interpreter. CUDA errors or insufficient VRAM stop the operation with
+details rather than silently retrying on CPU. CLI users can select `--device cpu`
+or `--device cuda:0` explicitly. Checkpoint decoding and final serialization stay
+on CPU; per-layer decomposition and reconstruction measurements use the selected
+device. `run.sh` exports `AI_TOOLKIT_PYTHON` after activating Conda `ai-toolkit`;
+the shared script/job resolver honors that exact executable, then active Conda
+before repository virtual environments. An invalid explicit override is an error.
 The separate **Bake DoRA to ordinary LoRA before reducing** switch is off by
 default. Enabling it requires a **Matching base safetensors checkpoint** path
 to a single local checkpoint, and an explicit **DoRA convention**:

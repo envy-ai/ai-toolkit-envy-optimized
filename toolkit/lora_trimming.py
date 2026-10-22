@@ -1,7 +1,7 @@
-"""CPU-only rank reduction of standalone adapter safetensors.
+"""CPU/CUDA rank reduction of standalone adapter safetensors.
 
 Ordinary/LoHa/LoKr reduction uses factorized updates without a base model.
-Opt-in DoRA baking reads local floating base weights and materializes one
+Opt-in DoRA baking reads local base-weight tensors and materializes one
 memory-budgeted effective-delta layer. No pickle, model code or network calls.
 """
 from __future__ import annotations
@@ -10,6 +10,8 @@ import hashlib
 import json
 import math
 import os
+import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import Callable
@@ -23,7 +25,7 @@ from toolkit.util.checkpoint_weights import (
     WEIGHT_DECODER, checkpoint_input_scale, decode_checkpoint_weight, describe_checkpoint_weight,
 )
 
-ALGORITHM = "qr_core_svd_v4"
+ALGORITHM = "qr_core_svd_v5"
 BASE_DEQUANT_DTYPES = ('float32', 'bfloat16', 'float16')
 _FLOATS = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
 # Safetensors orders by descending dtype enum, then tensor name. See
@@ -39,6 +41,40 @@ _HASH_KEYS = ("sshs_model_hash", "sshs_legacy_hash")
 RANK_POLICIES = ('energy', 'relative_error', 'fixed', 'sv_ratio', 'sv_cumulative', 'sv_fro')
 _MAGNITUDES = ('.dora_scale', '.magnitude', '.lora_magnitude_vector',
                '.lora_magnitude_vector.weight', '.lora_magnitude_vector.default.weight')
+
+
+def _resolve_device(device):
+    requested = str(device)
+    if requested not in ('auto', 'cpu', 'cuda') and re.fullmatch(r'cuda:[0-9]+', requested) is None:
+        raise ValueError('device must be auto, cpu, cuda, or cuda:<nonnegative index>')
+    if requested == 'cpu' or (requested == 'auto' and not torch.cuda.is_available()):
+        return requested, torch.device('cpu')
+    if not torch.cuda.is_available():
+        raise ValueError(f'Requested device {requested}, but CUDA is unavailable in Python {sys.executable} (torch {torch.__version__})')
+    index = int(requested.split(':')[1]) if ':' in requested else torch.cuda.current_device()
+    if index >= torch.cuda.device_count():
+        raise ValueError(f'Requested CUDA index {index}, but only {torch.cuda.device_count()} visible CUDA devices are available')
+    return requested, torch.device('cuda', index)
+
+
+def _admit_working_memory(estimate, device, operation, max_working_mb=None):
+    if max_working_mb is not None and estimate > max_working_mb*1024**2:
+        raise ValueError(f'{operation} working-memory estimate {estimate} bytes exceeds max_working_mb={max_working_mb}; choose an explicit sufficient budget')
+    if device.type == 'cuda':
+        free, _ = torch.cuda.mem_get_info(device)
+        reusable = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+        available = free + reusable
+        if estimate > available:
+            raise ValueError(f'{operation} on {device} needs an estimated {estimate} bytes, but only {available} bytes are currently available '
+                             f'({free} driver-free + {reusable} reusable allocator cache). Free GPU memory or explicitly choose device=cpu; no CPU retry is performed')
+
+
+def _factor_working_bytes(down, up):
+    rank, rows = down.shape[0], up.shape[0]
+    columns = math.prod(down.shape[1:])
+    # Original FP64 factors, QR/SVD/reconstruction and doubled difference QR.
+    # The core grows with rank, never with output_rows*input_columns.
+    return 8*(12*(rows+columns)*rank + 64*rank*rank)
 
 
 def _options(retained_energy, relative_error, min_rank, max_rank, rank_policy=None, rank_value=None):
@@ -102,15 +138,18 @@ def _factor_error(a, b, new_a, new_b, ratio, norm):
 
 def trim_lora_factors(down: torch.Tensor, up: torch.Tensor, *, alpha=None,
                       retained_energy=None, relative_error=None, min_rank=1, max_rank=None,
-                      rank_policy=None, rank_value=None, output_dtype=None):
+                      rank_policy=None, rank_value=None, output_dtype=None, device='auto'):
     """Return CPU factors and metrics, preserving original storage dtypes/scaling.
 
     Explicit alpha is kept unchanged: compensate the factor product for its new
     alpha/rank runtime scale. Missing alpha means standalone unit scale.
+    Linear algebra uses the selected CPU/CUDA device; auto chooses CUDA when
+    available, otherwise CPU. CUDA runtime errors are never retried on CPU.
     """
     options = _options(retained_energy, relative_error, min_rank, max_rank, rank_policy, rank_value)
-    if down.device.type != "cpu" or up.device.type != "cpu":
-        raise ValueError("LoRA trimming accepts CPU tensors only")
+    requested_device, compute_device = _resolve_device(device)
+    if down.device.type not in ('cpu', 'cuda') or up.device.type not in ('cpu', 'cuda'):
+        raise ValueError('LoRA factors must be CPU or CUDA tensors')
     if down.dtype not in _FLOATS or up.dtype not in _FLOATS:
         raise ValueError("LoRA factors must be float16, bfloat16, float32 or float64")
     if output_dtype is not None and output_dtype not in _FLOATS:
@@ -127,7 +166,10 @@ def trim_lora_factors(down: torch.Tensor, up: torch.Tensor, *, alpha=None,
         raise ValueError(f"Rank bounds cannot exceed original rank {rank}; ranks are never increased")
     if alpha is not None and (isinstance(alpha, bool) or not math.isfinite(alpha) or alpha == 0):
         raise ValueError("Explicit alpha must be finite and nonzero; alpha=0 has ambiguous loader semantics")
-    a, b = down.detach().reshape(rank, -1).double(), up.detach().reshape(up.shape[0], rank).double()
+    working_bytes = _factor_working_bytes(down, up)
+    _admit_working_memory(working_bytes, compute_device, 'Factor QR/SVD')
+    a = down.detach().reshape(rank, -1).to(device=compute_device, dtype=torch.float64)
+    b = up.detach().reshape(up.shape[0], rank).to(device=compute_device, dtype=torch.float64)
     if not torch.isfinite(a).all() or not torch.isfinite(b).all():
         raise ValueError("LoRA factors contain nonfinite values")
     qb, qa, core = _core(b, a)
@@ -167,7 +209,7 @@ def trim_lora_factors(down: torch.Tensor, up: torch.Tensor, *, alpha=None,
         if selected == rank and down_dtype == down.dtype and up_dtype == up.dtype:
             # Avoid introducing rounding/decomposition error when no reduction
             # satisfies the limit. Original tensors are returned bit-exactly.
-            new_down, new_up, error, ideal = down.detach().clone(), up.detach().clone(), 0.0, 1.0
+            new_down, new_up, error, ideal = down.detach().cpu().clone(), up.detach().cpu().clone(), 0.0, 1.0
         else:
             tail = float(energy[selected:].sum())
             if bounded and total and math.sqrt(tail / total) > error_limit:
@@ -196,12 +238,13 @@ def trim_lora_factors(down: torch.Tensor, up: torch.Tensor, *, alpha=None,
                 continue
         old_scale = alpha / rank if alpha is not None else 1.0
         new_scale = alpha / selected if alpha is not None else 1.0
-        return new_down, new_up, dict(
+        return new_down.detach().cpu(), new_up.detach().cpu(), dict(
             old_rank=rank, new_rank=selected, relative_error=error,
             retained_energy=1-error*error, ideal_retained_energy=ideal,
             dtype_down=str(new_down.dtype).removeprefix('torch.'), dtype_up=str(new_up.dtype).removeprefix('torch.'),
             alpha=alpha, old_scale=old_scale, new_scale=new_scale,
             rank_policy=policy, rank_value=value,
+            device_requested=requested_device, device_resolved=str(compute_device), compute_working_bytes=working_bytes,
             old_bytes=down.numel()*down.element_size()+up.numel()*up.element_size(),
             new_bytes=new_down.numel()*new_down.element_size()+new_up.numel()*new_up.element_size(),
         )
@@ -373,7 +416,7 @@ def _split_qkv_factors(layer, tensors):
     return downs[0], torch.cat(ups, 0), alphas[0]
 
 
-def _conversion_factors(parts, kind, alpha, max_working_mb):
+def _conversion_factors(parts, kind, alpha, max_working_mb, device='cpu'):
     """Exact factorized 2D LyCORIS update, before storage-dtype rounding."""
     if any(t.ndim != 2 or any(size < 1 for size in t.shape) or t.dtype not in _FLOATS
            for t in parts.values()):
@@ -415,10 +458,10 @@ def _conversion_factors(parts, kind, alpha, max_working_mb):
     # Includes expanded FP64 factors, QR/SVD and doubled difference-core work;
     # this is a conservative admission estimate, not a host-memory guarantee.
     estimate = 8*(8*(rows+columns)*rank + 32*rank*rank + 4*sum(t.numel() for t in parts.values()))
-    if estimate > max_working_mb*1024**2:
-        raise ValueError(f'Factorized conversion working-memory estimate {estimate} bytes exceeds max_working_mb={max_working_mb}; raise the explicit budget only if sufficient CPU memory is available')
+    compute_device = torch.device(device)
+    _admit_working_memory(estimate, compute_device, 'Factorized conversion', max_working_mb)
     if kind == 'loha':
-        b1, a1, b2, a2 = (tensor.double() for tensor in (b1, a1, b2, a2))
+        b1, a1, b2, a2 = (tensor.to(device=compute_device, dtype=torch.float64) for tensor in (b1, a1, b2, a2))
         up = (b1[:, :, None] * b2[:, None, :]).reshape(rows, rank)
         down = (a1[:, None, :] * a2[None, :, :]).reshape(rank, columns)
     else:
@@ -426,10 +469,11 @@ def _conversion_factors(parts, kind, alpha, max_working_mb):
         for index in (1, 2):
             prefix = f'lokr_w{index}'
             if prefix in parts:
-                u, s, vh = torch.linalg.svd(parts[prefix].double(), full_matrices=False)
+                u, s, vh = torch.linalg.svd(parts[prefix].to(device=compute_device, dtype=torch.float64), full_matrices=False)
                 components.append((u*s.sqrt()[None], s.sqrt()[:, None]*vh))
             else:
-                components.append((parts[prefix+'_a'].double(), parts[prefix+'_b'].double()))
+                components.append((parts[prefix+'_a'].to(device=compute_device, dtype=torch.float64),
+                                   parts[prefix+'_b'].to(device=compute_device, dtype=torch.float64)))
         up = torch.kron(components[0][0].contiguous(), components[1][0].contiguous())
         down = torch.kron(components[0][1].contiguous(), components[1][1].contiguous())
     # Preserve serialized alpha while converting its input runtime scale to the
@@ -469,7 +513,7 @@ def _base_weight_key(name, index):
 
 
 def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, convention, max_working_mb,
-                       descriptor, base_dequant_dtype, *, adapter_kind='dora', source_dtype=None):
+                       descriptor, base_dequant_dtype, *, adapter_kind='dora', source_dtype=None, device='cpu'):
     if down.ndim != 2 or up.ndim != 2 or up.shape[1] != down.shape[0]:
         raise ValueError('DoRA baking currently supports linear factor pairs only')
     rows, columns = up.shape[0], down.shape[1]
@@ -482,8 +526,9 @@ def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, conventi
     if len(descriptor.shape) == 4 and adapter_kind != 'doha':
         raise ValueError('Native DoRA training supports linear layers only; convolution baking requires a recognized DoHa layout')
     estimate = 8*(12*rows*columns + 32*rank*rank + 8*(rows+columns)*rank) + descriptor.decode_working_bytes
-    if estimate > max_working_mb*1024**2:
-        raise ValueError(f'DoRA baking working-memory estimate {estimate} bytes exceeds max_working_mb={max_working_mb}; dense effective-delta SVD requires an explicit sufficient CPU budget')
+    compute_device = torch.device(device)
+    _admit_working_memory(estimate, compute_device, 'DoRA baking', max_working_mb)
+    output_dtype = source_dtype or torch.promote_types(down.dtype, up.dtype)
     with safe_open(str(base_path), framework='pt', device='cpu') as handle:
         weight = decode_checkpoint_weight(handle, descriptor)
         if descriptor.quant_format != 'floating':
@@ -500,7 +545,11 @@ def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, conventi
             base_bias = handle.get_tensor(bias_key)
     if not torch.isfinite(weight).all() or not torch.isfinite(down).all() or not torch.isfinite(up).all():
         raise ValueError('DoRA baking inputs contain nonfinite values')
-    weight = weight.flatten(1)
+    reconstruction_dtype = weight.dtype
+    weight = weight.flatten(1).to(device=compute_device, dtype=torch.float64)
+    down = down.to(device=compute_device, dtype=torch.float64)
+    up = up.to(device=compute_device, dtype=torch.float64)
+    magnitude = magnitude.to(device=compute_device, dtype=torch.float64)
     scale = alpha/down.shape[0] if alpha is not None else 1.0
     unscaled_direction = up.double() @ down.double()
     direction = unscaled_direction*scale
@@ -508,7 +557,7 @@ def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, conventi
     if input_scale is not None and convention == 'toolkit':
         # AWQ is applied to the input of the frozen base only. The adapter
         # branch still sees raw inputs; normalization uses the stored view.
-        forward_weight = forward_weight*input_scale.double()[None]
+        forward_weight = forward_weight*input_scale.to(device=compute_device, dtype=torch.float64)[None]
     adapted = forward_weight + direction
     if convention == 'comfy':
         # Standard Comfy model patching calculates weights in float32, even
@@ -521,7 +570,7 @@ def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, conventi
         normalization_update = unscaled_direction if adapter_kind == 'dora' else direction
         norm = (weight.double()+normalization_update).norm(dim=1)
         if adapter_kind == 'doha':
-            norm_dtype = torch.float64 if source_dtype == torch.float64 else torch.float32
+            norm_dtype = torch.float64 if output_dtype == torch.float64 else torch.float32
             ratio = magnitude.double().reshape(-1)/norm.clamp_min(torch.finfo(norm_dtype).tiny)
         else:
             zero = norm == 0
@@ -532,7 +581,7 @@ def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, conventi
     if base_bias is not None:
         if not torch.isfinite(base_bias).all():
             raise ValueError(f'{bias_key}: base bias contains nonfinite values')
-        bias_delta = (ratio-1)*base_bias.double()
+        bias_delta = (ratio-1)*base_bias.to(device=compute_device, dtype=torch.float64)
         if not torch.isfinite(bias_delta).all():
             raise ValueError('DoRA bias delta exceeds the supported float64 numeric range')
     if not torch.isfinite(effective_delta).all():
@@ -542,12 +591,12 @@ def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, conventi
     # Preserve explicit alpha, compensating the ordinary expanded alpha/rank
     # scale. Missing alpha remains the standalone unit-scale convention.
     compensation = rank/alpha if alpha is not None else 1.0
-    weight_info = dict(**descriptor.report(), reconstruction_dtype=str(weight.dtype).removeprefix('torch.'),
+    weight_info = dict(**descriptor.report(), reconstruction_dtype=str(reconstruction_dtype).removeprefix('torch.'),
         normalization_dtype='float64', requested_dequant_dtype=base_dequant_dtype if descriptor.quant_format != 'floating' else None,
         forward_input_scale=input_scale is not None,
         output_basis='awq_stored_weight' if input_scale is not None and convention == 'comfy' else 'raw_input',
         normalization_update='unscaled_BA' if adapter_kind == 'dora' and convention == 'toolkit' else 'scaled_update')
-    return roots[:, None]*vh, u*(roots*compensation)[None], source_dtype or torch.promote_types(down.dtype, up.dtype), estimate, weight_info, bias_delta
+    return roots[:, None]*vh, u*(roots*compensation)[None], output_dtype, estimate, weight_info, None if bias_delta is None else bias_delta.detach().cpu()
 
 
 def _check_missing_alpha(path, metadata, rank):
@@ -592,9 +641,13 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
               output=None, expected_preview=None, progress: Callable[[str], None] | None = None,
               rank_policy=None, rank_value=None, convert_to_lora=False, max_working_mb=512,
               bake_dora_to_lora=False, base_model_path=None, dora_convention=None,
-              base_dequant_dtype='float32'):
+              base_dequant_dtype='float32', device='auto'):
     """Preview or atomically publish a new adapter, never replacing files."""
     options = _options(retained_energy, relative_error, min_rank, max_rank, rank_policy, rank_value)
+    requested_device, compute_device = _resolve_device(device)
+    runtime = dict(python_executable=sys.executable, torch_version=str(torch.__version__),
+        cuda_available=torch.cuda.is_available(), cuda_version=torch.version.cuda,
+        gpu_name=torch.cuda.get_device_name(compute_device) if compute_device.type == 'cuda' else None)
     if type(convert_to_lora) is not bool:
         raise ValueError('convert_to_lora must be a boolean')
     if type(bake_dora_to_lora) is not bool:
@@ -614,7 +667,8 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
         raise ValueError('max_working_mb must be a positive finite number')
     options.update(convert_to_lora=convert_to_lora, max_working_mb=max_working_mb,
                    bake_dora_to_lora=bake_dora_to_lora, dora_convention=dora_convention,
-                   base_dequant_dtype=base_dequant_dtype)
+                   base_dequant_dtype=base_dequant_dtype, device=requested_device,
+                   resolved_device=str(compute_device))
     source = Path(path).expanduser().resolve(strict=True)
     if not source.is_file() or source.suffix.lower() != '.safetensors':
         raise ValueError("Input must be a standalone .safetensors LoRA; pickle/adapter directories are not loaded")
@@ -656,7 +710,7 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
         for layer in layers:
             name, kind = layer['name'], layer['kind']
             if progress:
-                progress(f"Reducing {name} ({len(records)+1}/{len(layers)}) on CPU")
+                progress(f"Reducing {name} ({len(records)+1}/{len(layers)}) on {compute_device}")
             tensors = {key: handle.get_tensor(key) for key in layer['keys']}
             input_tensor_bytes += sum(t.numel()*t.element_size() for t in tensors.values())
             alpha_key = name + '.alpha'
@@ -675,7 +729,7 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
             bias_delta = None
             if kind in ('loha', 'lokr', 'doha'):
                 parts = {key[len(name)+1:]: tensors[key] for key in layer['factors']}
-                down, up, output_dtype, stored_rank, input_scale, estimate = _conversion_factors(parts, 'loha' if kind == 'doha' else kind, alpha, max_working_mb)
+                down, up, output_dtype, stored_rank, input_scale, estimate = _conversion_factors(parts, 'loha' if kind == 'doha' else kind, alpha, max_working_mb, compute_device)
                 if alpha is None and stored_rank is not None:
                     _check_missing_alpha(source, metadata, stored_rank)
                 if name.startswith('lycoris_'):
@@ -708,13 +762,13 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
                     down, up, output_dtype, bake_estimate, base_weight_info, bias_delta = _bake_dora_factors(base_path, base_key,
                         down, up, magnitude, alpha, dora_convention, bake_budget,
                         base_descriptors[base_key], base_dequant_dtype, adapter_kind=kind,
-                        source_dtype=output_dtype)
+                        source_dtype=output_dtype, device=compute_device)
                     estimate = bake_estimate + (estimate or 0)
                 else:
                     result_tensors[layer['magnitude']] = magnitude.clone().contiguous()
             try:
                 new_down, new_up, record = trim_lora_factors(down, up, alpha=alpha,
-                    output_dtype=output_dtype, **_factor_options(options))
+                    output_dtype=output_dtype, device=compute_device, **_factor_options(options))
             except ValueError as error:
                 raise ValueError(f"{name}: {error}") from error
             if down_key in result_tensors or up_key in result_tensors:
@@ -730,7 +784,7 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
                 # A converted standalone file must describe unit scaling even
                 # when historical global alpha/config tags refer to native
                 # ranks. This changes no factor values or effective update.
-                output_alpha = torch.tensor(record['new_rank'], dtype=torch.float32)
+                output_alpha = torch.tensor(record['new_rank'], dtype=torch.float32, device='cpu')
                 if float(output_alpha) != record['new_rank']:
                     raise ValueError('Converted rank cannot be represented exactly as a float32 alpha')
                 record['alpha'] = float(output_alpha)
@@ -765,6 +819,7 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
             if converted:
                 record['old_bytes'] = sum(tensors[key].numel()*tensors[key].element_size() for key in layer['factors'])
                 record['old_scale'] = input_scale
+            record['device_requested'] = requested_device
             if split_outputs:
                 record['old_bytes'] = sum(tensors[key].numel()*tensors[key].element_size() for key in layer['factors'])
                 record['new_bytes'] = sum(result_tensors[part+suffix].numel()*result_tensors[part+suffix].element_size()
@@ -779,6 +834,9 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
                 split_qkv_outputs=split_outputs, baked_bias=bias_delta is not None,
                 dora_convention=dora_convention,
                 normalization_epsilon=float(torch.finfo(torch.float32).eps) if bake_dora_to_lora and dora_convention == 'comfy' else None, **record))
+            # Converted/baked working factors may be CUDA tensors. CPU outputs
+            # are retained above; release this layer before admitting the next.
+            del down, up
     changed_metadata = []
     if converted:
         # These are loading instructions, not historical user tags. Preserve
@@ -819,6 +877,7 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
     if base_info is not None and _sha256(base_path) != base_info['sha256']:
         raise RuntimeError('Base checkpoint changed during baking; no output published')
     report = dict(schema_version=1, algorithm=ALGORITHM, input_path=str(source), source_sha256=source_hash,
+        device_requested=requested_device, device_resolved=str(compute_device), runtime=runtime,
         preview_token=token, options=options, input_bytes=source.stat().st_size,
         estimated_output_bytes=predicted_bytes, tensor_bytes_before=input_tensor_bytes,
         tensor_bytes_after=sum(t.numel()*t.element_size() for t in result_tensors.values()),
@@ -871,7 +930,9 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
 
 def format_trimming_text(report):
     lines = [f"{'Wrote' if report['written'] else 'Dry run:'} {report['output_path'] or report['input_path']}",
-        f"Bytes: {report['input_bytes']} -> {report['estimated_output_bytes']} (including metadata/header)"]
+        f"Bytes: {report['input_bytes']} -> {report['estimated_output_bytes']} (including metadata/header)",
+        f"Device: {report['device_requested']} -> {report['device_resolved']}" + (f" ({report['runtime']['gpu_name']})" if report['runtime']['gpu_name'] else ''),
+        f"Python: {report['runtime']['python_executable']}; torch {report['runtime']['torch_version']}; CUDA available: {report['runtime']['cuda_available']}"]
     for layer in report['layers']:
         lines.append(f"{layer['name']} ({layer['input_format']} -> {layer['output_format']}, {layer['metric_scope']}): "
                      f"factor rank {layer['old_rank']} -> {layer['new_rank']}; "

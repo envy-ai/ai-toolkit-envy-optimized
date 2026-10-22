@@ -59,6 +59,8 @@ interface LayerReport {
 
 interface TrimReport {
   schema_version: number;
+  device_resolved: string;
+  runtime: { python_executable: string; gpu_name: string | null };
   preview_token: string;
   input_bytes: number;
   estimated_output_bytes: number;
@@ -115,6 +117,10 @@ const parseReport = (value: unknown): TrimReport => {
   if (
     !isRecord(value) ||
     value.schema_version !== 1 ||
+    typeof value.device_resolved !== 'string' ||
+    !isRecord(value.runtime) ||
+    typeof value.runtime.python_executable !== 'string' ||
+    (value.runtime.gpu_name !== null && typeof value.runtime.gpu_name !== 'string') ||
     typeof value.preview_token !== 'string' ||
     typeof value.input_bytes !== 'number' ||
     !Number.isFinite(value.input_bytes) ||
@@ -562,7 +568,10 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
                 <p className="text-gray-400 text-xs">Estimated output</p>
                 <p className="text-lg font-semibold">{bytes(preview.estimated_output_bytes)}</p>
               </div>
-              <p className="self-center">{preview.layers.length} layers analyzed</p>
+              <p className="self-center" title={`Python: ${preview.runtime.python_executable}`}>
+                {preview.layers.length} layers analyzed on {preview.device_resolved}
+                {preview.runtime.gpu_name ? ` (${preview.runtime.gpu_name})` : ''}
+              </p>
             </div>
             {preview.layers.some(layer => layer.metric_scope === 'pre_normalization_direction') && (
               <p className="rounded-md border border-amber-600/60 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
@@ -677,8 +686,8 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
         <div role="status" aria-live="polite" className="text-sm">
           {busy && (
             <p className="text-blue-300">
-              {busy === 'analyze' ? 'Analyzing on CPU. The source is unchanged.' : 'Creating trimmed copy…'} Please keep
-              this dialog open.
+              {busy === 'analyze' ? 'Analyzing. The source is unchanged.' : 'Creating trimmed copy…'} Please keep this
+              dialog open.
             </p>
           )}
           {createdPath && (
