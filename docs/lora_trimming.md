@@ -158,6 +158,14 @@ local floating `.safetensors` checkpoint, and **explicitly choose**
 loaded. There is no inferred default: a `.dora_scale` suffix can also come from
 a toolkit export and does not establish the intended consumer.
 
+When opening the reducer from a training job's checkpoint sidebar, the base
+field is prefilled from that job's `model.name_or_path` if it is an absolute
+`.safetensors` path, matching the training form's ComfyUI checkpoint detection.
+Repository IDs and directory paths leave it blank. The field remains editable;
+edits survive toggling baking off and on until the dialog closes. Reopening
+starts again from the job's configured path. Baking and convention selection
+remain explicit, and the backend still validates the chosen base weights.
+
 For a base weight W and scaled direction D, both paths bake the full-strength
 effective delta `row_scale * (W + D) - W` before reducing:
 

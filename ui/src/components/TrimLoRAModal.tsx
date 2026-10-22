@@ -9,15 +9,22 @@ import { encodeFilePathForUrl, getFilename } from '@/utils/basic';
 
 interface TrimLoRAModalState {
   path: string;
+  initialBaseModelPath: string;
   onCreated?: () => void;
   returnFocus: HTMLElement | null;
 }
 
 export const trimLoRAModalState = createGlobalState<TrimLoRAModalState | null>(null);
 
-export const openTrimLoRAModal = (path: string, onCreated?: () => void) => {
+export const openTrimLoRAModal = (path: string, onCreated?: () => void, trainingBaseModelPath?: string) => {
   trimLoRAModalState.set({
     path,
+    initialBaseModelPath:
+      typeof trainingBaseModelPath === 'string' &&
+      trainingBaseModelPath.startsWith('/') &&
+      trainingBaseModelPath.endsWith('.safetensors')
+        ? trainingBaseModelPath
+        : '',
     onCreated,
     returnFocus: document.activeElement instanceof HTMLElement ? document.activeElement : null,
   });
@@ -151,7 +158,7 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
   const [maxRank, setMaxRank] = useState<number | null>(null);
   const [convertToLoRA, setConvertToLoRA] = useState(false);
   const [bakeDoRA, setBakeDoRA] = useState(false);
-  const [baseModelPath, setBaseModelPath] = useState('');
+  const [baseModelPath, setBaseModelPath] = useState(info.initialBaseModelPath);
   const [doraConvention, setDoraConvention] = useState('');
   const [maxWorkingMB, setMaxWorkingMB] = useState<number | null>(512);
   const [outputName, setOutputName] = useState(

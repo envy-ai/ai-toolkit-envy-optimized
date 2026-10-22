@@ -81,7 +81,7 @@ def main():
                     {
                         "type": "diffusion_trainer",
                         "train": {"steps": 8},
-                        "model": {"name_or_path": "synthetic/local-base", "arch": "synthetic"},
+                        "model": {"name_or_path": str(job_folder / "synthetic_base.safetensors"), "arch": "synthetic"},
                         "network": {"type": "lora", "linear": 8, "linear_alpha": 8},
                         "sample": {"samples": []},
                         "datasets": [],
@@ -119,8 +119,11 @@ def main():
     save_file(dora, job_folder / "synthetic_dora.safetensors",
               metadata={"network_module": "networks.dora", "use_dora": "true"})
     torch.manual_seed(431)
-    save_file({"diffusion_model.block.proj.weight": torch.randn(64, 64)},
+    base_weight = torch.randn(64, 64)
+    save_file({"diffusion_model.block.proj.weight": base_weight},
               job_folder / "synthetic_base.safetensors")
+    save_file({"diffusion_model.block.proj.weight": base_weight + torch.eye(64)},
+              job_folder / "synthetic_base_override.safetensors")
 
     # Unsupported DoHa keeps exercising the visible-validation-error path;
     # plain DoRA is now intentionally supported by the reducer.

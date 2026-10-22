@@ -27,9 +27,12 @@ The separate **Bake DoRA to ordinary LoRA before reducing** switch is off by
 default. Enabling it requires a **Matching base safetensors checkpoint** path
 to a single local floating-point checkpoint, and an explicit **DoRA convention**:
 **ComfyUI** or **AI Toolkit / native**, according to the loader normally used.
-No convention is selected automatically. Baking computes the final effective
-DoRA update with those base weights, then reduces it to ordinary LoRA. It
-preserves the source and base files; the preview identifies baked effective
+No convention is selected automatically. The reducer prefills the editable
+base path from the training job when its configured model
+is an absolute `.safetensors` ComfyUI checkpoint path. Repository IDs and model
+directories leave the field blank; checkbox toggles preserve manual edits.
+Baking computes the final effective DoRA update with those base weights, then
+reduces it to ordinary LoRA. It preserves the source and base files; the preview identifies baked effective
 update measurements separately from native DoRA direction-only measurements.
 Quantized, mismatched, or unsupported base checkpoints fail with details.
 LoHa/LoKr require the separate **Convert LoHa / LoKr to ordinary LoRA** switch,

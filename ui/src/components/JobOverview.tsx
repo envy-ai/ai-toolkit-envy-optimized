@@ -79,6 +79,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
   };
 
   const jobType = job?.job_type || 'unknown';
+  const trainingProcess = jobType === 'train' ? JSON.parse(job.job_config).config.process[0] : null;
 
   let status = job.status;
   if (isStopping) {
@@ -166,7 +167,12 @@ export default function JobOverview({ job }: JobOverviewProps) {
         <div className="mt-4">{isGPUInfoLoaded && gpuList.length > 0 && <GPUWidget gpu={gpuList[0]} />}</div>
         {jobType === 'train' && (
           <div className="mt-4">
-            <FilesWidget jobID={job.id} jobName={job.name} isSliderSpace={JSON.parse(job.job_config).config.process[0].type === 'sliderspace'} />
+            <FilesWidget
+              jobID={job.id}
+              jobName={job.name}
+              isSliderSpace={trainingProcess.type === 'sliderspace'}
+              trainingBaseModelPath={trainingProcess.model?.name_or_path}
+            />
           </div>
         )}
       </div>
