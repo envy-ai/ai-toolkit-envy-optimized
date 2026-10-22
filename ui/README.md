@@ -21,8 +21,9 @@ reconstruction measurements do not predict visual quality. See
 
 Shared form controls in `src/components/formInputs.tsx` supply the existing
 text, number, and searchable-select appearance. `TextInput`, `NumberInput`,
-and `SelectInput` accept an optional `id` that associates their visible label
-with the native input (`inputId` for react-select). The trimming workflow uses
+`SelectInput`, and `TextAreaInput` accept an optional `id` that associates their
+visible label with the native input (`inputId` for react-select). API caption cleanup uses
+the shared textareas' IDs for its From/To labels. The trimming workflow uses
 these controls and the shared `Modal`; numeric validation uses
 `clampOnBlur={false}` to reject invalid values without silently changing them.
 

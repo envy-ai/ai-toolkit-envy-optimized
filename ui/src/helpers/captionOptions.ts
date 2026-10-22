@@ -1,5 +1,5 @@
 import { CloudLora, GroupedSelectOption, SelectOption } from "@/types";
-import { API_CAPTION_PROMPT } from '../../cron/captionApiConfig';
+import { API_CAPTION_PROMPT, DEFAULT_CAPTION_REGEX_REPLACE } from '../../cron/captionApiConfig';
 
 type CaptionGroup = 'image' | 'music' | 'video' | 'image/video' | 'image/video/sound';
 type AdditionalSections = 'caption.model_name_or_path2' | 'caption.caption_prompt' | 'caption.max_res' | 'caption.max_new_tokens' | 'caption.fixed_caption' | 'caption.caption_format' | 'caption.extract_vocals_before_transcribe' | 'caption.keep_timestamps' | 'caption.thinking' | 'caption.batch_size' | 'caption.layer_offloading' | 'caption.mtp' | 'caption.cuda_graph' | 'caption.vision_bf16' | 'caption.video_fps' | 'caption.system_prompt';
@@ -116,6 +116,7 @@ export const captionerTypes: CaptionOption[] = [
             'caption.max_new_tokens': [4096, 512],
             'caption.caption_prompt': [API_CAPTION_PROMPT, defaultImageCaptionPrompt],
             'caption.system_prompt': ['', undefined],
+            'caption.regex_replace': [DEFAULT_CAPTION_REGEX_REPLACE, undefined],
             'caption.compile': [false, false],
             'caption.quantize': [false, true],
         },

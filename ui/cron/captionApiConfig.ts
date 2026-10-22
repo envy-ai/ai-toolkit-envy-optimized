@@ -4,6 +4,21 @@ export const API_CAPTIONER = 'APICaptioner';
 export const API_CAPTION_QUEUE = 'cpu';
 export const API_CAPTION_PROMPT =
   'Write a descriptive caption for this image. Describe the main subjects, their appearance and actions, the setting, composition, lighting, colors, and visual style. Describe only what is visible, without speculation. Return only the caption, with no introduction, headings, or quotation marks.';
+export const DEFAULT_CAPTION_REGEX_REPLACE = {
+  enabled: false, pattern: '', replacement: '', ignore_case: false,
+  multiline: false, dotall: false, verbose: false, global: true,
+};
+const captionRegexReplaceSchema = z.object({
+  enabled: z.boolean().default(false),
+  pattern: z.string().max(64_000).default(''),
+  replacement: z.string().max(64_000).default(''),
+  ignore_case: z.boolean().default(false),
+  multiline: z.boolean().default(false),
+  dotall: z.boolean().default(false),
+  verbose: z.boolean().default(false),
+  global: z.boolean().default(true),
+}).strict().refine(value => !value.enabled || value.pattern.length > 0,
+  'Caption cleanup From pattern is required when enabled.');
 export function captionApiEndpoint(value: string): string {
   const url = new URL(value);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash)
@@ -39,6 +54,7 @@ export const apiCaptionSettingsSchema = z
     presence_penalty: z.number().finite().min(-2).max(2).optional(),
     seed: z.number().int().safe().optional(),
     stop: z.array(z.string().min(1).max(4096)).max(4).optional(),
+    regex_replace: captionRegexReplaceSchema.optional(),
     api_credential_id: z.string().uuid().optional(),
     path_to_caption: z.string().min(1),
     caption_extension: z.string().regex(/^[A-Za-z0-9_-]+$/),

@@ -514,6 +514,17 @@ export interface CaptionLora {
   strength: number;
 }
 
+export interface CaptionRegexReplaceConfig {
+  enabled: boolean;
+  pattern: string;
+  replacement: string;
+  ignore_case: boolean;
+  multiline: boolean;
+  dotall: boolean;
+  verbose: boolean;
+  global: boolean;
+}
+
 export interface CaptionProcessConfig {
   type: string;
   sqlite_db_path?: string;
@@ -559,6 +570,7 @@ export interface CaptionProcessConfig {
     presence_penalty?: number;
     seed?: number;
     stop?: string[];
+    regex_replace?: CaptionRegexReplaceConfig;
   }
 }
 

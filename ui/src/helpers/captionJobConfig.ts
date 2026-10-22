@@ -9,7 +9,7 @@ export const captionPreferenceFields = [
   'caption_extension', 'thinking', 'batch_size', 'layer_offloading', 'layer_offloading_percent',
   'loras', 'mtp', 'mtp_depth', 'cuda_graph', 'vision_bf16', 'video_fps', 'system_prompt',
   'api_url', 'api_credential_id', 'api_timeout', 'api_max_tokens_field', 'temperature', 'top_p',
-  'frequency_penalty', 'presence_penalty', 'seed', 'stop', 'device',
+  'frequency_penalty', 'presence_penalty', 'seed', 'stop', 'device', 'regex_replace',
 ] as const;
 
 export interface CaptionJobPreferences {

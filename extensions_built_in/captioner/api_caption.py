@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import math
+import re
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -16,6 +17,93 @@ DEFAULT_PROMPT = (
     "and visual style. Describe only what is visible, without speculation. "
     "Return only the caption, with no introduction, headings, or quotation marks."
 )
+
+
+def validate_regex_replace(settings):
+    """Compile optional Python regex and strict dollar-style replacement tokens.
+
+    Replacement backslashes are literal: never pass user text to re's replacement
+    parser or evaluate it. Disabled settings retain drafts without compilation.
+    """
+    if settings is None:
+        return None
+    if not isinstance(settings, dict):
+        raise ValueError("Caption regex_replace must be an object")
+    flags = {'ignore_case': re.IGNORECASE, 'multiline': re.MULTILINE,
+             'dotall': re.DOTALL, 'verbose': re.VERBOSE}
+    if set(settings) - {'enabled', 'pattern', 'replacement', 'global', *flags}:
+        raise ValueError("Unsupported caption regex replacement setting")
+    for name in ('enabled', 'global', *flags):
+        if type(settings.get(name, name == 'global')) is not bool:
+            raise ValueError(f"Caption regex {name} must be a boolean")
+    for name in ('pattern', 'replacement'):
+        if not isinstance(settings.get(name, ''), str):
+            raise ValueError(f"Caption regex {name} must be text")
+    if not settings.get('enabled', False):
+        return None
+    if not settings.get('pattern'):
+        raise ValueError("Caption regex From pattern is required when cleanup is enabled")
+    mask = 0
+    for name, flag in flags.items():
+        if settings.get(name, False):
+            mask |= flag
+    try:
+        pattern = re.compile(settings['pattern'], mask)
+    except (re.error, ValueError) as error:
+        raise ValueError(f"Invalid caption regex From pattern: {error}") from error
+    replacement, parts, literal, index = settings.get('replacement', ''), [], [], 0
+    while index < len(replacement):
+        if replacement[index] != '$' or index + 1 == len(replacement):
+            literal.append(replacement[index])
+            index += 1
+            continue
+        following = replacement[index + 1]
+        if following == '$':
+            literal.append('$')
+            index += 2
+            continue
+        group = None
+        if following == '&':
+            group, end = 0, index + 2
+        elif following in '0123456789':
+            end = index + 2
+            while end < len(replacement) and replacement[end] in '0123456789':
+                end += 1
+            group = int(replacement[index + 1:end])
+            if following == '0' or not 1 <= group <= pattern.groups:
+                raise ValueError(f"Invalid caption regex replacement capture ${replacement[index + 1:end]}; use an existing group or $& for the whole match")
+        elif following == '<':
+            end = replacement.find('>', index + 2)
+            if end < 0:
+                raise ValueError("Invalid caption regex replacement: named capture must end with >")
+            group, end = replacement[index + 2:end], end + 1
+            if group not in pattern.groupindex:
+                raise ValueError(f"Invalid caption regex replacement named capture $<{group}>")
+        else:
+            literal.append('$')
+            index += 1
+            continue
+        if literal:
+            parts.append(('literal', ''.join(literal)))
+            literal = []
+        parts.append(('group', group))
+        index = end
+    if literal:
+        parts.append(('literal', ''.join(literal)))
+    return pattern, parts
+
+
+def apply_regex_replace(caption, settings):
+    compiled = validate_regex_replace(settings)
+    if compiled is None:
+        return caption
+    pattern, parts = compiled
+    result = pattern.sub(lambda match: ''.join(value if kind == 'literal' else match.group(value) or ''
+                                               for kind, value in parts), caption,
+                         count=0 if settings.get('global', True) else 1)
+    if not result.strip():
+        raise ValueError("Caption regex cleanup produced an empty caption; caption not saved")
+    return result
 
 
 def validate_api_settings(config):
@@ -60,6 +148,7 @@ def validate_api_settings(config):
     extensions = config.get("extensions", sorted(IMAGE_EXTENSIONS))
     if not isinstance(extensions, list) or not extensions or any(ext not in IMAGE_EXTENSIONS for ext in extensions):
         raise ValueError("API captioning supports still-image extensions only")
+    validate_regex_replace(config.get('regex_replace'))
     api_path = parsed.path.rstrip("/")
     if not api_path.endswith("/chat/completions"):
         api_path += "/chat/completions"
@@ -129,4 +218,7 @@ def generate_api_caption(filename, config, api_key="", opener=None):
         raise RuntimeError("Caption API returned an empty or refused caption")
     if api_key and api_key in caption:
         raise RuntimeError("Caption API echoed its credential; caption withheld")
-    return caption.strip()
+    caption = apply_regex_replace(caption.strip(), config.get('regex_replace'))
+    if api_key and api_key in caption:
+        raise RuntimeError("Caption cleanup contains the API credential; caption withheld")
+    return caption

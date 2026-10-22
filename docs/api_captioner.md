@@ -28,6 +28,68 @@ Timeout defaults to 300 seconds. Invalid values produce a persistent save
 error with details; values are never silently clamped. No provider requests
 are made just to save or validate the setup.
 
+## Optional caption cleanup
+
+Expand **Caption cleanup** below Caption prompt and enable it to apply a regex
+find/replace to the API response before the caption file is written. It is off
+by default. Settings are remembered with the rest of the setup and retained
+when editing or cloning a job. Disabling cleanup keeps its draft fields while
+preserving the existing caption behavior.
+
+For the requested tag extraction, enter:
+
+```text
+From: .*<caption>(.*)<\/caption>.*
+To:   $1
+```
+
+Enable **Dot matches newlines (s)** if the response can contain line breaks.
+`/` does not need escaping in Python patterns, so `</caption>` also works.
+The enabled form is equivalent to:
+
+```yaml
+caption:
+  regex_replace:
+    enabled: true
+    pattern: '.*<caption>(.*)<\/caption>.*'
+    replacement: '$1'
+    ignore_case: false
+    multiline: false
+    dotall: true
+    verbose: false
+    global: true
+```
+
+Patterns use **Python `re`**, not JavaScript regex syntax or `/pattern/flags`
+delimiters. **Ignore case (i)** ignores letter case. **Multiline (m)** makes
+`^` and `$` anchor each line; it does not make `.` match newlines. **Dot matches
+newlines (s)** changes `.` matching only and does not turn line breaks into
+spaces. **Ignore pattern whitespace/comments (x)** ignores unescaped whitespace
+and `#` comments in the pattern, outside character classes; it does not remove
+caption whitespace. Replace all matches defaults on; disable it to replace only
+the first match. Other flags default off.
+
+Replacement text supports `$1`, `$2`, etc. for existing capture groups, `$&`
+for the whole match, `$$` for a literal dollar sign, and `$<name>` for a Python
+named group such as `(?P<name>...)`. Numeric references consume the whole number:
+`$12` requires group 12 rather than falling back to group 1 plus `2`. `$0` is
+invalid; use `$&`. Unmatched optional groups insert empty text. Other dollar
+sequences remain literal. Replacement backslashes are always literal, including
+`\1` and `\n`; enter an actual newline in To for a line break. Leave To empty
+to remove matches. Replacement text is never evaluated as code.
+
+The provider response keeps its existing leading/trailing whitespace trimming
+before cleanup. Replacement whitespace is preserved. No match leaves the
+caption unchanged. A whitespace-only/empty cleaned result fails without writing
+or replacing that image's caption. Credential-echo protection is checked before
+and after cleanup. Cleanup settings are not sent to the provider.
+
+The UI/server validate the setting structure when saving. Python compiles the
+pattern and validates capture references when the job starts, before any API
+request or caption write; invalid syntax therefore stops the job with details.
+Disabled drafts are not compiled. Expand the section with a mouse click or
+Enter/Space, then use Tab through the labeled From/To fields and switches.
+
 ## Remembered setup
 
 Adding a job to the queue remembers the selected captioner and its settings on
@@ -106,16 +168,34 @@ written earlier captions remain on disk. Stop is checked before and after each
 request; an in-flight HTTP request is bounded by the configured timeout rather
 than being resumed or retried in the background.
 
-Verification passed 27 Python caption tests and 10 Node API-caption tests,
-including a configured 16,384-token request, saved-settings round trips, and
-credential-reference recovery. The CPU-startup regression runs the real
+Verification passed 10 Node API-caption tests, including cleanup structure,
+saved-settings round trips and credential-reference recovery. Python verification
+includes 11 focused regex/security cases and two explicit pre/post-cleanup
+credential guards. Unaffected transport/startup passes were reused after a
+test-helper-only correction rather than repeating the entire suite. Coverage
+includes a configured 16,384-token request. The CPU-startup regression runs the real
 `run.py` entry point with `CUDA_VISIBLE_DEVICES` empty, a synthetic image, and
-a local fake provider. It checks the HTTP request and written caption,
+a local fake provider. It checks the HTTP request and the cleaned caption written
+to disk, plus preservation of an existing sidecar when cleanup produces empty text,
 alongside the boundary between API-only and ordinary extension resolution.
 Tests used fixture credentials and no real provider requests.
 
 UI source and worker TypeScript checks and the production build passed. The
-build used a temporary 16 GiB Node heap allowance. Only the UI was restarted;
-the queue worker stayed running. The jobs page and remembered-settings endpoint
-passed live HTTP checks after activation. Browser interaction checks were
-unavailable because no browser was connected.
+build used a temporary 12 GiB Node heap allowance inside a 16 GiB/no-swap
+transient systemd unit, peaking at 13.9 GiB. Source checking excludes existing
+generated Next route-parameter errors; no new type suppression was added.
+The existing optional macOS temperature-sensor warning remains on Linux.
+
+The browser regression uses an isolated synthetic SQLite database/datasets and
+software-only Chromium. It saves From/To plus all modifier settings through the
+real local job/settings endpoints, then reopens setup on another dataset and
+checks that every setting is restored. No caption queue worker or provider ran
+for this browser check. Python, Node and browser tests ran in the prescribed
+16 GiB/no-swap systemd wrappers. The mockup and screenshot are under
+`tmp/caption-cleanup`; reusable scripts are
+`playwright_scripts/prepare_api_caption_regex_e2e.py` and
+`playwright_scripts/api-caption-regex.e2e.cjs`.
+
+Only the UI branch was reloaded to activate these controls. The existing queue
+worker remained running with the same PID; the public datasets page returned
+HTTP 200. The isolated browser-test server was stopped after verification.

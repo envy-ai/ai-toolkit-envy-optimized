@@ -1,4 +1,6 @@
+import { useId } from 'react';
 import { CaptionProcessConfig } from '@/types';
+import { DEFAULT_CAPTION_REGEX_REPLACE } from '../../cron/captionApiConfig';
 import { Checkbox, CreatableSelectInput, NumberInput, SelectInput, TextAreaInput, TextInput } from './formInputs';
 
 type Props = {
@@ -18,6 +20,10 @@ export default function APICaptionSetup({
   onClearKeyChange,
 }: Props) {
   const set = (key: string, value: unknown) => setCaption(value, `config.process[0].caption.${key}`);
+  const cleanupId = useId();
+  const cleanup = { ...DEFAULT_CAPTION_REGEX_REPLACE, ...caption.regex_replace };
+  const setCleanup = (key: keyof typeof cleanup, value: string | boolean) =>
+    set('regex_replace', { ...cleanup, [key]: value });
   return (
     <div className="mt-4 space-y-4">
       <TextInput
@@ -73,6 +79,43 @@ export default function APICaptionSetup({
         onChange={value => set('caption_prompt', value)}
         required
       />
+      <details className="rounded-md border border-gray-700 p-3">
+        <summary className="cursor-pointer text-sm text-gray-200">Caption cleanup · optional, off by default</summary>
+        <div className="mt-3 space-y-3">
+          <Checkbox label="Enable caption cleanup" checked={cleanup.enabled}
+            onChange={value => setCleanup('enabled', value)} />
+          <TextAreaInput id={`${cleanupId}-pattern`} label="From (regular expression)"
+            value={cleanup.pattern} onChange={value => setCleanup('pattern', value)}
+            placeholder={'.*<caption>(.*)</caption>.*'} rows={3} disabled={!cleanup.enabled} />
+          <TextAreaInput id={`${cleanupId}-replacement`} label="To (replacement)"
+            value={cleanup.replacement} onChange={value => setCleanup('replacement', value)}
+            placeholder="$1" rows={2} disabled={!cleanup.enabled} />
+          <p className="text-xs text-gray-500">
+            Leave To empty to remove matches. Use $1 for capture group 1, $&amp; for the whole match,
+            and $$ for a literal $. / does not need escaping. Replacement backslashes are literal;
+            enter an actual newline for a line break.
+          </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {([
+              ['ignore_case', 'Ignore case (i)'],
+              ['multiline', 'Multiline: ^/$ per line (m)'],
+              ['dotall', 'Dot matches newlines (s)'],
+              ['verbose', 'Ignore pattern whitespace/comments (x)'],
+              ['global', 'Replace all matches'],
+            ] as const).map(([key, label]) => (
+              <Checkbox key={key} label={label} checked={cleanup[key]}
+                onChange={value => setCleanup(key, value)} disabled={!cleanup.enabled} />
+            ))}
+          </div>
+          <p className="text-xs text-gray-500">
+            Uses Python regular expressions, validated when the job starts before any API request.
+            Dot matches newlines lets . match line breaks; it does not turn them into spaces.
+            The x flag ignores pattern whitespace and comments, not whitespace in the caption.
+            Applied to the API response before saving; no match leaves it unchanged.
+            An empty result stops the job without writing a caption.
+          </p>
+        </div>
+      </details>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <CreatableSelectInput
           label="Caption extension"

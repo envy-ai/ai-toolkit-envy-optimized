@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import types
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -23,6 +24,8 @@ MODULE_PATH = Path(__file__).resolve().parents[1] / "extensions_built_in/caption
 API = runpy.run_path(str(MODULE_PATH))
 generate_api_caption = API["generate_api_caption"]
 validate_api_settings = API["validate_api_settings"]
+apply_regex_replace = API["apply_regex_replace"]
+validate_regex_replace = API["validate_regex_replace"]
 
 
 class CaptionServer:
@@ -91,6 +94,19 @@ def config(server, **overrides):
     return result
 
 
+def regex_replace(pattern, replacement="$1", **flags):
+    return {
+        "enabled": flags.get("enabled", True),
+        "pattern": pattern,
+        "replacement": replacement,
+        "ignore_case": flags.get("ignore_case", False),
+        "multiline": flags.get("multiline", False),
+        "dotall": flags.get("dotall", False),
+        "verbose": flags.get("verbose", False),
+        "global": flags.get("global", True),
+    }
+
+
 def test_openai_compatible_request_has_image_prompts_auth_and_selected_limit(tmp_path):
     with CaptionServer() as server:
         caption = generate_api_caption(
@@ -142,6 +158,83 @@ def test_blank_key_omits_auth_and_unset_sampling_options_are_not_injected(tmp_pa
     assert not ({"temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop"} & payload.keys())
 
 
+def test_user_xml_caption_pattern_handles_case_multiline_verbose_and_escaped_regex_slash():
+    flags = dict(ignore_case=True, multiline=True, dotall=True, verbose=True)
+    pattern = r"""
+        ^ .* <caption> (.*) <\/caption> .* $
+    """
+    settings = regex_replace(pattern, **flags)
+    plain_xml = "prefix\n<CAPTION>blue\nsky</caption>\nsuffix"
+
+    assert apply_regex_replace(plain_xml, settings) == "blue\nsky"
+    # Escaping `/` is valid regex spelling in Python and matches the same XML
+    # closing tag; it is not interpreted as an extra literal backslash.
+    assert validate_regex_replace(settings) is not None
+
+
+def test_regex_replace_preserves_literal_escaped_slash_in_provider_text_when_pattern_requests_it():
+    source = "before <caption>green\nsky<\\/caption> after"
+    settings = regex_replace(r".*<caption>(.*)<\\/caption>.*", dotall=True)
+    assert apply_regex_replace(source, settings) == "green\nsky"
+
+
+def test_regex_flags_and_global_switch_have_their_standard_independent_meanings():
+    multiline_pattern = r"^ caption: \s* (.*) $"
+    text = "prefix\nCAPTION: blue sky\nsuffix"
+    multiline = regex_replace(multiline_pattern, ignore_case=True, multiline=True, verbose=True)
+    assert apply_regex_replace(text, multiline) == "prefix\nblue sky\nsuffix"
+    no_multiline = regex_replace(multiline_pattern, ignore_case=True, verbose=True)
+    assert apply_regex_replace(text, no_multiline) == text
+
+    repeated = "pre<caption>one</caption> mid <caption>two</caption>end"
+    all_matches = regex_replace(r"<caption>(.*?)</caption>")
+    first_match = regex_replace(r"<caption>(.*?)</caption>", **{"global": False})
+    assert apply_regex_replace(repeated, all_matches) == "preone mid twoend"
+    assert apply_regex_replace(repeated, first_match) == "preone mid <caption>two</caption>end"
+
+
+def test_regex_replacement_dollar_tokens_and_literal_backslashes_are_not_python_evaluated():
+    source = "cat-7 cat-8"
+    settings = regex_replace(
+        r"(?P<word>\w+)-(\d+)",
+        r"$<word> $2 $& $$ \1",
+    )
+    assert apply_regex_replace(source, settings) == r"cat 7 cat-7 $ \1 cat 8 cat-8 $ \1"
+
+
+def test_absent_disabled_and_no_match_cleanup_preserve_caption_and_disabled_draft_is_not_compiled():
+    source = "Keep this caption <caption>literal</caption>"
+    assert apply_regex_replace(source, None) == source
+    assert apply_regex_replace(source, regex_replace("(", "$99", enabled=False)) == source
+    assert apply_regex_replace(source, regex_replace("missing", "replacement")) == source
+
+
+@pytest.mark.parametrize("pattern,replacement", [
+    ("(", "$1"),
+    ("(x)", "$2"),
+    ("(x)", "$0"),
+    ("(?P<word>x)", "$<missing>"),
+    ("(x)", "$<unfinished"),
+])
+def test_invalid_regex_or_capture_reference_fails_before_provider_or_image_io(tmp_path, pattern, replacement):
+    with CaptionServer() as server:
+        invalid = config(
+            server,
+            regex_replace=regex_replace(pattern, replacement),
+        )
+        with pytest.raises(ValueError, match="regex"):
+            # If validation happens after request construction, this missing
+            # path would raise FileNotFoundError instead and the server would
+            # observe a request.
+            generate_api_caption(tmp_path / "missing.png", invalid)
+        assert server.requests == []
+
+
+def test_cleanup_that_removes_the_entire_caption_is_a_hard_error():
+    with pytest.raises(ValueError, match="empty caption; caption not saved"):
+        apply_regex_replace("<caption> \n </caption>", regex_replace(r".*<caption>(.*)</caption>.*", dotall=True))
+
+
 @pytest.mark.parametrize("finish_reason,message,pattern", [
     ("length", {"content": "partial"}, "truncated"),
     ("stop", {"content": "  "}, "empty"),
@@ -188,6 +281,38 @@ def test_caption_text_that_echoes_the_api_key_is_withheld(tmp_path):
         with pytest.raises(RuntimeError, match="echoed its credential") as error:
             generate_api_caption(image_fixture(tmp_path), config(server), api_key=secret)
         assert secret not in str(error.value)
+
+
+def test_cleanup_cannot_hide_a_provider_caption_that_echoes_the_api_key(tmp_path):
+    secret = "caption-key-hidden-by-regex-fixture"
+    response = {"choices": [{
+        "finish_reason": "stop",
+        "message": {"content": f"private wrapper {secret} <caption>safe text</caption>"},
+    }]}
+    settings = regex_replace(r".*<caption>(.*)</caption>.*", dotall=True)
+    with CaptionServer(response=response) as server:
+        with pytest.raises(RuntimeError, match="echoed its credential") as error:
+            generate_api_caption(
+                image_fixture(tmp_path), config(server, regex_replace=settings), api_key=secret
+            )
+    assert secret not in str(error.value)
+    assert len(server.requests) == 1
+
+
+def test_cleanup_cannot_create_a_caption_that_echoes_the_api_key(tmp_path):
+    secret = "fixturesecret"
+    response = {"choices": [{
+        "finish_reason": "stop",
+        "message": {"content": "fixture-secret"},
+    }]}
+    settings = regex_replace(r"(fixture)-(secret)", "$1$2")
+    with CaptionServer(response=response) as server:
+        with pytest.raises(RuntimeError, match="cleanup contains the API credential") as error:
+            generate_api_caption(
+                image_fixture(tmp_path), config(server, regex_replace=settings), api_key=secret
+            )
+    assert secret not in str(error.value)
+    assert len(server.requests) == 1
 
 
 def test_https_uses_python_default_certificate_verification():
@@ -336,7 +461,10 @@ def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports():
         Image.new("RGBA", (9, 5), (30, 90, 180, 123)).save(image_dir / "fixture.png")
         config_path = work / "job.yaml"
 
-        with CaptionServer() as server:
+        with CaptionServer(response={"choices": [{
+            "finish_reason": "stop",
+            "message": {"content": "prefix\n<CAPTION>blue\nvase</caption>\nsuffix"},
+        }]}) as server:
             config_path.write_text(yaml.safe_dump({
                 "job": "extension",
                 "config": {
@@ -354,6 +482,13 @@ def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports():
                             "caption_prompt": "Describe the synthetic fixture.",
                             "max_new_tokens": 48,
                             "api_timeout": 5,
+                            "regex_replace": regex_replace(
+                                r".*<caption>(.*)<\/caption>.*",
+                                ignore_case=True,
+                                multiline=True,
+                                dotall=True,
+                                verbose=True,
+                            ),
                         },
                     }],
                 },
@@ -379,13 +514,53 @@ def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports():
             f"run.py exited {result.returncode}; stderr tail:\n{result.stderr[-5000:]}\n"
             f"stdout tail:\n{result.stdout[-5000:]}"
         )
-        assert (image_dir / "fixture.txt").read_text(encoding="utf-8") == "a green glass vase"
+        assert (image_dir / "fixture.txt").read_text(encoding="utf-8") == "blue\nvase"
         assert len(server.requests) == 1
         request = server.requests[0]
         assert request["path"] == "/v1/chat/completions"
         assert request["authorization"] is None
         assert request["payload"]["model"] == "fixture-model"
         assert request["payload"]["max_tokens"] == 48
+        assert "regex_replace" not in request["payload"]
+        assert request["payload"]["messages"][-1]["content"][0]["text"] == "Describe the synthetic fixture."
+
+
+def test_empty_regex_cleanup_keeps_existing_caption_unchanged(tmp_path):
+    module = _load_api_captioner_with_test_base()
+    image = image_fixture(tmp_path)
+    sidecar = image.with_suffix(".txt")
+    sidecar.write_text("existing caption must survive", encoding="utf-8")
+    server_response = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"content": "<caption> \n\t </caption>"},
+        }]
+    }
+
+    with CaptionServer(response=server_response) as server:
+        captioner = module.APICaptioner.__new__(module.APICaptioner)
+        captioner.caption_config = SimpleNamespace(api_settings=config(
+            server,
+            regex_replace=regex_replace(r".*<caption>(.*)</caption>.*", dotall=True),
+        ))
+        captioner.resolve_prompt = lambda prompt, _filename: prompt
+        captioner.start_stop_watcher = lambda: None
+        captioner.update_status = lambda *_args: None
+        captioner.find_files = lambda: None
+        captioner.file_paths = [str(image)]
+        captioner.update_db_key = lambda *_args: None
+        captioner.update_step = lambda: None
+        captioner.step_num = 0
+        captioner.maybe_stop = lambda: None
+        captioner.save_caption_for_file = lambda filename, caption: Path(filename).with_suffix(".txt").write_text(
+            caption, encoding="utf-8"
+        )
+
+        with pytest.raises(ValueError, match="empty caption; caption not saved"):
+            captioner.run()
+
+    assert len(server.requests) == 1
+    assert sidecar.read_text(encoding="utf-8") == "existing caption must survive"
 
 
 def test_extension_job_only_bypasses_global_discovery_for_api_captioner(monkeypatch):

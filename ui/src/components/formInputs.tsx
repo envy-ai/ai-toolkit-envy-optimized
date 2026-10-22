@@ -124,7 +124,7 @@ export const TextAreaInput = forwardRef<HTMLTextAreaElement, TextAreaInputProps>
   return (
     <div className={classNames(className)}>
       {label && (
-        <label className={labelClasses}>
+        <label htmlFor={props.id} className={labelClasses}>
           {label}{' '}
           {doc && (
             <div className="inline-block ml-1 text-xs text-gray-500 cursor-pointer" onClick={() => openDoc(doc)}>
@@ -134,6 +134,7 @@ export const TextAreaInput = forwardRef<HTMLTextAreaElement, TextAreaInputProps>
         </label>
       )}
       <textarea
+        id={props.id}
         ref={ref}
         value={value}
         onChange={e => {

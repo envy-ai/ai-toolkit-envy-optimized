@@ -87,6 +87,24 @@ test('caption settings accept the 4096 limit and reject invalid settings or cred
   const valid = config.apiCaptionSettingsSchema.parse(apiCaptionConfig('/tmp').config.process[0].caption);
   assert.equal(valid.max_new_tokens, 4096);
   assert.equal(config.apiCaptionSettingsSchema.parse({ ...valid, max_new_tokens: 16384 }).max_new_tokens, 16384);
+  const cleanup = {
+    enabled: true, pattern: '.*<caption>(.*)<\\/caption>.*', replacement: '$1',
+    ignore_case: true, multiline: true, dotall: true, verbose: true, global: false,
+  };
+  assert.deepEqual(config.apiCaptionSettingsSchema.parse({ ...valid, regex_replace: cleanup }).regex_replace, cleanup);
+  // This schema checks shape only. Python compiles the expression before a job
+  // makes a provider request, allowing drafts to round-trip without JS regex.
+  assert.equal(
+    config.apiCaptionSettingsSchema.parse({ ...valid, regex_replace: { ...cleanup, pattern: '(' } })
+      .regex_replace.pattern,
+    '(',
+  );
+  assert.throws(() => config.apiCaptionSettingsSchema.parse({
+    ...valid, regex_replace: { ...cleanup, unexpected: true },
+  }));
+  assert.throws(() => config.apiCaptionSettingsSchema.parse({
+    ...valid, regex_replace: { ...cleanup, dotall: 'true' },
+  }));
   assert.equal(config.captionApiEndpoint('http://localhost:5005/v1/'), 'http://localhost:5005/v1/chat/completions');
   for (const limit of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(() => config.apiCaptionSettingsSchema.parse({ ...valid, max_new_tokens: limit }));
@@ -175,12 +193,20 @@ test('API caption setup presents URL, key, prompts and collapsed configurable to
     CreatableSelectInput: formInput('CreatableSelectInput'), NumberInput: formInput('NumberInput'),
     SelectInput: formInput('SelectInput'), TextAreaInput: formInput('TextAreaInput'), TextInput: formInput('TextInput'),
   };
-  const Setup = loadTypeScript(filename, (id, originalRequire) => id === './formInputs' ? controls : originalRequire(id)).default;
+  const Setup = loadTypeScript(filename, (id, originalRequire) => {
+    if (id === './formInputs') return controls;
+    if (id === '../../cron/captionApiConfig') return loadConfig();
+    return originalRequire(id);
+  }).default;
   const markup = renderToStaticMarkup(React.createElement(Setup, {
     caption: {
       api_url: 'http://caption.local/v1', model_name_or_path: 'fixture-model',
       system_prompt: 'system fixture', caption_prompt: 'caption fixture', max_new_tokens: 4096,
       api_timeout: 300, api_max_tokens_field: 'max_tokens', caption_extension: 'txt', recaption: false,
+      regex_replace: {
+        enabled: true, pattern: '.*<caption>(.*)</caption>.*', replacement: '$1',
+        ignore_case: true, multiline: true, dotall: true, verbose: true, global: false,
+      },
     },
     setCaption: () => {}, apiKey: '', onKeyChange: () => {}, clearKey: false, onClearKeyChange: () => {},
   }));
@@ -191,6 +217,15 @@ test('API caption setup presents URL, key, prompts and collapsed configurable to
   assert.match(markup, /Caption prompt/);
   assert.match(markup, /Recaption existing captions/);
   assert.match(markup, /Advanced options/);
+  assert.match(markup, /Caption cleanup · optional, off by default/);
+  assert.match(markup, /From \(regular expression\)/);
+  assert.match(markup, /To \(replacement\)/);
+  assert.match(markup, /Ignore case \(i\)/);
+  assert.match(markup, /Multiline: \^\/\$ per line \(m\)/);
+  assert.match(markup, /Dot matches newlines \(s\)/);
+  assert.match(markup, /Ignore pattern whitespace\/comments \(x\)/);
+  assert.match(markup, /Replace all matches/);
+  assert.match(markup, /validated when the job starts before any API request/);
   assert.match(markup, /configurable positive integer/);
   assert.doesNotMatch(markup, /max="4096"/);
   assert.doesNotMatch(markup, /<details[^>]*open=/);
@@ -237,6 +272,16 @@ test('remembered caption preferences round-trip all safe API settings and restor
     presence_penalty: 0.3,
     seed: 7,
     stop: ['END'],
+    regex_replace: {
+      enabled: true,
+      pattern: '.*<caption>(.*)<\\/caption>.*',
+      replacement: '$1',
+      ignore_case: true,
+      multiline: true,
+      dotall: true,
+      verbose: true,
+      global: true,
+    },
   });
   const preferences = modules.jobConfig.createCaptionJobPreferences(job, 'cpu');
   assert.equal(preferences.type, 'APICaptioner');
@@ -250,6 +295,7 @@ test('remembered caption preferences round-trip all safe API settings and restor
   assert.equal(preferences.caption.presence_penalty, 0.3);
   assert.equal(preferences.caption.seed, 7);
   assert.deepEqual(preferences.caption.stop, ['END']);
+  assert.deepEqual(preferences.caption.regex_replace, job.config.process[0].caption.regex_replace);
   assert.equal(Object.hasOwn(preferences.caption, 'path_to_caption'), false);
 
   const initial = await modules.route.GET();
@@ -273,6 +319,7 @@ test('remembered caption preferences round-trip all safe API settings and restor
   assert.equal(restored.config.process[0].caption.caption_extension, 'caption-json');
   assert.equal(restored.config.process[0].caption.api_credential_id, credentialId);
   assert.equal(restored.config.process[0].caption.caption_prompt, 'Fixture prompt');
+  assert.deepEqual(restored.config.process[0].caption.regex_replace, job.config.process[0].caption.regex_replace);
   assert.deepEqual(credentialCalls, [{ toolkitRoot: root, id: credentialId, apiUrl: 'http://127.0.0.1:34343/v1' }]);
 
   const loaded = await modules.route.GET();
