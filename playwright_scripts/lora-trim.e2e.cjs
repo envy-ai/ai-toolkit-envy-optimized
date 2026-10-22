@@ -13,6 +13,15 @@ const SOURCE_NAME = 'synthetic_lora.safetensors';
 const SOURCE_PATH = `${JOB_FOLDER}/${SOURCE_NAME}`;
 const OUTPUT_NAME = 'e2e_trimmed.safetensors';
 const OUTPUT_PATH = `${JOB_FOLDER}/${OUTPUT_NAME}`;
+const DORA_SOURCE = 'synthetic_dora.safetensors';
+const DORA_PATH = `${JOB_FOLDER}/${DORA_SOURCE}`;
+const DORA_BASE_PATH = `${JOB_FOLDER}/synthetic_base.safetensors`;
+const DORA_OUTPUT_NAME = 'e2e_baked_dora.safetensors';
+const DORA_OUTPUT_PATH = `${JOB_FOLDER}/${DORA_OUTPUT_NAME}`;
+const LOHA_SOURCE = 'synthetic_loha.safetensors';
+const LOHA_PATH = `${JOB_FOLDER}/${LOHA_SOURCE}`;
+const UNSUPPORTED_SOURCE = 'unsupported_doha.safetensors';
+const UNSUPPORTED_PATH = `${JOB_FOLDER}/${UNSUPPORTED_SOURCE}`;
 const SCREENSHOT_FOLDER = path.join(ROOT, 'tmp', 'lora-trim', 'screenshots');
 
 const sha256File = path => crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex');
@@ -28,8 +37,15 @@ const waitScriptCall = page =>
 
 async function main() {
   assert.ok(fs.existsSync(SOURCE_PATH), `Missing synthetic source: ${SOURCE_PATH}`);
+  assert.ok(fs.existsSync(DORA_PATH), `Missing synthetic DoRA source: ${DORA_PATH}`);
+  assert.ok(fs.existsSync(DORA_BASE_PATH), `Missing synthetic base: ${DORA_BASE_PATH}`);
+  assert.ok(fs.existsSync(LOHA_PATH), `Missing synthetic LoHa source: ${LOHA_PATH}`);
+  assert.ok(fs.existsSync(UNSUPPORTED_PATH), `Missing synthetic unsupported source: ${UNSUPPORTED_PATH}`);
   fs.rmSync(OUTPUT_PATH, { force: true });
+  fs.rmSync(DORA_OUTPUT_PATH, { force: true });
   const sourceHash = sha256File(SOURCE_PATH);
+  const doraHash = sha256File(DORA_PATH);
+  const baseHash = sha256File(DORA_BASE_PATH);
   fs.mkdirSync(SCREENSHOT_FOLDER, { recursive: true });
   const browser = await chromium.launch({
     headless: true,
@@ -46,15 +62,15 @@ async function main() {
     // is CPU-only and uses only the synthetic safetensors file.
     await page.route('**/api/monitor', route => route.abort());
     await page.goto(`${BASE_URL}/jobs/${JOB_ID}`, { waitUntil: 'domcontentloaded' });
-    const openSource = page.getByRole('button', { name: `Trim ${SOURCE_NAME}` });
+    const openSource = page.getByRole('button', { name: `Reduce ${SOURCE_NAME}` });
     await openSource.waitFor({ state: 'visible' });
     await openSource.click();
-    let dialog = page.getByRole('dialog', { name: 'Trim LoRA' });
+    let dialog = page.getByRole('dialog', { name: 'Reduce adapter' });
     await dialog.waitFor({ state: 'visible' });
     await dialog.locator('.aitk-react-select__control').waitFor({ state: 'visible' });
 
     for (const label of [
-      'Criterion',
+      'Rank policy',
       'Retained energy (%)',
       'Minimum rank',
       'Maximum rank (optional)',
@@ -62,7 +78,7 @@ async function main() {
     ]) {
       assert.equal(await dialog.getByLabel(label).count(), 1, `Expected associated accessible label ${label}`);
     }
-    assert.match(await dialog.getByLabel('Criterion').getAttribute('id'), /criterion/);
+    assert.match(await dialog.getByLabel('Rank policy').getAttribute('id'), /criterion/);
 
     // Tab navigation must remain in the open dialog, and Escape restores the
     // invoking checkpoint action's focus.
@@ -72,10 +88,10 @@ async function main() {
     }
     await page.keyboard.press('Escape');
     await dialog.waitFor({ state: 'detached' });
-    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), `Trim ${SOURCE_NAME}`);
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), `Reduce ${SOURCE_NAME}`);
 
     await openSource.click();
-    dialog = page.getByRole('dialog', { name: 'Trim LoRA' });
+    dialog = page.getByRole('dialog', { name: 'Reduce adapter' });
     const previewResponsePromise = waitScriptCall(page);
     await dialog.getByRole('button', { name: 'Analyze' }).click();
     const previewResponse = await previewResponsePromise;
@@ -126,12 +142,12 @@ async function main() {
 
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
     await dialog.waitFor({ state: 'detached' });
-    await page.getByRole('button', { name: `Trim ${OUTPUT_NAME}` }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: `Reduce ${OUTPUT_NAME}` }).waitFor({ state: 'visible' });
 
     // A second attempt at the same new filename must fail visibly and leave
     // the first valid output intact.
     await openSource.click();
-    dialog = page.getByRole('dialog', { name: 'Trim LoRA' });
+    dialog = page.getByRole('dialog', { name: 'Reduce adapter' });
     await dialog.getByLabel('Output filename').fill(OUTPUT_NAME);
     const duplicatePreviewPromise = waitScriptCall(page);
     await dialog.getByRole('button', { name: 'Analyze' }).click();
@@ -147,20 +163,67 @@ async function main() {
     await threshold.fill('98');
     await dialog.getByRole('region', { name: 'Analysis preview' }).waitFor({ state: 'detached' });
     assert.equal(await dialog.getByRole('button', { name: 'Create trimmed copy' }).isDisabled(), true);
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+    // Bake a synthetic DoRA against its matching local base, then verify the
+    // preview identifies the final effective update and writes a new copy.
+    await page.getByRole('button', { name: `Reduce ${DORA_SOURCE}` }).click();
+    dialog = page.getByRole('dialog', { name: 'Reduce adapter' });
+    await dialog.getByRole('switch', { name: 'Bake DoRA to ordinary LoRA before reducing' }).click();
+    await dialog.getByLabel('Matching base safetensors checkpoint').fill(DORA_BASE_PATH);
+    await dialog.getByLabel('DoRA convention').click();
+    await page.getByText('AI Toolkit / native', { exact: true }).click();
+    await dialog.getByLabel('Rank policy').click();
+    await page.getByText('Fixed rank', { exact: true }).click();
+    await dialog.getByLabel('Target rank').fill('64');
+    const bakePreviewPromise = waitScriptCall(page);
+    await dialog.getByRole('button', { name: 'Analyze' }).click();
+    const bakePreviewResponse = await bakePreviewPromise;
+    const bakePreviewEnvelope = await bakePreviewResponse.json();
+    assert.equal(bakePreviewEnvelope.ok, true, JSON.stringify(bakePreviewEnvelope));
+    assert.equal(bakePreviewEnvelope.result.layers[0].baked, true);
+    assert.equal(bakePreviewEnvelope.result.layers[0].output_format, 'lora');
+    assert.equal(bakePreviewEnvelope.result.layers[0].metric_scope, 'effective_update');
+    await dialog.getByText('DoRA was baked using the matching base checkpoint', { exact: false }).waitFor({ state: 'visible' });
+    await dialog.getByLabel('Output filename').fill(DORA_OUTPUT_NAME);
+    const bakeWritePromise = waitScriptCall(page);
+    await dialog.getByRole('button', { name: 'Create trimmed copy' }).click();
+    const bakeWrite = await bakeWritePromise;
+    const bakeWriteEnvelope = await bakeWrite.json();
+    assert.equal(bakeWriteEnvelope.ok, true, JSON.stringify(bakeWriteEnvelope));
+    assert.ok(fs.existsSync(DORA_OUTPUT_PATH));
+    assert.equal(sha256File(DORA_PATH), doraHash);
+    assert.equal(sha256File(DORA_BASE_PATH), baseHash);
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+
+    // LoHa conversion is opt-in and its preview labels the effective update.
+    await page.getByRole('button', { name: `Reduce ${LOHA_SOURCE}` }).click();
+    dialog = page.getByRole('dialog', { name: 'Reduce adapter' });
+    await dialog.getByRole('switch', { name: 'Convert LoHa / LoKr to ordinary LoRA' }).click();
+    await dialog.getByLabel('Rank policy').click();
+    await page.getByText('Fixed rank', { exact: true }).click();
+    await dialog.getByLabel('Target rank').fill('4');
+    const lohaPreviewPromise = waitScriptCall(page);
+    await dialog.getByRole('button', { name: 'Analyze' }).click();
+    const lohaPreview = await lohaPreviewPromise;
+    const lohaEnvelope = await lohaPreview.json();
+    assert.equal(lohaEnvelope.ok, true, JSON.stringify(lohaEnvelope));
+    assert.equal(lohaEnvelope.result.layers[0].input_format, 'loha');
+    assert.equal(lohaEnvelope.result.layers[0].output_format, 'lora');
+    assert.equal(lohaEnvelope.result.layers[0].metric_scope, 'effective_update');
     await dialog.getByRole('button', { name: 'Cancel' }).click();
 
-    // The rejected DoRA fixture produces a readable error without publishing
-    // any output. This path also traverses the real /api/scripts Python bridge.
-    await page.getByRole('button', { name: 'Trim invalid_dora.safetensors' }).click();
-    dialog = page.getByRole('dialog', { name: 'Trim LoRA' });
+    // Unsupported DoHa remains a readable validation failure with no output.
+    await page.getByRole('button', { name: `Reduce ${UNSUPPORTED_SOURCE}` }).click();
+    dialog = page.getByRole('dialog', { name: 'Reduce adapter' });
     const invalidResponsePromise = waitScriptCall(page);
     await dialog.getByRole('button', { name: 'Analyze' }).click();
     const invalidResponse = await invalidResponsePromise;
     const invalidEnvelope = await invalidResponse.json();
     assert.equal(invalidEnvelope.ok, false);
     await dialog.getByRole('alert').waitFor({ state: 'visible' });
-    assert.match(await dialog.getByRole('alert').innerText(), /DoRA.*unsupported|unsupported.*DoRA/i);
-    assert.equal(fs.existsSync(`${JOB_FOLDER}/invalid_dora_trimmed.safetensors`), false);
+    assert.match(await dialog.getByRole('alert').innerText(), /unsupported|CP\/Tucker/i);
+    assert.equal(fs.existsSync(`${JOB_FOLDER}/unsupported_doha_trimmed.safetensors`), false);
     await dialog.getByRole('button', { name: 'Cancel' }).click();
 
     assert.deepEqual(errors, [], `Unexpected browser errors: ${errors.join('; ')}`);
@@ -174,7 +237,9 @@ async function main() {
           'no-clobber successful create through /api/scripts',
           'source remains byte-identical and output is smaller',
           'duplicate output failure is visible',
-          'unsupported DoRA failure is visible and writes nothing',
+          'DoRA bake requires matching base and writes an ordinary LoRA copy',
+          'LoHa opt-in conversion preview reports effective-update scope',
+          'unsupported DoHa failure is visible and writes nothing',
         ],
         preview: {
           inputBytes: preview.input_bytes,

@@ -1,5 +1,10 @@
 # Adaptive LoRA trimming plan
 
+This records the original ordinary-LoRA implementation. The subsequent
+[adapter reducer extension plan](lora_reduction_plan.md) adds rank policies,
+direction-only DoRA, explicit LoHa/LoKr conversion and base-aware DoRA baking;
+see the [current user guide](lora_trimming.md) for the supported contract.
+
 Status: implemented and verified locally. The coordinator owns integration,
 UI, release verification and commits; the test agent owns tests. See
 [validation evidence](lora_trimming_validation.md). No remote push is included.

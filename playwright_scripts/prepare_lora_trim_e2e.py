@@ -111,9 +111,36 @@ def main():
         "diffusion_model.block.proj.lora_up.weight": up,
     }
     save_file(safe, job_folder / "synthetic_lora.safetensors", metadata={"ss_base_model": "synthetic/local-base"})
-    invalid = dict(safe)
-    invalid["diffusion_model.block.proj.dora_scale"] = torch.ones(64)
-    save_file(invalid, job_folder / "invalid_dora.safetensors")
+    # Valid DoRA source plus a matching entirely synthetic floating base for
+    # the explicit bake flow. These files never touch a user's checkpoint.
+    dora = dict(safe)
+    dora["diffusion_model.block.proj.alpha"] = torch.tensor(8.0)
+    dora["diffusion_model.block.proj.dora_scale"] = torch.ones(64)
+    save_file(dora, job_folder / "synthetic_dora.safetensors",
+              metadata={"network_module": "networks.dora", "use_dora": "true"})
+    torch.manual_seed(431)
+    save_file({"diffusion_model.block.proj.weight": torch.randn(64, 64)},
+              job_folder / "synthetic_base.safetensors")
+
+    # Unsupported DoHa keeps exercising the visible-validation-error path;
+    # plain DoRA is now intentionally supported by the reducer.
+    unsupported = {
+        "diffusion_model.block.proj.hada_w1_a": torch.ones((4, 2)),
+        "diffusion_model.block.proj.hada_w1_b": torch.ones((2, 8)),
+        "diffusion_model.block.proj.hada_w2_a": torch.ones((4, 2)),
+        "diffusion_model.block.proj.hada_w2_b": torch.ones((2, 8)),
+        "diffusion_model.block.proj.hada_t1": torch.ones((2, 2)),
+    }
+    save_file(unsupported, job_folder / "unsupported_doha.safetensors")
+
+    loha = {
+        "diffusion_model.block.proj.hada_w1_a": torch.randn((8, 2)),
+        "diffusion_model.block.proj.hada_w1_b": torch.randn((2, 64)),
+        "diffusion_model.block.proj.hada_w2_a": torch.randn((8, 2)),
+        "diffusion_model.block.proj.hada_w2_b": torch.randn((2, 64)),
+        "diffusion_model.block.proj.alpha": torch.tensor(2.0),
+    }
+    save_file(loha, job_folder / "synthetic_loha.safetensors")
     print(json.dumps({"database": str(DATABASE), "job_id": JOB_ID, "source": str(job_folder / "synthetic_lora.safetensors")}))
 
 

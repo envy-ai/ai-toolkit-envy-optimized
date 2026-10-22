@@ -1,6 +1,7 @@
 import React from 'react';
 import useFilesList from '@/hooks/useFilesList';
 import { Loader2, AlertCircle, Download, Box, Brain, Trash2, SlidersHorizontal } from 'lucide-react';
+import { MdCompress } from 'react-icons/md';
 import { openMergeLoRAsModal } from './MergeLoRAsModal';
 import { openTrimLoRAModal } from './TrimLoRAModal';
 import { getFilename, getFoldername, encodeFilePathForUrl } from '@/utils/basic';
@@ -133,10 +134,11 @@ export default function FilesWidget({
                       <button
                         type="button"
                         onClick={() => openTrimLoRAModal(file.path, refreshFiles)}
-                        className="text-xs text-blue-400 hover:text-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        aria-label={`Trim ${fileName}`}
+                        className="bg-blue-500 bg-opacity-0 group-hover:bg-opacity-10 hover:!bg-opacity-30 rounded-full p-1 transition-all text-blue-400 hover:text-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        title="Reduce adapter"
+                        aria-label={`Reduce ${fileName}`}
                       >
-                        Trim
+                        <MdCompress className="w-4 h-4" aria-hidden="true" />
                       </button>
                     )}
                     <a

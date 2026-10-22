@@ -4,16 +4,45 @@ The eye icon beside a training job on the dashboard, queue, or jobs list opens
 its **Samples** tab directly (`/jobs/<id>?tab=samples`). Click it or focus it with
 Tab and press Enter. Job-name links still open the overview.
 
-Each safetensors checkpoint has a **Trim** button. Open it with a click or
-Tab then Enter/Space, choose retained energy (99.99% by default) or maximum
-relative reconstruction error, and click **Analyze**. **Advanced rank limits**
-expands with a click or Enter/Space. The CPU analysis writes nothing and shows
-estimated file size, per-layer ranks, retained energy, and reconstruction error.
+Each safetensors checkpoint in the training console's **Checkpoints** panel has
+a compact **Reduce adapter** icon (Google Material Compress), beside download
+and delete. Hover for its title, or use Tab then Enter/Space to open the shared
+**Reduce adapter** dialog. **Rank policy** offers retained energy (99.99% by
+default), relative reconstruction error (1%), fixed rank (32), singular-value
+ratio (1000), cumulative singular values (99.99%), and Frobenius norm retention
+(99.99%). Percentage inputs are converted to fractions for the backend.
+Energy/error choose the smallest rank meeting the measured bound after storage
+rounding. Other policies select from the singular-value spectrum, with any
+rank limits applied, and report the resulting retention/error. Frobenius norm
+retention squares the requested norm fraction to select by energy.
+
+Click **Analyze** for a CPU preview that writes nothing and shows estimated
+file size, per-layer factor ranks, formats, measurement scopes, retained energy,
+and reconstruction error. **Advanced rank limits and memory** expands with a
+click or Enter/Space. By default, DoRA magnitude tensors remain unchanged;
+its visible warning and table identify measurements as direction-only, before
+normalization. They do
+not bound final normalized weight error or visual changes without the base.
+The separate **Bake DoRA to ordinary LoRA before reducing** switch is off by
+default. Enabling it requires a **Matching base safetensors checkpoint** path
+to a single local floating-point checkpoint, and an explicit **DoRA convention**:
+**ComfyUI** or **AI Toolkit / native**, according to the loader normally used.
+No convention is selected automatically. Baking computes the final effective
+DoRA update with those base weights, then reduces it to ordinary LoRA. It
+preserves the source and base files; the preview identifies baked effective
+update measurements separately from native DoRA direction-only measurements.
+Quantized, mismatched, or unsupported base checkpoints fail with details.
+LoHa/LoKr require the separate **Convert LoHa / LoKr to ordinary LoRA** switch,
+off by default. Conversion produces an ordinary LoRA and supports only the
+documented 2D layouts. Enabling either conversion or DoRA baking exposes a
+shared **Conversion / baking working-memory limit (MiB)** in Advanced options
+(512 MiB by default); an over-budget estimate fails before expanded allocation
+or dense baking/decomposition work.
 Changing analysis settings clears the preview. Enter in a text/number field
 analyzes; **Create trimmed copy** requires its own explicit button activation
 after a current analysis. Use a new `.safetensors` filename in the source
 folder; existing files cannot be overwritten. Escape or the backdrop closes an
-idle dialog and returns focus to Trim. While analysis or creation runs, closing
+idle dialog and returns focus to the Reduce icon. While analysis or creation runs, closing
 and duplicate submissions are disabled. Errors persist with expandable stderr
 and stack details, and a failed save keeps the preview for retry. Numerical
 reconstruction measurements do not predict visual quality. See

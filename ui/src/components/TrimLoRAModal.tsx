@@ -3,7 +3,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { createGlobalState } from 'react-global-hooks';
 import { Modal } from './Modal';
-import { NumberInput, SelectInput, TextInput } from './formInputs';
+import { Checkbox, NumberInput, SelectInput, TextInput } from './formInputs';
 import { callScript, ScriptResult } from '@/utils/callScript';
 import { encodeFilePathForUrl, getFilename } from '@/utils/basic';
 
@@ -29,6 +29,12 @@ interface LayerReport {
   new_rank: number;
   retained_energy: number;
   relative_error: number;
+  input_format: string;
+  output_format: string;
+  metric_scope: 'effective_update' | 'pre_normalization_direction';
+  original_stored_rank: number | null;
+  expanded_rank: number | null;
+  baked?: boolean;
 }
 
 interface TrimReport {
@@ -43,6 +49,47 @@ interface TrimReport {
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+
+type RankPolicy = 'energy' | 'relative_error' | 'fixed' | 'sv_ratio' | 'sv_cumulative' | 'sv_fro';
+
+const rankPolicies: Record<RankPolicy, { label: string; valueLabel: string; defaultValue: number; hint: string }> = {
+  energy: {
+    label: 'Retained energy',
+    valueLabel: 'Retained energy (%)',
+    defaultValue: 99.99,
+    hint: 'Smallest rank meeting squared singular-value energy retention after storage rounding.',
+  },
+  relative_error: {
+    label: 'Relative reconstruction error',
+    valueLabel: 'Maximum relative error (%)',
+    defaultValue: 1,
+    hint: 'Smallest rank meeting the relative Frobenius error limit after storage rounding.',
+  },
+  fixed: {
+    label: 'Fixed rank',
+    valueLabel: 'Target rank',
+    defaultValue: 32,
+    hint: 'Choose a positive whole-number rank. Layers never increase beyond their original factor rank.',
+  },
+  sv_ratio: {
+    label: 'Singular-value ratio',
+    valueLabel: 'Singular-value ratio',
+    defaultValue: 1000,
+    hint: 'Keep singular values strictly above the largest singular value divided by this ratio (at least 1).',
+  },
+  sv_cumulative: {
+    label: 'Cumulative singular values',
+    valueLabel: 'Cumulative singular values (%)',
+    defaultValue: 99.99,
+    hint: 'Smallest rank retaining this percentage of the sum of singular values.',
+  },
+  sv_fro: {
+    label: 'Frobenius norm retention',
+    valueLabel: 'Frobenius norm retention (%)',
+    defaultValue: 99.99,
+    hint: 'Select by retained Frobenius norm, using the square of this fraction as the energy target.',
+  },
+};
 
 const parseReport = (value: unknown): TrimReport => {
   if (
@@ -61,6 +108,13 @@ const parseReport = (value: unknown): TrimReport => {
       layer =>
         isRecord(layer) &&
         typeof layer.name === 'string' &&
+        typeof layer.input_format === 'string' &&
+        typeof layer.output_format === 'string' &&
+        (layer.baked === undefined || typeof layer.baked === 'boolean') &&
+        ['effective_update', 'pre_normalization_direction'].includes(String(layer.metric_scope)) &&
+        ['original_stored_rank', 'expanded_rank'].every(
+          key => layer[key] === null || (typeof layer[key] === 'number' && Number.isFinite(layer[key])),
+        ) &&
         ['old_rank', 'new_rank', 'retained_energy', 'relative_error'].every(
           key => typeof layer[key] === 'number' && Number.isFinite(layer[key]),
         ),
@@ -91,10 +145,15 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
   const id = useId();
   const formRef = useRef<HTMLFormElement>(null);
   const busyRef = useRef(false);
-  const [criterion, setCriterion] = useState('energy');
+  const [rankPolicy, setRankPolicy] = useState<RankPolicy>('energy');
   const [threshold, setThreshold] = useState<number | null>(99.99);
   const [minRank, setMinRank] = useState<number | null>(1);
   const [maxRank, setMaxRank] = useState<number | null>(null);
+  const [convertToLoRA, setConvertToLoRA] = useState(false);
+  const [bakeDoRA, setBakeDoRA] = useState(false);
+  const [baseModelPath, setBaseModelPath] = useState('');
+  const [doraConvention, setDoraConvention] = useState('');
+  const [maxWorkingMB, setMaxWorkingMB] = useState<number | null>(512);
   const [outputName, setOutputName] = useState(
     () => getFilename(info.path).replace(/\.safetensors$/i, '') + '_trimmed.safetensors',
   );
@@ -144,14 +203,36 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
     setPreview(null);
     setCreatedPath(null);
   };
-  const validSettings =
+  const policy = rankPolicies[rankPolicy];
+  const percentagePolicy = rankPolicy !== 'fixed' && rankPolicy !== 'sv_ratio';
+  const needsWorkingMemory = convertToLoRA || bakeDoRA;
+  const effectiveWorkingMB = needsWorkingMemory ? maxWorkingMB : 512;
+  const validBakeSettings =
+    !bakeDoRA ||
+    (baseModelPath.trim().length > 0 &&
+      baseModelPath === baseModelPath.trim() &&
+      baseModelPath.toLowerCase().endsWith('.safetensors') &&
+      ['comfy', 'toolkit'].includes(doraConvention));
+  const validThreshold =
     threshold !== null &&
     Number.isFinite(threshold) &&
-    (criterion === 'energy' ? threshold > 0 && threshold <= 100 : threshold >= 0 && threshold <= 100) &&
+    (rankPolicy === 'fixed'
+      ? Number.isInteger(threshold) && threshold >= 1
+      : rankPolicy === 'sv_ratio'
+        ? threshold >= 1
+        : rankPolicy === 'relative_error'
+          ? threshold >= 0 && threshold <= 100
+          : threshold > 0 && threshold <= 100);
+  const validSettings =
+    validThreshold &&
+    validBakeSettings &&
     minRank !== null &&
     Number.isInteger(minRank) &&
     minRank >= 1 &&
-    (maxRank === null || (Number.isInteger(maxRank) && maxRank >= minRank));
+    (maxRank === null || (Number.isInteger(maxRank) && maxRank >= minRank)) &&
+    effectiveWorkingMB !== null &&
+    Number.isFinite(effectiveWorkingMB) &&
+    effectiveWorkingMB > 0;
   const outputError = !outputName.trim()
     ? 'Enter an output filename.'
     : /[\\/\x00-\x1f]/.test(outputName) || outputName.includes('..') || outputName !== outputName.trim()
@@ -179,9 +260,15 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
       result = await callScript('trim_lora.py', {
         args: {
           input: info.path,
-          [criterion === 'energy' ? 'retained-energy' : 'relative-error']: threshold! / 100,
+          'rank-policy': rankPolicy,
+          'rank-value': percentagePolicy ? threshold! / 100 : threshold!,
           'min-rank': minRank!,
           'max-rank': maxRank,
+          'convert-to-lora': convertToLoRA,
+          'bake-dora-to-lora': bakeDoRA,
+          'base-model-path': bakeDoRA ? baseModelPath : undefined,
+          'dora-convention': bakeDoRA ? doraConvention : undefined,
+          'max-working-mb': effectiveWorkingMB!,
           output: write ? outputPathFor(info.path, outputName) : undefined,
           'expected-preview': write ? preview!.preview_token : undefined,
           json: true,
@@ -216,7 +303,7 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
   };
 
   return (
-    <Modal isOpen onClose={close} title="Trim LoRA" size="lg" showCloseButton={!busy} closeOnOverlayClick={!busy}>
+    <Modal isOpen onClose={close} title="Reduce adapter" size="lg" showCloseButton={!busy} closeOnOverlayClick={!busy}>
       <form
         ref={formRef}
         tabIndex={-1}
@@ -228,7 +315,7 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
         className="space-y-4"
       >
         <div className="text-sm">
-          <p className="text-gray-300">Source LoRA</p>
+          <p className="text-gray-300">Source adapter (read-only)</p>
           <p className="font-medium break-all">{getFilename(info.path)}</p>
           <p className="text-xs text-gray-400 break-all mt-1">{info.path}</p>
         </div>
@@ -237,38 +324,118 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <SelectInput
               id={`${id}-criterion`}
-              label="Criterion"
-              value={criterion}
+              label="Rank policy"
+              value={rankPolicy}
               disabled={busy !== null}
-              options={[
-                { value: 'energy', label: 'Retained energy' },
-                { value: 'error', label: 'Relative reconstruction error' },
-              ]}
+              options={Object.entries(rankPolicies).map(([value, configuration]) => ({
+                value,
+                label: configuration.label,
+              }))}
               onChange={value => {
-                setCriterion(value);
-                setThreshold(value === 'energy' ? 99.99 : 1);
+                const nextPolicy = value as RankPolicy;
+                setRankPolicy(nextPolicy);
+                setThreshold(rankPolicies[nextPolicy].defaultValue);
                 invalidatePreview();
               }}
             />
             <NumberInput
               id={`${id}-threshold`}
-              label={criterion === 'energy' ? 'Retained energy (%)' : 'Maximum relative error (%)'}
+              label={policy.valueLabel}
               value={threshold}
               onChange={value => {
                 setThreshold(value);
                 invalidatePreview();
               }}
-              min={0}
-              max={100}
-              step="any"
+              min={percentagePolicy ? 0 : 1}
+              max={percentagePolicy ? 100 : undefined}
+              step={rankPolicy === 'fixed' ? 1 : 'any'}
               required
               allowEmpty
               clampOnBlur={false}
             />
           </div>
+          <p className="text-xs text-gray-400 mt-2">{policy.hint}</p>
+          {!['energy', 'relative_error'].includes(rankPolicy) && (
+            <p className="text-xs text-gray-400 mt-1">
+              This policy chooses a rank from the spectrum, with any rank limits applied. The preview reports actual
+              retention and error rather than guaranteeing an error bound.
+            </p>
+          )}
+          <div className="mt-4 space-y-2">
+            <Checkbox
+              label="Bake DoRA to ordinary LoRA before reducing"
+              checked={bakeDoRA}
+              disabled={busy !== null}
+              onChange={value => {
+                setBakeDoRA(value);
+                invalidatePreview();
+              }}
+            />
+            {bakeDoRA && (
+              <div className="space-y-2">
+                <p className="text-sm text-amber-300">
+                  Bake the final effective DoRA update using matching base weights, then reduce it to ordinary LoRA. The
+                  source adapter and base checkpoint stay unchanged.
+                </p>
+                <TextInput
+                  id={`${id}-base-model`}
+                  label="Matching base safetensors checkpoint"
+                  value={baseModelPath}
+                  required
+                  disabled={busy !== null}
+                  placeholder="/path/to/matching-base.safetensors"
+                  onChange={value => {
+                    setBaseModelPath(value);
+                    invalidatePreview();
+                  }}
+                />
+                <p className="text-xs text-gray-400">
+                  Required: a single local, floating-point .safetensors checkpoint matching this adapter. The server
+                  validates its weights and layer shapes.
+                </p>
+                <SelectInput
+                  id={`${id}-dora-convention`}
+                  label="DoRA convention"
+                  value={doraConvention}
+                  disabled={busy !== null}
+                  options={[
+                    { value: '', label: 'Choose a convention…' },
+                    { value: 'comfy', label: 'ComfyUI' },
+                    { value: 'toolkit', label: 'AI Toolkit / native' },
+                  ]}
+                  onChange={value => {
+                    setDoraConvention(value);
+                    invalidatePreview();
+                  }}
+                />
+                <p className="text-xs text-gray-400">
+                  Required: choose how you normally load the adapter. A tensor-key suffix alone cannot determine the
+                  normalization convention.
+                </p>
+              </div>
+            )}
+            <Checkbox
+              label="Convert LoHa / LoKr to ordinary LoRA"
+              checked={convertToLoRA}
+              disabled={busy !== null}
+              onChange={value => {
+                setConvertToLoRA(value);
+                invalidatePreview();
+              }}
+            />
+            <p className="text-xs text-gray-400">
+              Off by default. Supported 2D LoHa / LoKr layouts require explicit conversion; unsupported layouts fail.
+            </p>
+            {convertToLoRA && (
+              <p className="text-sm text-amber-300">
+                Conversion changes the output adapter format to ordinary LoRA. Check the format and measured error in
+                the preview before creating a copy.
+              </p>
+            )}
+          </div>
           <details className="mt-3 text-sm text-gray-300">
             <summary className="cursor-pointer w-fit focus:outline-none focus:ring-2 focus:ring-blue-500 rounded">
-              Advanced rank limits
+              Advanced rank limits and memory
             </summary>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-1">
               <NumberInput
@@ -300,11 +467,35 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
                 placeholder="Original rank"
               />
             </div>
+            {needsWorkingMemory && (
+              <div className="space-y-2">
+                <NumberInput
+                  id={`${id}-working-memory`}
+                  label="Conversion / baking working-memory limit (MiB)"
+                  value={maxWorkingMB}
+                  onChange={value => {
+                    setMaxWorkingMB(value);
+                    invalidatePreview();
+                  }}
+                  min={0}
+                  step="any"
+                  required
+                  allowEmpty
+                  clampOnBlur={false}
+                />
+                <p className="text-xs text-gray-400">
+                  Conversion factors and baking/decomposition work are checked against this estimate before allocation.
+                  Over-budget operations fail.
+                </p>
+              </div>
+            )}
           </details>
         </fieldset>
         {!validSettings && (
           <p className="text-sm text-amber-400">
-            Enter a valid threshold and positive whole-number rank limits. Maximum rank must be at least minimum rank.
+            Enter a valid policy value, positive whole-number rank limits, and a positive conversion memory limit.
+            Maximum rank must be at least minimum rank. DoRA baking also requires a matching safetensors path and an
+            explicit convention.
           </p>
         )}
         <div className="flex justify-end">
@@ -329,11 +520,20 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
                 <p className="text-gray-400 text-xs">Estimated output</p>
                 <p className="text-lg font-semibold">{bytes(preview.estimated_output_bytes)}</p>
               </div>
-              <p className="self-center">
-                {preview.layers.filter(layer => layer.new_rank < layer.old_rank).length} of {preview.layers.length}{' '}
-                layers reduced
-              </p>
+              <p className="self-center">{preview.layers.length} layers analyzed</p>
             </div>
+            {preview.layers.some(layer => layer.metric_scope === 'pre_normalization_direction') && (
+              <p className="rounded-md border border-amber-600/60 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+                DoRA measurements cover direction factors before normalization only. Magnitude tensors stay unchanged.
+                These values do not bound the final normalized weight error or image changes without the base model.
+              </p>
+            )}
+            {preview.layers.some(layer => layer.baked) && (
+              <p className="rounded-md border border-blue-500/60 bg-blue-500/10 px-3 py-2 text-sm text-blue-300">
+                DoRA was baked using the matching base checkpoint into ordinary LoRA. Measurements compare the final
+                effective update before and after reduction; generated-image quality still needs comparison.
+              </p>
+            )}
             <div className="overflow-auto max-h-64 border border-gray-700 rounded-md">
               <table className="w-full text-xs text-left whitespace-nowrap">
                 <caption className="sr-only">Per-layer ranks and numerical reconstruction measurements</caption>
@@ -343,13 +543,19 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
                       Layer
                     </th>
                     <th scope="col" className="px-3 py-2">
-                      Rank
+                      Factor rank
                     </th>
                     <th scope="col" className="px-3 py-2">
                       Retained energy
                     </th>
                     <th scope="col" className="px-3 py-2">
                       Relative error
+                    </th>
+                    <th scope="col" className="px-3 py-2">
+                      Format
+                    </th>
+                    <th scope="col" className="px-3 py-2">
+                      Measurement scope
                     </th>
                   </tr>
                 </thead>
@@ -358,12 +564,30 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
                     <tr key={layer.name} className="border-t border-gray-700">
                       <th scope="row" className="px-3 py-2 font-normal text-gray-200">
                         {layer.name}
+                        {layer.expanded_rank !== null && (
+                          <span className="block text-gray-400 mt-1">
+                            {layer.original_stored_rank === null
+                              ? 'Full stored components'
+                              : `Stored rank ${layer.original_stored_rank}`}{' '}
+                            · expanded factor rank {layer.expanded_rank}
+                          </span>
+                        )}
                       </th>
                       <td className="px-3 py-2">
                         {layer.old_rank} → {layer.new_rank}
                       </td>
                       <td className="px-3 py-2">{(layer.retained_energy * 100).toFixed(4)}%</td>
                       <td className="px-3 py-2">{(layer.relative_error * 100).toFixed(4)}%</td>
+                      <td className="px-3 py-2">
+                        {layer.input_format} → {layer.output_format}
+                      </td>
+                      <td className="px-3 py-2">
+                        {layer.metric_scope === 'pre_normalization_direction'
+                          ? 'DoRA direction before normalization'
+                          : layer.baked
+                            ? 'Baked DoRA effective update'
+                            : 'Effective update'}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -379,7 +603,7 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
 
         <p className="rounded-md border border-amber-600/60 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
           Numerical energy retention and reconstruction error do not predict visual quality. Compare generated samples
-          before relying on the trimmed copy.
+          before relying on the reduced copy.
         </p>
 
         <div>

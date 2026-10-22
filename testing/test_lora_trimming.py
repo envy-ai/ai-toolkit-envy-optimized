@@ -51,7 +51,7 @@ class FakeBaseModel:
         }
 
 
-def make_network(rank, alpha=6, width=64, peft_format=True):
+def make_network(rank, alpha=6, width=64, peft_format=True, network_type="lora"):
     base_model = FakeBaseModel()
     network = LoRASpecialNetwork(
         text_encoder=[],
@@ -65,6 +65,7 @@ def make_network(rank, alpha=6, width=64, peft_format=True):
         is_transformer=True,
         peft_format=peft_format,
         base_model=base_model,
+        network_type=network_type,
     )
     # The network stores its base model through a weak reference.
     network._test_base_model = base_model
@@ -202,6 +203,372 @@ class LoraTrimmingTests(unittest.TestCase):
         self.assertGreaterEqual(energy_metrics["retained_energy"], 0.98)
         self.assertEqual(energy_metrics["old_scale"], 1.0)
         self.assertEqual(energy_metrics["new_scale"], 1.0)
+
+    def test_explicit_rank_policies_select_expected_spectrum_ranks(self):
+        # The update has known singular values [9, 4, 1, .25]. These cases
+        # distinguish kohya's sum-of-singular-values and Frobenius policies.
+        down = torch.diag(torch.tensor([3.0, 2.0, 1.0, 0.5]))
+        up = down.clone()
+        cases = [
+            ("fixed", 2, 2),
+            ("sv_ratio", 2.25, 1),  # strict > largest / ratio
+            ("sv_ratio", 1.0, 1),
+            ("sv_cumulative", 0.9, 2),  # 13 / 14.25 >= .9
+            ("sv_fro", 0.98, 2),  # sqrt(97 / 98.0625) >= .98
+            ("energy", 0.98, 2),
+            ("relative_error", 0.11, 2),
+        ]
+        for policy, value, expected_rank in cases:
+            with self.subTest(policy=policy, value=value):
+                reduced_down, reduced_up, metrics = trim_lora_factors(
+                    down, up, rank_policy=policy, rank_value=value
+                )
+                self.assertEqual(reduced_down.shape[0], expected_rank)
+                self.assertEqual(reduced_up.shape[1], expected_rank)
+                self.assertEqual(metrics["rank_policy"], policy)
+                self.assertEqual(metrics["rank_value"], value)
+                original = up.double() @ down.double()
+                actual = reduced_up.double() @ reduced_down.double()
+                measured_error = torch.linalg.vector_norm(original - actual) / torch.linalg.vector_norm(original)
+                self.assertAlmostEqual(metrics["relative_error"], float(measured_error), places=6)
+                self.assertLessEqual(metrics["new_bytes"], metrics["old_bytes"])
+
+    def test_explicit_rank_policy_caps_are_not_promoted_to_error_guarantees(self):
+        down = torch.diag(torch.tensor([3.0, 2.0, 1.0, 0.5]))
+        up = down.clone()
+        reduced_down, _, metrics = trim_lora_factors(
+            down, up, rank_policy="sv_ratio", rank_value=1.1, max_rank=1
+        )
+        self.assertEqual(reduced_down.shape[0], 1)
+        self.assertGreater(metrics["relative_error"], 0.1)
+
+        with self.assertRaisesRegex(ValueError, "not achievable"):
+            trim_lora_factors(
+                down, up, rank_policy="relative_error", rank_value=0.01, max_rank=1
+            )
+
+    def test_explicit_rank_policy_rejects_invalid_or_mixed_options(self):
+        down = torch.diag(torch.tensor([3.0, 2.0, 1.0, 0.5]))
+        invalid = [
+            {"rank_policy": "unknown", "rank_value": 0.5},
+            {"rank_policy": "fixed", "rank_value": 1.5},
+            {"rank_policy": "fixed", "rank_value": 0},
+            {"rank_policy": "sv_ratio", "rank_value": 0.99},
+            {"rank_policy": "sv_cumulative", "rank_value": 0},
+            {"rank_policy": "sv_fro", "rank_value": 1.01},
+            {"rank_policy": "relative_error", "rank_value": -0.1},
+            {"rank_policy": "energy", "rank_value": 0.9, "retained_energy": 0.8},
+            {"rank_policy": "fixed", "rank_value": 1, "relative_error": 0.1},
+            {"rank_policy": "fixed", "rank_value": True},
+        ]
+        for options in invalid:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                trim_lora_factors(down, down, **options)
+
+    def test_file_api_keeps_default_and_legacy_threshold_paths_and_binds_explicit_policy(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "policy-source.safetensors"
+            down, up = make_spectral_factors()
+            save_file({
+                "diffusion_model.block.proj.lora_down.weight": down,
+                "diffusion_model.block.proj.lora_up.weight": up,
+            }, source)
+
+            default = trim_lora(source)
+            legacy = trim_lora(source, relative_error=0.07, max_rank=2)
+            explicit = trim_lora(source, rank_policy="fixed", rank_value=2)
+            self.assertEqual(default["layers"][0]["new_rank"], 3)
+            self.assertEqual(legacy["layers"][0]["new_rank"], 2)
+            self.assertEqual(explicit["layers"][0]["new_rank"], 2)
+            self.assertNotEqual(explicit["preview_token"], legacy["preview_token"])
+            with self.assertRaises(ValueError):
+                trim_lora(source, rank_policy="fixed", rank_value=2, relative_error=0.07)
+
+    def test_dora_nonbake_preserves_magnitude_and_labels_direction_only_metrics(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "dora.safetensors"
+            destination = root / "dora-reduced.safetensors"
+            source_network = make_network(rank=4, alpha=4, width=6, network_type="dora")
+            down, up = make_spectral_factors(rank=4, width=6)
+            magnitude = torch.tensor([1.2, 0.8, 1.1, 0.9, 1.3, 0.7], dtype=torch.float32)
+            source_layer = source_network.unet_loras[0]
+            with torch.no_grad():
+                source_layer.lora_down.weight.copy_(down)
+                source_layer.lora_up.weight.copy_(up)
+                source_layer.magnitude.copy_(magnitude)
+            state = source_network.get_state_dict(dtype=torch.float32)
+            name = next(key.removesuffix(".lora_down.weight").removesuffix(".lora_A.weight")
+                        for key in state if key.endswith(".lora_down.weight") or key.endswith(".lora_A.weight"))
+            save_file(state, source, metadata={"network_module": "networks.dora", "use_dora": "true"})
+            original = source.read_bytes()
+
+            preview = trim_lora(source, rank_policy="fixed", rank_value=2)
+            layer = preview["layers"][0]
+            self.assertEqual(layer["input_format"], "dora")
+            self.assertEqual(layer["output_format"], "dora")
+            self.assertEqual(layer["metric_scope"], "pre_normalization_direction")
+            self.assertTrue(any("final base-dependent DoRA" in warning for warning in preview["warnings"]))
+            written = trim_lora(source, rank_policy="fixed", rank_value=2,
+                                output=destination, expected_preview=preview["preview_token"])
+            self.assertTrue(written["written"])
+            self.assertEqual(source.read_bytes(), original)
+            output = load_file(destination)
+            magnitude_key = next(key for key in output if key.endswith(".dora_scale"))
+            self.assertTrue(torch.equal(output[magnitude_key].reshape(-1), magnitude))
+            down_key = next(key for key in output
+                            if key.endswith(".lora_down.weight") or key.endswith(".lora_A.weight"))
+            self.assertEqual(output[down_key].shape[0], 2)
+            dora_loader = make_network(rank=2, alpha=4, width=6, network_type="dora")
+            dora_loader.load_weights(str(destination))
+            torch.testing.assert_close(dora_loader.unet_loras[0].magnitude, magnitude)
+
+    def test_loha_conversion_matches_independent_hadamard_update_and_loads_as_lora(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "loha.safetensors"
+            destination = root / "loha-as-lora.safetensors"
+            source_network = make_network(rank=2, alpha=2.0)
+            source_factor = next(key for key in source_network.get_state_dict(dtype=torch.float32)
+                                 if key.endswith(".lora_A.weight"))
+            name = source_factor.removesuffix(".lora_A.weight")
+            torch.manual_seed(2026)
+            w1a, w1b = torch.randn(64, 2), torch.randn(2, 64)
+            w2a, w2b = torch.randn(64, 2), torch.randn(2, 64)
+            alpha = 2.0
+            state = {
+                name + ".hada_w1_a": w1a,
+                name + ".hada_w1_b": w1b,
+                name + ".hada_w2_a": w2a,
+                name + ".hada_w2_b": w2b,
+                name + ".alpha": torch.tensor(alpha),
+            }
+            save_file(state, source, metadata={"ss_network_module": "lycoris.kohya"})
+            original = source.read_bytes()
+            with self.assertRaisesRegex(ValueError, "explicit convert_to_lora"):
+                trim_lora(source, rank_policy="fixed", rank_value=4)
+            preview = trim_lora(source, rank_policy="fixed", rank_value=4, convert_to_lora=True)
+            layer = preview["layers"][0]
+            self.assertEqual(layer["input_format"], "loha")
+            self.assertEqual(layer["output_format"], "lora")
+            self.assertEqual(layer["metric_scope"], "effective_update")
+            self.assertEqual(layer["original_stored_rank"], 2)
+            self.assertEqual(layer["expanded_rank"], 4)
+            self.assertEqual(layer["new_rank"], 4)
+            written = trim_lora(source, rank_policy="fixed", rank_value=4, convert_to_lora=True,
+                                output=destination, expected_preview=preview["preview_token"])
+            self.assertEqual(source.read_bytes(), original)
+            output = load_file(destination)
+            down, up = output[name + ".lora_down.weight"], output[name + ".lora_up.weight"]
+            original_update = (w1a @ w1b) * (w2a @ w2b) * (alpha / 2)
+            converted_update = (up @ down) * (alpha / 4)
+            torch.testing.assert_close(converted_update, original_update, rtol=1e-5, atol=1e-5)
+            target_network = make_network(rank=4, alpha=alpha)
+            target_network.load_weights(str(destination))
+            loaded = target_network.get_state_dict(dtype=torch.float32)
+            self.assertTrue(any(torch.equal(value, down) for key, value in loaded.items()
+                                if key.endswith("lora_A.weight")))
+
+    def test_lokr_factored_and_full_components_convert_and_memory_budget_rejects_early(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            name = "diffusion_model.block.proj"
+            torch.manual_seed(2027)
+            a1, b1 = torch.randn(3, 2), torch.randn(2, 4)
+            a2, b2 = torch.randn(2, 2), torch.randn(2, 3)
+            alpha = 2.0
+            factored = {
+                name + ".lokr_w1_a": a1, name + ".lokr_w1_b": b1,
+                name + ".lokr_w2_a": a2, name + ".lokr_w2_b": b2,
+                name + ".alpha": torch.tensor(alpha),
+            }
+            expected = torch.kron(a1 @ b1, a2 @ b2) * (alpha / 2)
+            for label, state in (("factored", factored),
+                                 ("full", {name + ".lokr_w1": a1 @ b1,
+                                           name + ".lokr_w2": a2 @ b2,
+                                           name + ".alpha": torch.tensor(alpha)})):
+                source = root / f"{label}.safetensors"
+                destination = root / f"{label}-lora.safetensors"
+                save_file(state, source)
+                original = source.read_bytes()
+                with self.assertRaisesRegex(ValueError, "working-memory estimate"):
+                    trim_lora(source, convert_to_lora=True, max_working_mb=0.0001)
+                self.assertFalse(destination.exists())
+                preview = trim_lora(source, rank_policy="fixed", rank_value=4, convert_to_lora=True)
+                self.assertEqual(preview["layers"][0]["input_format"], "lokr")
+                self.assertEqual(preview["layers"][0]["metric_scope"], "effective_update")
+                trim_lora(source, rank_policy="fixed", rank_value=4, convert_to_lora=True,
+                          output=destination, expected_preview=preview["preview_token"])
+                output = load_file(destination)
+                actual = (output[name + ".lora_up.weight"] @ output[name + ".lora_down.weight"]) * (alpha / 4)
+                torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+                self.assertEqual(source.read_bytes(), original)
+
+    def test_all_full_lokr_without_alpha_gets_explicit_unit_scale_after_conversion_and_retrims(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            name = "diffusion_model.block.proj"
+            source, converted, retrimmed = (
+                root / "full-lokr.safetensors",
+                root / "converted.safetensors",
+                root / "retrimmed.safetensors",
+            )
+            torch.manual_seed(2028)
+            w1, w2 = torch.randn(4, 3), torch.randn(2, 3)
+            save_file({name + ".lokr_w1": w1, name + ".lokr_w2": w2}, source,
+                      metadata={"ss_network_module": "lycoris.kohya", "ss_network_alpha": "1"})
+            preview = trim_lora(source, rank_policy="fixed", rank_value=2, convert_to_lora=True)
+            layer = preview["layers"][0]
+            self.assertIsNone(layer["original_alpha"])
+            self.assertEqual(layer["alpha"], 2.0)
+            self.assertEqual(layer["new_scale"], 1.0)
+            trim_lora(source, rank_policy="fixed", rank_value=2, convert_to_lora=True,
+                      output=converted, expected_preview=preview["preview_token"])
+            with safe_open(str(converted), framework="pt", device="cpu") as handle:
+                output_metadata = handle.metadata() or {}
+            output = load_file(converted)
+            self.assertEqual(float(output[name + ".alpha"]), 2.0)
+            self.assertEqual(output_metadata["ss_network_alpha"], "1")
+
+            retrim_preview = trim_lora(converted, rank_policy="fixed", rank_value=2)
+            self.assertEqual(retrim_preview["layers"][0]["alpha"], 2.0)
+            self.assertEqual(retrim_preview["layers"][0]["old_rank"], 2)
+            trim_lora(converted, rank_policy="fixed", rank_value=2, output=retrimmed,
+                      expected_preview=retrim_preview["preview_token"])
+            self.assertTrue(retrimmed.exists())
+
+    def test_unsupported_adapter_shapes_and_mixed_conversion_are_not_written(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            name = "diffusion_model.block.proj"
+            cases = [
+                ("doha", {name + ".hada_w1_a": torch.ones(2, 2),
+                          name + ".hada_w1_b": torch.ones(2, 2),
+                          name + ".hada_w2_a": torch.ones(2, 2),
+                          name + ".hada_w2_b": torch.ones(2, 2),
+                          name + ".hada_t1": torch.ones(2, 2)}),
+                ("mixed", {name + ".lora_down.weight": torch.ones(2, 4),
+                           name + ".lora_up.weight": torch.ones(4, 2),
+                           "other.hada_w1_a": torch.ones(2, 2),
+                           "other.hada_w1_b": torch.ones(2, 2),
+                           "other.hada_w2_a": torch.ones(2, 2),
+                           "other.hada_w2_b": torch.ones(2, 2)}),
+            ]
+            for label, state in cases:
+                source, destination = root / f"{label}.safetensors", root / f"{label}-out.safetensors"
+                save_file(state, source)
+                original = source.read_bytes()
+                with self.subTest(label=label), self.assertRaises(ValueError):
+                    trim_lora(source, convert_to_lora=True, output=destination)
+                self.assertEqual(source.read_bytes(), original)
+                self.assertFalse(destination.exists())
+
+    def test_dora_bake_matches_each_selected_convention_and_loads_as_ordinary_lora(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            source_network = make_network(rank=2, alpha=2.0)
+            factor_key = next(key for key in source_network.get_state_dict(dtype=torch.float32)
+                              if key.endswith(".lora_A.weight"))
+            name = factor_key.removesuffix(".lora_A.weight")
+            base_key = name + ".weight"
+            down, up = make_spectral_factors(rank=3, width=64)
+            magnitude = torch.linspace(0.7, 1.3, 64, dtype=torch.float32)
+            torch.manual_seed(432)
+            base = torch.randn(64, 64, dtype=torch.float32)
+            source = root / "dora-source.safetensors"
+            base_path = root / "matching-base.safetensors"
+            save_file({
+                name + ".lora_down.weight": down,
+                name + ".lora_up.weight": up,
+                name + ".alpha": torch.tensor(2.0),
+                name + ".dora_scale": magnitude.reshape(64, 1),
+            }, source, metadata={"network_module": "networks.dora", "use_dora": "true"})
+            save_file({base_key: base}, base_path)
+            source_before, base_before = source.read_bytes(), base_path.read_bytes()
+
+            direction = (up.double() @ down.double()) * (2.0 / 3)
+            expected_effective_deltas = {
+                "comfy": (base.double() + direction) * (
+                    magnitude.double() / (base.double().norm(dim=1) + torch.finfo(torch.float32).eps)
+                )[:, None] - base.double(),
+                "toolkit": (base.double() + direction) * (
+                    magnitude.double() / (base.double() + direction).norm(dim=1)
+                )[:, None] - base.double(),
+            }
+
+            for convention in ("comfy", "toolkit"):
+                destination = root / f"baked-{convention}.safetensors"
+                preview = trim_lora(source, bake_dora_to_lora=True, base_model_path=base_path,
+                                    dora_convention=convention, rank_policy="fixed", rank_value=64)
+                layer = preview["layers"][0]
+                self.assertTrue(layer["baked"])
+                self.assertEqual(layer["input_format"], "dora")
+                self.assertEqual(layer["output_format"], "lora")
+                self.assertEqual(layer["metric_scope"], "effective_update")
+                self.assertEqual(layer["base_weight_key"], base_key)
+                self.assertEqual(layer["dora_convention"], convention)
+                self.assertEqual(preview["base_model"]["sha256"], hashlib.sha256(base_before).hexdigest())
+                written = trim_lora(source, bake_dora_to_lora=True, base_model_path=base_path,
+                                    dora_convention=convention, rank_policy="fixed", rank_value=64,
+                                    output=destination, expected_preview=preview["preview_token"])
+                self.assertTrue(written["written"])
+                self.assertEqual(source.read_bytes(), source_before)
+                self.assertEqual(base_path.read_bytes(), base_before)
+                output = load_file(destination)
+                self.assertNotIn(name + ".dora_scale", output)
+                baked_update = (output[name + ".lora_up.weight"].double() @
+                                output[name + ".lora_down.weight"].double()) * (2.0 / 64)
+                torch.testing.assert_close(baked_update, expected_effective_deltas[convention],
+                                           rtol=1e-5, atol=1e-5)
+
+                target_network = make_network(rank=64, alpha=2.0)
+                target_network.load_weights(str(destination))
+                loaded_module = target_network.unet_loras[0]
+                loader_update = (loaded_module.lora_up.weight.double() @
+                                 loaded_module.lora_down.weight.double()) * (2.0 / 64)
+                torch.testing.assert_close(loader_update, expected_effective_deltas[convention],
+                                           rtol=1e-5, atol=1e-5)
+
+    def test_dora_bake_requires_matching_float_base_and_preview_rechecks_base_hash(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            name = "diffusion_model.block.proj"
+            down, up = make_spectral_factors(rank=3, width=4)
+            source = root / "dora.safetensors"
+            save_file({name + ".lora_down.weight": down,
+                       name + ".lora_up.weight": up,
+                       name + ".dora_scale": torch.ones((4, 1)),
+                       name + ".alpha": torch.tensor(2.0)}, source)
+            missing_layer = root / "wrong-layer.safetensors"
+            save_file({"other.layer.weight": torch.eye(4)}, missing_layer)
+            wrong_shape = root / "wrong-shape.safetensors"
+            save_file({name + ".weight": torch.eye(3)}, wrong_shape)
+            quantized = root / "quantized.safetensors"
+            save_file({name + ".weight": torch.eye(4), name + ".weight_scale": torch.ones(4)}, quantized)
+            for bad_base in (missing_layer, wrong_shape, quantized):
+                with self.subTest(base=bad_base.name), self.assertRaises(ValueError):
+                    trim_lora(source, bake_dora_to_lora=True, base_model_path=bad_base,
+                              dora_convention="comfy", rank_policy="fixed", rank_value=4)
+
+            matching = root / "matching.safetensors"
+            save_file({name + ".weight": torch.eye(4)}, matching)
+            with self.assertRaisesRegex(ValueError, "working-memory estimate"):
+                trim_lora(source, bake_dora_to_lora=True, base_model_path=matching,
+                          dora_convention="toolkit", rank_policy="fixed", rank_value=4,
+                          max_working_mb=0.0001)
+            with self.assertRaisesRegex(ValueError, "requires base_model_path"):
+                trim_lora(source, bake_dora_to_lora=True, dora_convention="toolkit")
+            preview = trim_lora(source, bake_dora_to_lora=True, base_model_path=matching,
+                                dora_convention="toolkit", rank_policy="fixed", rank_value=4)
+            replacement = torch.eye(4) * 2
+            save_file({name + ".weight": replacement}, matching)
+            destination = root / "stale-preview.safetensors"
+            with self.assertRaisesRegex(ValueError, "Preview is stale"):
+                trim_lora(source, bake_dora_to_lora=True, base_model_path=matching,
+                          dora_convention="toolkit", rank_policy="fixed", rank_value=4,
+                          output=destination, expected_preview=preview["preview_token"])
+            self.assertFalse(destination.exists())
 
     def test_zero_update_is_finite_and_keeps_a_nonzero_rank(self):
         down = torch.zeros((3, 4), dtype=torch.float32)
