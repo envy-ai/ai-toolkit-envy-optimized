@@ -79,6 +79,22 @@ export default function APICaptionSetup({
         onChange={value => set('caption_prompt', value)}
         required
       />
+      <div>
+        <NumberInput
+          id={`${cleanupId}-image-megapixels`}
+          label="Normalize image (megapixels)"
+          value={caption.image_megapixels === undefined ? 1 : caption.image_megapixels}
+          onChange={value => set('image_megapixels', value)}
+          min={0}
+          allowEmpty
+          clampOnBlur={false}
+          placeholder="Original dimensions"
+        />
+        <p className="mt-1 text-xs text-gray-500">
+          Resize in memory while keeping the aspect ratio. Leave blank to use original dimensions.
+          Source files are unchanged.
+        </p>
+      </div>
       <details className="rounded-md border border-gray-700 p-3">
         <summary className="cursor-pointer text-sm text-gray-200">Caption cleanup · optional, off by default</summary>
         <div className="mt-3 space-y-3">

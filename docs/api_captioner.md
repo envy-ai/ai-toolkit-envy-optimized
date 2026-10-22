@@ -28,6 +28,36 @@ Timeout defaults to 300 seconds. Invalid values produce a persistent save
 error with details; values are never silently clamped. No provider requests
 are made just to save or validate the setup.
 
+## Image normalization
+
+**Normalize image (megapixels)** defaults to **1**. It resizes the image sent to
+the provider to approximately that decimal pixel area: 1 megapixel means
+1,000,000 pixels. Both larger and smaller images are resized, including
+upscaling. Clear the field to keep the original dimensions. A blank field is
+stored as `image_megapixels: null`; an omitted setting uses the default 1,
+including existing API caption jobs that do not specify it.
+
+```yaml
+caption:
+  image_megapixels: 1       # normalize to approximately 1 MP
+  # image_megapixels: null  # disable normalization
+```
+
+EXIF orientation is applied first. Width and height are scaled by the same
+square-root area ratio, then rounded to the nearest integer pixel, so aspect
+ratio and requested area are preserved up to pixel rounding. Resizing uses
+LANCZOS and the in-memory PNG preserves alpha. An unchanged target size skips
+resizing. Source files are never rewritten; normalization affects only the
+image data sent to the API, and the setting is not a provider parameter.
+
+Values must be positive finite numbers; zero, negatives, booleans and nonnumeric
+values are rejected before opening an image or making a provider request.
+Unrepresentable pixel areas or targets that round an axis to zero also fail
+explicitly rather than being clamped. There is no fixed megapixel cap.
+The value, including blank/null, is remembered and restored when reopening,
+editing or cloning the caption setup. Click or Tab to the shared numeric field
+to edit it; blank disables resizing without a separate toggle.
+
 ## Optional caption cleanup
 
 Expand **Caption cleanup** below Caption prompt and enable it to apply a regex
@@ -168,12 +198,11 @@ written earlier captions remain on disk. Stop is checked before and after each
 request; an in-flight HTTP request is bounded by the configured timeout rather
 than being resumed or retried in the background.
 
-Verification passed 10 Node API-caption tests, including cleanup structure,
-saved-settings round trips and credential-reference recovery. Python verification
-includes 11 focused regex/security cases and two explicit pre/post-cleanup
-credential guards. Unaffected transport/startup passes were reused after a
-test-helper-only correction rather than repeating the entire suite. Coverage
-includes a configured 16,384-token request. The CPU-startup regression runs the real
+Verification passed 11 Node API-caption tests and all 54 Python transport/startup
+tests, including megapixel defaults, fractional up/down resizing, blank/null
+persistence, EXIF orientation, alpha preservation, unchanged source bytes,
+invalid inputs, cleanup and credential guards. Coverage includes a configured
+16,384-token request. The CPU-startup regression runs the real
 `run.py` entry point with `CUDA_VISIBLE_DEVICES` empty, a synthetic image, and
 a local fake provider. It checks the HTTP request and the cleaned caption written
 to disk, plus preservation of an existing sidecar when cleanup produces empty text,
@@ -182,7 +211,7 @@ Tests used fixture credentials and no real provider requests.
 
 UI source and worker TypeScript checks and the production build passed. The
 build used a temporary 12 GiB Node heap allowance inside a 16 GiB/no-swap
-transient systemd unit, peaking at 13.9 GiB. Source checking excludes existing
+transient systemd unit, peaking at 14.2 GiB. Source checking excludes existing
 generated Next route-parameter errors; no new type suppression was added.
 The existing optional macOS temperature-sensor warning remains on Linux.
 
@@ -195,6 +224,14 @@ for this browser check. Python, Node and browser tests ran in the prescribed
 `tmp/caption-cleanup`; reusable scripts are
 `playwright_scripts/prepare_api_caption_regex_e2e.py` and
 `playwright_scripts/api-caption-regex.e2e.cjs`.
+
+The image-normalization browser regression saves blank as null, reopens it as
+blank on a second synthetic dataset, saves 0.25 MP, and restores that value on
+a third dataset. It passed on a diagnostic retry after an initial 15-second
+API-response timeout whose endpoint was not captured; no production change or
+fixture reset was needed. It queued two synthetic jobs and made no provider
+requests. The script is `playwright_scripts/api-caption-megapixels.e2e.cjs`,
+with screenshots and build logs under `tmp/caption-megapixels`.
 
 Only the UI branch was reloaded to activate these controls. The existing queue
 worker remained running with the same PID; the public datasets page returned

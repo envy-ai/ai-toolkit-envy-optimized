@@ -86,7 +86,13 @@ test('caption settings accept the 4096 limit and reject invalid settings or cred
   const config = loadConfig();
   const valid = config.apiCaptionSettingsSchema.parse(apiCaptionConfig('/tmp').config.process[0].caption);
   assert.equal(valid.max_new_tokens, 4096);
+  assert.equal(valid.image_megapixels, 1, 'missing image limit defaults to one megapixel');
   assert.equal(config.apiCaptionSettingsSchema.parse({ ...valid, max_new_tokens: 16384 }).max_new_tokens, 16384);
+  assert.equal(config.apiCaptionSettingsSchema.parse({ ...valid, image_megapixels: null }).image_megapixels, null);
+  assert.equal(config.apiCaptionSettingsSchema.parse({ ...valid, image_megapixels: 0.25 }).image_megapixels, 0.25);
+  for (const imageMegapixels of [0, -1, Number.POSITIVE_INFINITY, Number.NaN, true, '1']) {
+    assert.throws(() => config.apiCaptionSettingsSchema.parse({ ...valid, image_megapixels: imageMegapixels }));
+  }
   const cleanup = {
     enabled: true, pattern: '.*<caption>(.*)<\\/caption>.*', replacement: '$1',
     ignore_case: true, multiline: true, dotall: true, verbose: true, global: false,
@@ -203,6 +209,7 @@ test('API caption setup presents URL, key, prompts and collapsed configurable to
       api_url: 'http://caption.local/v1', model_name_or_path: 'fixture-model',
       system_prompt: 'system fixture', caption_prompt: 'caption fixture', max_new_tokens: 4096,
       api_timeout: 300, api_max_tokens_field: 'max_tokens', caption_extension: 'txt', recaption: false,
+      image_megapixels: 0.25,
       regex_replace: {
         enabled: true, pattern: '.*<caption>(.*)</caption>.*', replacement: '$1',
         ignore_case: true, multiline: true, dotall: true, verbose: true, global: false,
@@ -215,6 +222,7 @@ test('API caption setup presents URL, key, prompts and collapsed configurable to
   assert.match(markup, /Model/);
   assert.match(markup, /System prompt/);
   assert.match(markup, /Caption prompt/);
+  assert.match(markup, /Normalize image \(megapixels\)/);
   assert.match(markup, /Recaption existing captions/);
   assert.match(markup, /Advanced options/);
   assert.match(markup, /Caption cleanup · optional, off by default/);
@@ -245,6 +253,7 @@ test('captioner selection exposes API defaults while leaving recaption off for e
   assert.equal(set['config.process[0].caption.max_new_tokens'], 4096);
   assert.equal(set['config.process[0].caption.api_max_tokens_field'], 'max_tokens');
   assert.equal(set['config.process[0].caption.api_credential_id'], undefined);
+  assert.equal(set['config.process[0].caption.image_megapixels'], 1);
   assert.ok(set['config.process[0].caption.caption_prompt'].length > 0);
 });
 
@@ -272,6 +281,7 @@ test('remembered caption preferences round-trip all safe API settings and restor
     presence_penalty: 0.3,
     seed: 7,
     stop: ['END'],
+    image_megapixels: 0.25,
     regex_replace: {
       enabled: true,
       pattern: '.*<caption>(.*)<\\/caption>.*',
@@ -289,6 +299,7 @@ test('remembered caption preferences round-trip all safe API settings and restor
   assert.equal(preferences.caption.api_credential_id, credentialId);
   assert.equal(preferences.caption.api_timeout, 3);
   assert.equal(preferences.caption.max_new_tokens, 4096);
+  assert.equal(preferences.caption.image_megapixels, 0.25);
   assert.equal(preferences.caption.temperature, 0.25);
   assert.equal(preferences.caption.top_p, 0.8);
   assert.equal(preferences.caption.frequency_penalty, -0.2);
@@ -320,6 +331,7 @@ test('remembered caption preferences round-trip all safe API settings and restor
   assert.equal(restored.config.process[0].caption.api_credential_id, credentialId);
   assert.equal(restored.config.process[0].caption.caption_prompt, 'Fixture prompt');
   assert.deepEqual(restored.config.process[0].caption.regex_replace, job.config.process[0].caption.regex_replace);
+  assert.equal(restored.config.process[0].caption.image_megapixels, 0.25);
   assert.deepEqual(credentialCalls, [{ toolkitRoot: root, id: credentialId, apiUrl: 'http://127.0.0.1:34343/v1' }]);
 
   const loaded = await modules.route.GET();
@@ -365,6 +377,35 @@ test('remembered settings remain readable when their private credential file is 
     assert.equal(response.status, 200);
     assert.deepEqual((await response.json()).preferences, preferences);
     assert.equal(credentialLookups, 0, 'GET must allow the user to replace or clear a stale key reference');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('explicit null image megapixels survives remembered settings and restore as disabled', async () => {
+  const root = fs.mkdtempSync(path.join(tempRoot, 'api-caption-image-megapixels-null-test-'));
+  const rows = new Map();
+  const prisma = { settings: {
+    findUnique: async ({ where }) => rows.has(where.key) ? { key: where.key, value: rows.get(where.key) } : null,
+    upsert: async ({ where, create, update }) => {
+      rows.set(where.key, rows.has(where.key) ? update.value : create.value);
+    },
+  } };
+  const modules = loadCaptionPreferenceModules(root, prisma);
+  const job = apiCaptionConfig(root);
+  job.config.process[0].caption.image_megapixels = null;
+  const preferences = modules.jobConfig.createCaptionJobPreferences(job, 'cpu');
+  assert.equal(preferences.caption.image_megapixels, null);
+  try {
+    const saved = await modules.route.POST(new NextRequest('http://localhost/api/caption/settings', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(preferences),
+    }));
+    assert.equal(saved.status, 200);
+    assert.equal((await saved.json()).preferences.caption.image_megapixels, null);
+    const loaded = await modules.route.GET();
+    assert.equal((await loaded.json()).preferences.caption.image_megapixels, null);
+    const restored = modules.jobConfig.restoreCaptionJobPreferences(preferences, '/new/dataset');
+    assert.equal(restored.config.process[0].caption.image_megapixels, null);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

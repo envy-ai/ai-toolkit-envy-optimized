@@ -9,7 +9,7 @@ export const captionPreferenceFields = [
   'caption_extension', 'thinking', 'batch_size', 'layer_offloading', 'layer_offloading_percent',
   'loras', 'mtp', 'mtp_depth', 'cuda_graph', 'vision_bf16', 'video_fps', 'system_prompt',
   'api_url', 'api_credential_id', 'api_timeout', 'api_max_tokens_field', 'temperature', 'top_p',
-  'frequency_penalty', 'presence_penalty', 'seed', 'stop', 'device', 'regex_replace',
+  'frequency_penalty', 'presence_penalty', 'seed', 'stop', 'device', 'regex_replace', 'image_megapixels',
 ] as const;
 
 export interface CaptionJobPreferences {
@@ -40,7 +40,7 @@ export function restoreCaptionJobPreferences(
     process.caption = {
       ...process.caption,
       ...(preferences.type === API_CAPTIONER
-        ? { max_new_tokens: 4096, api_timeout: 300, api_max_tokens_field: 'max_tokens' as const } : {}),
+        ? { max_new_tokens: 4096, api_timeout: 300, api_max_tokens_field: 'max_tokens' as const, image_megapixels: 1 } : {}),
       ...preferences.caption,
     };
   }

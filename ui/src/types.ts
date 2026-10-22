@@ -571,6 +571,7 @@ export interface CaptionProcessConfig {
     seed?: number;
     stop?: string[];
     regex_replace?: CaptionRegexReplaceConfig;
+    image_megapixels?: number | null;
   }
 }
 

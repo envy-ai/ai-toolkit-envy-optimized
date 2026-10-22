@@ -1,9 +1,11 @@
 """Offline contract tests for the OpenAI-compatible caption transport."""
 
 import base64
+import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 import runpy
 import ssl
@@ -80,6 +82,13 @@ def image_fixture(tmp_path):
     return path
 
 
+def decode_sent_image(server):
+    data_url = server.requests[0]["payload"]["messages"][-1]["content"][1]["image_url"]["url"]
+    prefix, encoded = data_url.split(",", 1)
+    assert prefix == "data:image/png;base64"
+    return Image.open(io.BytesIO(base64.b64decode(encoded)))
+
+
 def config(server, **overrides):
     result = {
         "api_url": server.url,
@@ -89,6 +98,9 @@ def config(server, **overrides):
         "max_new_tokens": 4096,
         "api_timeout": 3,
         "api_max_tokens_field": "max_tokens",
+        # Existing transport fixtures are intentionally not resized. Tests for
+        # the API's missing-field default explicitly omit this key.
+        "image_megapixels": None,
     }
     result.update(overrides)
     return result
@@ -156,6 +168,89 @@ def test_blank_key_omits_auth_and_unset_sampling_options_are_not_injected(tmp_pa
     payload = request["payload"]
     assert payload["max_tokens"] == 4096
     assert not ({"temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop"} & payload.keys())
+
+
+@pytest.mark.parametrize(("source_size", "limit", "expected_size"), [
+    ((1600, 900), 0.25, (667, 375)),
+    ((10, 6), 0.001, (41, 24)),
+])
+def test_image_megapixel_limit_resizes_up_or_down_preserving_aspect_and_alpha(tmp_path, source_size, limit, expected_size):
+    filename = tmp_path / "resize-fixture.png"
+    Image.new("RGBA", source_size, (20, 100, 220, 127)).save(filename)
+    original = hashlib.sha256(filename.read_bytes()).digest()
+
+    with CaptionServer() as server:
+        generate_api_caption(filename, config(server, image_megapixels=limit))
+
+    with decode_sent_image(server) as sent:
+        assert sent.size == expected_size
+        assert sent.mode == "RGBA"
+        assert abs(sent.getpixel((sent.width // 2, sent.height // 2))[3] - 127) <= 1
+    assert hashlib.sha256(filename.read_bytes()).digest() == original
+    payload = server.requests[0]["payload"]
+    assert "image_megapixels" not in payload
+    scale = math.sqrt(limit * 1_000_000 / (source_size[0] * source_size[1]))
+    assert abs(expected_size[0] - source_size[0] * scale) <= 0.5
+    assert abs(expected_size[1] - source_size[1] * scale) <= 0.5
+
+
+def test_missing_image_megapixels_defaults_to_one_megapixel_and_null_disables_resize(tmp_path):
+    filename = tmp_path / "default-limit.png"
+    Image.new("RGBA", (2000, 1000), (50, 120, 210, 96)).save(filename)
+    source_hash = hashlib.sha256(filename.read_bytes()).digest()
+
+    with CaptionServer() as server:
+        settings = config(server)
+        settings.pop("image_megapixels")
+        generate_api_caption(filename, settings)
+    with decode_sent_image(server) as sent:
+        assert sent.size == (1414, 707)
+        assert sent.width * sent.height <= 1_000_000
+        assert sent.mode == "RGBA"
+        assert sent.getpixel((sent.width // 2, sent.height // 2))[3] == 96
+
+    with CaptionServer() as server:
+        generate_api_caption(filename, config(server, image_megapixels=None))
+    with decode_sent_image(server) as sent:
+        assert sent.size == (2000, 1000)
+        assert sent.mode == "RGBA"
+    assert hashlib.sha256(filename.read_bytes()).digest() == source_hash
+
+
+def test_megapixel_resize_applies_exif_orientation_before_calculating_target_size(tmp_path):
+    filename = tmp_path / "orientation-fixture.jpg"
+    exif = Image.Exif()
+    exif[274] = 6
+    Image.new("RGB", (1600, 900), (100, 120, 140)).save(filename, exif=exif, quality=95)
+    source_hash = hashlib.sha256(filename.read_bytes()).digest()
+
+    with CaptionServer() as server:
+        generate_api_caption(filename, config(server, image_megapixels=1))
+
+    with decode_sent_image(server) as sent:
+        assert sent.size == (750, 1333)
+        assert sent.height > sent.width
+        assert sent.width * sent.height <= 1_000_000
+    with Image.open(filename) as original:
+        assert original.size == (1600, 900)
+        assert original.getexif()[274] == 6
+    assert hashlib.sha256(filename.read_bytes()).digest() == source_hash
+
+
+@pytest.mark.parametrize("value", [0, -0.5, True, False, float("inf"), float("nan"), "1"])
+def test_invalid_image_megapixel_limits_fail_before_opening_the_image_or_requesting_provider(tmp_path, value):
+    with CaptionServer() as server:
+        with pytest.raises(ValueError, match="megapixel"):
+            generate_api_caption(tmp_path / "missing.png", config(server, image_megapixels=value))
+        assert server.requests == []
+
+
+@pytest.mark.parametrize("value", [1e-12, 1e308])
+def test_unrepresentable_normalized_image_dimensions_fail_without_provider_request(tmp_path, value):
+    with CaptionServer() as server:
+        with pytest.raises(ValueError, match="image|pixel|dimension|megapixel"):
+            generate_api_caption(image_fixture(tmp_path), config(server, image_megapixels=value))
+        assert server.requests == []
 
 
 def test_user_xml_caption_pattern_handles_case_multiline_verbose_and_escaped_regex_slash():

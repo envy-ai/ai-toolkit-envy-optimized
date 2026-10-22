@@ -44,6 +44,7 @@ def main() -> None:
             "max_new_tokens": 4096,
             "api_timeout": 3,
             "api_max_tokens_field": "max_tokens",
+            "image_megapixels": 1,
             "caption_extension": "txt",
             "extensions": ["png"],
             "recaption": False,

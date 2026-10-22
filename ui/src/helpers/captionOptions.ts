@@ -117,6 +117,7 @@ export const captionerTypes: CaptionOption[] = [
             'caption.caption_prompt': [API_CAPTION_PROMPT, defaultImageCaptionPrompt],
             'caption.system_prompt': ['', undefined],
             'caption.regex_replace': [DEFAULT_CAPTION_REGEX_REPLACE, undefined],
+            'caption.image_megapixels': [1, undefined],
             'caption.compile': [false, false],
             'caption.quantize': [false, true],
         },

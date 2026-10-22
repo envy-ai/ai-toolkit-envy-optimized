@@ -106,6 +106,36 @@ def apply_regex_replace(caption, settings):
     return result
 
 
+def _image_target_area(image_megapixels):
+    if image_megapixels is None:
+        return None
+    if isinstance(image_megapixels, bool) or not isinstance(image_megapixels, (int, float)):
+        raise ValueError("Image normalization megapixels must be a positive finite number or null")
+    try:
+        area = float(image_megapixels) * 1_000_000
+    except OverflowError as error:
+        raise ValueError("Image normalization pixel area exceeds the supported numeric range") from error
+    if not math.isfinite(area) or area <= 0:
+        raise ValueError("Image normalization megapixels must be positive and its pixel area finite")
+    return area
+
+
+def normalized_image_size(size, image_megapixels=1):
+    """Aspect-preserving decimal-megapixel area, rounded to integer dimensions."""
+    area = _image_target_area(image_megapixels)
+    if area is None:
+        return size
+    width, height = size
+    scale = math.sqrt(area / (width * height))
+    scaled = width * scale, height * scale
+    if not all(math.isfinite(value) for value in scaled):
+        raise ValueError("Image normalization dimensions exceed the supported numeric range")
+    target = tuple(round(value) for value in scaled)
+    if any(value < 1 for value in target):
+        raise ValueError("Image normalization target rounds to an empty dimension; choose a larger megapixel value")
+    return target
+
+
 def validate_api_settings(config):
     url = config.get("api_url", "")
     parsed = urlsplit(url)
@@ -148,6 +178,7 @@ def validate_api_settings(config):
     extensions = config.get("extensions", sorted(IMAGE_EXTENSIONS))
     if not isinstance(extensions, list) or not extensions or any(ext not in IMAGE_EXTENSIONS for ext in extensions):
         raise ValueError("API captioning supports still-image extensions only")
+    _image_target_area(config.get('image_megapixels', 1))
     validate_regex_replace(config.get('regex_replace'))
     api_path = parsed.path.rstrip("/")
     if not api_path.endswith("/chat/completions"):
@@ -160,10 +191,15 @@ class NoCaptionRedirects(HTTPRedirectHandler):
         raise RuntimeError("Caption API redirects are disabled; configure the final API URL")
 
 
-def image_data_url(filename):
+def image_data_url(filename, image_megapixels=1):
+    # Validate even direct calls before opening the source image.
+    _image_target_area(image_megapixels)
     with Image.open(filename) as image:
         image.seek(0)
         normalized = ImageOps.exif_transpose(image).convert("RGBA")
+        target = normalized_image_size(normalized.size, image_megapixels)
+        if target != normalized.size:
+            normalized = normalized.resize(target, Image.Resampling.LANCZOS)
         output = io.BytesIO()
         normalized.save(output, format="PNG")
     return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
@@ -176,7 +212,7 @@ def generate_api_caption(filename, config, api_key="", opener=None):
         messages.append({"role": "system", "content": config["system_prompt"]})
     messages.append({"role": "user", "content": [
         {"type": "text", "text": config.get("caption_prompt") or DEFAULT_PROMPT},
-        {"type": "image_url", "image_url": {"url": image_data_url(filename)}},
+        {"type": "image_url", "image_url": {"url": image_data_url(filename, config.get('image_megapixels', 1))}},
     ]})
     payload = {"model": config["model_name_or_path"], "messages": messages, "stream": False,
                config.get("api_max_tokens_field", "max_tokens"): config.get("max_new_tokens", 4096)}

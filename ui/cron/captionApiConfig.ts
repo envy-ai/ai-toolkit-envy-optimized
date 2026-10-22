@@ -55,6 +55,7 @@ export const apiCaptionSettingsSchema = z
     seed: z.number().int().safe().optional(),
     stop: z.array(z.string().min(1).max(4096)).max(4).optional(),
     regex_replace: captionRegexReplaceSchema.optional(),
+    image_megapixels: z.number().finite().positive().nullable().default(1),
     api_credential_id: z.string().uuid().optional(),
     path_to_caption: z.string().min(1),
     caption_extension: z.string().regex(/^[A-Za-z0-9_-]+$/),
