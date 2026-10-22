@@ -16,6 +16,7 @@ const OUTPUT_PATH = `${JOB_FOLDER}/${OUTPUT_NAME}`;
 const DORA_SOURCE = 'synthetic_dora.safetensors';
 const DORA_PATH = `${JOB_FOLDER}/${DORA_SOURCE}`;
 const DORA_BASE_PATH = `${JOB_FOLDER}/synthetic_base.safetensors`;
+const DORA_QUANT_BASE_PATH = `${JOB_FOLDER}/synthetic_base_convrot8.safetensors`;
 const DORA_OUTPUT_NAME = 'e2e_baked_dora.safetensors';
 const DORA_OUTPUT_PATH = `${JOB_FOLDER}/${DORA_OUTPUT_NAME}`;
 const LOHA_SOURCE = 'synthetic_loha.safetensors';
@@ -39,6 +40,7 @@ async function main() {
   assert.ok(fs.existsSync(SOURCE_PATH), `Missing synthetic source: ${SOURCE_PATH}`);
   assert.ok(fs.existsSync(DORA_PATH), `Missing synthetic DoRA source: ${DORA_PATH}`);
   assert.ok(fs.existsSync(DORA_BASE_PATH), `Missing synthetic base: ${DORA_BASE_PATH}`);
+  assert.ok(fs.existsSync(DORA_QUANT_BASE_PATH), `Missing synthetic ConvRot8 base: ${DORA_QUANT_BASE_PATH}`);
   assert.ok(fs.existsSync(LOHA_PATH), `Missing synthetic LoHa source: ${LOHA_PATH}`);
   assert.ok(fs.existsSync(UNSUPPORTED_PATH), `Missing synthetic unsupported source: ${UNSUPPORTED_PATH}`);
   fs.rmSync(OUTPUT_PATH, { force: true });
@@ -46,6 +48,7 @@ async function main() {
   const sourceHash = sha256File(SOURCE_PATH);
   const doraHash = sha256File(DORA_PATH);
   const baseHash = sha256File(DORA_BASE_PATH);
+  const quantBaseHash = sha256File(DORA_QUANT_BASE_PATH);
   fs.mkdirSync(SCREENSHOT_FOLDER, { recursive: true });
   const browser = await chromium.launch({
     headless: true,
@@ -170,7 +173,11 @@ async function main() {
     await page.getByRole('button', { name: `Reduce ${DORA_SOURCE}` }).click();
     dialog = page.getByRole('dialog', { name: 'Reduce adapter' });
     await dialog.getByRole('switch', { name: 'Bake DoRA to ordinary LoRA before reducing' }).click();
-    await dialog.getByLabel('Matching base safetensors checkpoint').fill(DORA_BASE_PATH);
+    await dialog.getByLabel('Matching base safetensors checkpoint').fill(DORA_QUANT_BASE_PATH);
+    const basePrecision = dialog.getByLabel('Quantized base precision');
+    const visibleSelectedOptions = await dialog.locator('.aitk-react-select__single-value').allInnerTexts();
+    assert.equal(visibleSelectedOptions.at(-1), 'BF16',
+      'training dtype bf16 should initialize the quantized-base precision selector');
     await dialog.getByLabel('DoRA convention').click();
     await page.getByText('AI Toolkit / native', { exact: true }).click();
     await dialog.getByLabel('Rank policy').click();
@@ -184,6 +191,19 @@ async function main() {
     assert.equal(bakePreviewEnvelope.result.layers[0].baked, true);
     assert.equal(bakePreviewEnvelope.result.layers[0].output_format, 'lora');
     assert.equal(bakePreviewEnvelope.result.layers[0].metric_scope, 'effective_update');
+    assert.equal(bakePreviewEnvelope.result.layers[0].base_weight.quant_format, 'int8_tensorwise');
+    assert.equal(bakePreviewEnvelope.result.layers[0].base_weight.requested_dequant_dtype, 'bfloat16');
+    await basePrecision.click();
+    await page.getByText('FP32', { exact: true }).click();
+    await dialog.getByRole('region', { name: 'Analysis preview' }).waitFor({ state: 'detached' });
+    assert.equal(await dialog.getByRole('button', { name: 'Create trimmed copy' }).isDisabled(), true,
+      'manually changing quantized-base precision must invalidate the prior preview');
+    const fp32BakePreviewPromise = waitScriptCall(page);
+    await dialog.getByRole('button', { name: 'Analyze' }).click();
+    const fp32BakePreview = await fp32BakePreviewPromise;
+    const fp32BakeEnvelope = await fp32BakePreview.json();
+    assert.equal(fp32BakeEnvelope.ok, true, JSON.stringify(fp32BakeEnvelope));
+    assert.equal(fp32BakeEnvelope.result.layers[0].base_weight.requested_dequant_dtype, 'float32');
     await dialog.getByText('DoRA was baked using the matching base checkpoint', { exact: false }).waitFor({ state: 'visible' });
     await dialog.getByLabel('Output filename').fill(DORA_OUTPUT_NAME);
     const bakeWritePromise = waitScriptCall(page);
@@ -194,6 +214,7 @@ async function main() {
     assert.ok(fs.existsSync(DORA_OUTPUT_PATH));
     assert.equal(sha256File(DORA_PATH), doraHash);
     assert.equal(sha256File(DORA_BASE_PATH), baseHash);
+    assert.equal(sha256File(DORA_QUANT_BASE_PATH), quantBaseHash);
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
 
     // LoHa conversion is opt-in and its preview labels the effective update.
@@ -237,7 +258,7 @@ async function main() {
           'no-clobber successful create through /api/scripts',
           'source remains byte-identical and output is smaller',
           'duplicate output failure is visible',
-          'DoRA bake requires matching base and writes an ordinary LoRA copy',
+          'DoRA bake accepts a real ConvRot8 base through /api/scripts, honors BF16 default and FP32 override, and writes an ordinary LoRA copy',
           'LoHa opt-in conversion preview reports effective-update scope',
           'unsupported DoHa failure is visible and writes nothing',
         ],

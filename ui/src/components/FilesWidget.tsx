@@ -13,11 +13,13 @@ export default function FilesWidget({
   jobName,
   isSliderSpace = false,
   trainingBaseModelPath,
+  trainingDtype,
 }: {
   jobID: string;
   jobName: string;
   isSliderSpace?: boolean;
   trainingBaseModelPath?: string;
+  trainingDtype?: string;
 }) {
   const { files, status, refreshFiles } = useFilesList(jobID, 5000);
 
@@ -135,7 +137,7 @@ export default function FilesWidget({
                     {file.path.toLowerCase().endsWith('.safetensors') && (
                       <button
                         type="button"
-                        onClick={() => openTrimLoRAModal(file.path, refreshFiles, trainingBaseModelPath)}
+                        onClick={() => openTrimLoRAModal(file.path, refreshFiles, trainingBaseModelPath, trainingDtype)}
                         className="bg-blue-500 bg-opacity-0 group-hover:bg-opacity-10 hover:!bg-opacity-30 rounded-full p-1 transition-all text-blue-400 hover:text-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
                         title="Reduce adapter"
                         aria-label={`Reduce ${fileName}`}

@@ -25,7 +25,7 @@ normalization. They do
 not bound final normalized weight error or visual changes without the base.
 The separate **Bake DoRA to ordinary LoRA before reducing** switch is off by
 default. Enabling it requires a **Matching base safetensors checkpoint** path
-to a single local floating-point checkpoint, and an explicit **DoRA convention**:
+to a single local checkpoint, and an explicit **DoRA convention**:
 **ComfyUI** or **AI Toolkit / native**, according to the loader normally used.
 No convention is selected automatically. The reducer prefills the editable
 base path from the training job when its configured model
@@ -34,7 +34,26 @@ directories leave the field blank; checkbox toggles preserve manual edits.
 Baking computes the final effective DoRA update with those base weights, then
 reduces it to ordinary LoRA. It preserves the source and base files; the preview identifies baked effective
 update measurements separately from native DoRA direction-only measurements.
-Quantized, mismatched, or unsupported base checkpoints fail with details.
+Floating weights, explicitly marked Comfy ConvRot8 / per-row int8, E4M3 FP8,
+NVFP4 (including AWQ), W4A8, and ConvRot W4A4 are supported. Tensor markers and
+Comfy header quantization metadata are recognized; legacy scaled FP8 is also
+supported. **Quantized base precision**
+selects FP32, BF16 or FP16 reconstruction before baking, initialized from the
+job's training dtype when supported (otherwise FP32). Select the precision used
+during training; checkpoint codes do not record it. This selector uses the shared
+searchable select and supports keyboard selection. Manual path and precision
+edits survive checkbox toggles; reopening initializes from the current job again.
+Changing precision invalidates analysis. Floating checkpoint weights retain their
+stored precision. Mismatched, malformed or unmarked quantized tensors fail with
+details. Baking uses reconstructed logical weights; activation quantization and
+loader arithmetic can differ. AWQ outputs depend on the chosen consumer: ComfyUI
+uses stored-weight deltas, while native toolkit uses raw-input adapter deltas.
+The preview warns against interchanging them.
+MOSS split Q/K/V factors with one fused magnitude are reduced jointly. DoHa
+(LoHa with DoRA magnitude), including its supported Conv2d layouts, can be baked
+with this same switch; choose ComfyUI for exported `.dora_scale` and native for
+an internal `.magnitude`. Native DoRA's scaled base bias is preserved as `.diff_b`
+when needed; the preview identifies this requirement for a bias-capable consumer.
 LoHa/LoKr require the separate **Convert LoHa / LoKr to ordinary LoRA** switch,
 off by default. Conversion produces an ordinary LoRA and supports only the
 documented 2D layouts. Enabling either conversion or DoRA baking exposes a

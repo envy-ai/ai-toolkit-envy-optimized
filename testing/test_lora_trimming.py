@@ -14,7 +14,12 @@ from safetensors.torch import load_file, save, save_file
 from toolkit.config_modules import NetworkConfig
 from toolkit.lora_special import LoRASpecialNetwork
 from toolkit.lora_trimming import trim_lora, trim_lora_factors
+from toolkit.models.DoRA import DoRAModule
+from toolkit.models.loha import LoHaModule
 from toolkit.metadata import add_model_hash_to_meta
+from toolkit.util.comfy_quant_export import comfy_quant_marker, export_comfy_quantized_layers
+from toolkit.util.convrot_quant import quantize_int8_rows
+from toolkit.util.ostris_quant import convert_linear_to_ostris, get_ostris_quantizer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +99,19 @@ class LoraTrimmingTests(unittest.TestCase):
 
     def temporary_directory(self):
         return tempfile.TemporaryDirectory(dir=ARTIFACT_ROOT)
+
+    @staticmethod
+    def _active_network():
+        class ActiveNetwork:
+            is_active = True
+            is_merged_in = False
+            is_lorm = False
+            _multiplier = 1.0
+
+            def __init__(self):
+                self.torch_multiplier = torch.ones(1)
+
+        return ActiveNetwork()
 
     def test_factorized_trim_meets_error_and_preserves_alpha_scaled_update(self):
         down, up = make_spectral_factors(rank=3, width=4)
@@ -492,8 +510,10 @@ class LoraTrimmingTests(unittest.TestCase):
                 "comfy": (base.double() + direction) * (
                     magnitude.double() / (base.double().norm(dim=1) + torch.finfo(torch.float32).eps)
                 )[:, None] - base.double(),
+                # Toolkit DoRA normalizes using unscaled B@A, while its forward
+                # applies alpha/rank to the adapter output.
                 "toolkit": (base.double() + direction) * (
-                    magnitude.double() / (base.double() + direction).norm(dim=1)
+                    magnitude.double() / (base.double() + (up.double() @ down.double())).norm(dim=1)
                 )[:, None] - base.double(),
             }
 
@@ -529,6 +549,173 @@ class LoraTrimmingTests(unittest.TestCase):
                                  loaded_module.lora_down.weight.double()) * (2.0 / 64)
                 torch.testing.assert_close(loader_update, expected_effective_deltas[convention],
                                            rtol=1e-5, atol=1e-5)
+
+    def test_native_dora_bake_matches_training_forward_with_alpha_and_bias(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            torch.manual_seed(1201)
+            base = torch.nn.Linear(4, 3, bias=True)
+            network = self._active_network()
+            module = DoRAModule("native", base, lora_dim=2, alpha=3.0, network=network)
+            module.org_forward = base.forward
+            with torch.no_grad():
+                module.lora_down.weight.copy_(torch.tensor([[0.4, -0.2, 0.1, 0.3],
+                                                            [-0.3, 0.5, 0.2, -0.1]]))
+                module.lora_up.weight.copy_(torch.tensor([[0.2, -0.4], [0.3, 0.1], [-0.2, 0.5]]))
+                module.magnitude.copy_(torch.tensor([0.8, 1.4, 0.65]))
+            x = torch.tensor([[0.1, 0.7, -0.5, 0.2], [-0.4, 0.3, 0.6, 0.9]])
+            actual_training = module.forward(x)
+            weight, bias = base.weight.detach(), base.bias.detach()
+            direction = module.lora_up.weight.detach() @ module.lora_down.weight.detach()
+            ratio = module.magnitude.detach() / torch.linalg.vector_norm(weight + direction, dim=1)
+            expected_training = (
+                torch.nn.functional.linear(x, weight, bias)
+                + torch.nn.functional.linear(x, direction * (3.0 / 2), None)
+            ) * ratio
+            torch.testing.assert_close(actual_training, expected_training)
+
+            adapter_name = "lora_transformer_layers.0.proj"
+            base_name = "layers.0.proj"
+            source, base_path, output = (root / name for name in ("native.safetensors", "base.safetensors", "baked.safetensors"))
+            save_file({
+                adapter_name + ".lora_down.weight": module.lora_down.weight.detach().clone(),
+                adapter_name + ".lora_up.weight": module.lora_up.weight.detach().clone(),
+                adapter_name + ".alpha": torch.tensor(3.0),
+                adapter_name + ".magnitude": module.magnitude.detach().clone(),
+            }, source, metadata={"network_module": "networks.dora", "use_dora": "true"})
+            save_file({base_name + ".weight": weight.clone(), base_name + ".bias": bias.clone()}, base_path)
+            preview = trim_lora(source, bake_dora_to_lora=True, base_model_path=base_path,
+                                dora_convention="toolkit", rank_policy="fixed", rank_value=3)
+            trim_lora(source, output=output, expected_preview=preview["preview_token"],
+                      bake_dora_to_lora=True, base_model_path=base_path, dora_convention="toolkit",
+                      rank_policy="fixed", rank_value=3)
+            result = load_file(output)
+            effective_weight = weight + result[adapter_name + ".lora_up.weight"] @ result[adapter_name + ".lora_down.weight"] * (3.0 / 3)
+            effective_bias = bias + result[adapter_name + ".diff_b"]
+            actual_baked = torch.nn.functional.linear(x.double(), effective_weight.double(), effective_bias.double())
+            torch.testing.assert_close(actual_baked, actual_training.double(), rtol=1e-5, atol=1e-5)
+            self.assertNotIn(adapter_name + ".magnitude", result)
+            torch.testing.assert_close(result[adapter_name + ".diff_b"].double(), ((ratio - 1) * bias).double())
+
+            # Verify the ordinary inference loader consumes diff_b alongside
+            # the reduced factors on the matching biased target module.
+            from toolkit.inference_lora import InferenceLoRA
+            holder = type("Holder", (), {})()
+            holder.model = torch.nn.Module()
+            layers = torch.nn.ModuleList()
+            target_block = torch.nn.Module()
+            target = torch.nn.Linear(4, 3, bias=True)
+            with torch.no_grad():
+                target.weight.copy_(weight)
+                target.bias.copy_(bias)
+            target_block.add_module("proj", target)
+            layers.append(target_block)
+            holder.model.add_module("layers", layers)
+            inference_adapter = InferenceLoRA(str(output)).load(holder).attach()
+            try:
+                loaded_output = target(x)
+            finally:
+                inference_adapter.detach()
+            torch.testing.assert_close(loaded_output.double(), actual_training.double(), rtol=1e-5, atol=1e-5)
+
+    def test_moss_fused_qkv_magnitude_bakes_to_loadable_split_projections(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            torch.manual_seed(9201)
+            prefix = "lora_transformer_layers.0.proj."
+            base_key = "layers.0.proj.qkv.weight"
+            down = torch.randn(2, 4)
+            ups = [torch.randn(2, 2) for _ in range(3)]
+            base = torch.randn(6, 4)
+            magnitude = torch.linspace(0.5, 1.4, 6).reshape(6, 1)
+            tensors = {}
+            for name, up in zip(("q", "k", "v"), ups):
+                tensors[prefix + name + ".lora_A.weight"] = down.clone()
+                tensors[prefix + name + ".lora_B.weight"] = up
+                tensors[prefix + name + ".alpha"] = torch.tensor(3.0)
+            tensors[prefix + "qkv.dora_scale"] = magnitude
+            source, base_path, output = (root / name for name in ("moss.safetensors", "moss-base.safetensors", "moss-baked.safetensors"))
+            save_file(tensors, source, metadata={"network_module": "networks.dora", "use_dora": "true"})
+            save_file({base_key: base}, base_path)
+            direction = torch.cat(ups, dim=0).double() @ down.double() * (3.0 / 2)
+            expected = (base.double() + direction) * (
+                magnitude.double().flatten() / (base.double().norm(dim=1) + torch.finfo(torch.float32).eps)
+            )[:, None] - base.double()
+            preview = trim_lora(source, bake_dora_to_lora=True, base_model_path=base_path,
+                                dora_convention="comfy", rank_policy="fixed", rank_value=4)
+            record = preview["layers"][0]
+            self.assertEqual(record["split_qkv_outputs"], [prefix + name for name in ("q", "k", "v")])
+            self.assertEqual(record["input_format"], "dora")
+            trim_lora(source, output=output, expected_preview=preview["preview_token"],
+                      bake_dora_to_lora=True, base_model_path=base_path, dora_convention="comfy",
+                      rank_policy="fixed", rank_value=4)
+            result = load_file(output)
+            self.assertNotIn(prefix + "qkv.dora_scale", result)
+            combined = torch.cat([result[prefix + name + ".lora_B.weight"] for name in ("q", "k", "v")], dim=0)
+            shared_down = result[prefix + "q.lora_A.weight"]
+            rebuilt = combined.double() @ shared_down.double() * (3.0 / 4)
+            torch.testing.assert_close(rebuilt, expected, rtol=1e-5, atol=1e-5)
+            self.assertTrue(torch.equal(shared_down, result[prefix + "k.lora_A.weight"]))
+            self.assertTrue(torch.equal(shared_down, result[prefix + "v.lora_A.weight"]))
+
+    def test_doha_linear_and_convolution_bake_match_training_module_updates(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            torch.manual_seed(4231)
+            for label, base in (
+                ("linear", torch.nn.Linear(4, 3, bias=True)),
+                ("conv", torch.nn.Conv2d(1, 3, kernel_size=2, bias=True)),
+            ):
+                with self.subTest(layout=label):
+                    network = self._active_network()
+                    module = LoHaModule("doha", base, lora_dim=2, alpha=3.0, network=network, use_dora=True)
+                    module.org_forward = base.forward
+                    with torch.no_grad():
+                        module.hada_w1_a.copy_(torch.randn_like(module.hada_w1_a) * 0.2)
+                        module.hada_w1_b.copy_(torch.randn_like(module.hada_w1_b) * 0.2)
+                        module.hada_w2_a.copy_(torch.randn_like(module.hada_w2_a) * 0.2)
+                        module.hada_w2_b.copy_(torch.randn_like(module.hada_w2_b) * 0.2)
+                        module.magnitude.copy_(module._weight_norms(adapted=True) * 0.83)
+                    x = torch.randn(2, 4) if label == "linear" else torch.randn(2, 1, 5, 5)
+                    expected = module.forward(x)
+                    adapter_name = f"lora_transformer_layers.0.{label}"
+                    base_name = f"layers.0.{label}"
+                    source, base_path, output = (root / f"doha-{label}-{suffix}.safetensors"
+                                                 for suffix in ("source", "base", "out"))
+                    factors = {
+                        ".hada_w1_a": module.hada_w1_a.detach().clone(),
+                        ".hada_w1_b": module.hada_w1_b.detach().clone(),
+                        ".hada_w2_a": module.hada_w2_a.detach().clone(),
+                        ".hada_w2_b": module.hada_w2_b.detach().clone(),
+                    }
+                    save_file({**{adapter_name + suffix: value for suffix, value in factors.items()},
+                               adapter_name + ".alpha": torch.tensor(3.0),
+                               adapter_name + ".magnitude": module.magnitude.detach().clone()}, source)
+                    save_file({base_name + ".weight": base.weight.detach().clone(),
+                               base_name + ".bias": base.bias.detach().clone()}, base_path)
+                    rank = min(base.weight.shape[0], base.weight[0].numel())
+                    preview = trim_lora(source, bake_dora_to_lora=True, base_model_path=base_path,
+                                        dora_convention="toolkit", rank_policy="fixed", rank_value=rank)
+                    self.assertEqual(preview["layers"][0]["input_format"], "doha")
+                    trim_lora(source, output=output, expected_preview=preview["preview_token"],
+                              bake_dora_to_lora=True, base_model_path=base_path, dora_convention="toolkit",
+                              rank_policy="fixed", rank_value=rank)
+                    result = load_file(output)
+                    new_down = result[adapter_name + ".lora_down.weight"]
+                    new_up = result[adapter_name + ".lora_up.weight"]
+                    flat_down = new_down.reshape(new_down.shape[0], -1)
+                    flat_up = new_up.reshape(new_up.shape[0], new_up.shape[1])
+                    delta = (flat_up.double() @ flat_down.double()).reshape_as(base.weight)
+                    if label == "linear":
+                        actual = torch.nn.functional.linear(x.double(), base.weight.double() + delta,
+                                                            base.bias.double())
+                    else:
+                        actual = torch.nn.functional.conv2d(
+                            x.double(), base.weight.double() + delta, base.bias.double(),
+                            stride=base.stride, padding=base.padding, dilation=base.dilation,
+                        )
+                    torch.testing.assert_close(actual, expected.double(), rtol=2e-5, atol=2e-5)
+                    self.assertNotIn(adapter_name + ".magnitude", result)
 
     def test_dora_bake_requires_matching_float_base_and_preview_rechecks_base_hash(self):
         with self.temporary_directory() as temp_dir:
@@ -569,6 +756,386 @@ class LoraTrimmingTests(unittest.TestCase):
                           dora_convention="toolkit", rank_policy="fixed", rank_value=4,
                           output=destination, expected_preview=preview["preview_token"])
             self.assertFalse(destination.exists())
+
+    def test_dora_bake_decodes_real_comfy_convrot8_base_and_matches_training_weight_view(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            source_network = make_network(rank=2, alpha=2.0, width=64)
+            factor_key = next(key for key in source_network.get_state_dict(dtype=torch.float32)
+                              if key.endswith(".lora_A.weight"))
+            name = factor_key.removesuffix(".lora_A.weight")
+            base_key = name + ".weight"
+
+            torch.manual_seed(812)
+            base_module = torch.nn.Linear(64, 64, bias=False, dtype=torch.bfloat16)
+            quantizer = get_ostris_quantizer("convrot8")
+            self.assertTrue(quantizer.can_quantize(base_module))
+            self.assertTrue(convert_linear_to_ostris(base_module, quantizer))
+            # This is the training-time OstrisLinear.weight view: the existing
+            # codec reconstructs the logical weight, then restores orig_dtype.
+            training_weight = base_module.weight.detach().clone()
+            self.assertEqual(training_weight.dtype, torch.bfloat16)
+
+            model = torch.nn.Module()
+            current = model
+            for component in name.split(".")[:-1]:
+                child = torch.nn.Module()
+                current.add_module(component, child)
+                current = child
+            current.add_module(name.split(".")[-1], base_module)
+            entries, exported, unexportable = export_comfy_quantized_layers(model)
+            self.assertIn(name, exported)
+            self.assertEqual(unexportable, [])
+            base_path = root / "convrot8-base.safetensors"
+            save_file(entries, base_path)
+            base_before = base_path.read_bytes()
+
+            # Exercise the same descriptor and decoder used by baking, and
+            # compare it with the actual OstrisLinear training view.
+            from toolkit.util.checkpoint_weights import (
+                decode_checkpoint_weight,
+                describe_checkpoint_weight,
+            )
+
+            with safe_open(str(base_path), framework="pt", device="cpu") as handle:
+                descriptor = describe_checkpoint_weight(handle, base_key)
+                decoded = decode_checkpoint_weight(handle, descriptor)
+            torch.testing.assert_close(decoded.to(torch.bfloat16), training_weight)
+            self.assertEqual(descriptor.quant_format, "int8_tensorwise")
+            self.assertEqual(descriptor.storage_dtype, "I8")
+            self.assertEqual(descriptor.shape, (64, 64))
+
+            down, up = make_spectral_factors(rank=3, width=64)
+            magnitude = torch.linspace(0.7, 1.3, 64, dtype=torch.float32).reshape(64, 1)
+            source = root / "convrot8-dora.safetensors"
+            save_file({
+                name + ".lora_down.weight": down,
+                name + ".lora_up.weight": up,
+                name + ".alpha": torch.tensor(2.0),
+                name + ".dora_scale": magnitude,
+            }, source, metadata={"network_module": "networks.dora", "use_dora": "true"})
+            source_before = source.read_bytes()
+
+            tokens = set()
+            for dtype_name, dtype in (("float32", torch.float32), ("bfloat16", torch.bfloat16)):
+                base = decoded.to(dtype).double()
+                direction = (up.double() @ down.double()) * (2.0 / 3.0)
+                native_norm_weight = base + (up.double() @ down.double())
+                expected = {
+                    "comfy": (base + direction) * (
+                        magnitude.double().reshape(-1) /
+                        (base.norm(dim=1) + torch.finfo(torch.float32).eps)
+                    )[:, None] - base,
+                    "toolkit": (base + direction) * (
+                        magnitude.double().reshape(-1) / native_norm_weight.norm(dim=1)
+                    )[:, None] - base,
+                }
+                for convention in ("comfy", "toolkit"):
+                    destination = root / f"baked-{dtype_name}-{convention}.safetensors"
+                    options = dict(
+                        bake_dora_to_lora=True,
+                        base_model_path=base_path,
+                        dora_convention=convention,
+                        base_dequant_dtype=dtype_name,
+                        rank_policy="fixed",
+                        rank_value=64,
+                    )
+                    preview = trim_lora(source, **options)
+                    self.assertEqual(preview["base_model"]["weight_decoder"], "comfy_logical_weight_v2")
+                    record = preview["layers"][0]
+                    self.assertEqual(record["base_weight"]["quant_format"], "int8_tensorwise")
+                    self.assertEqual(record["base_weight"]["requested_dequant_dtype"], dtype_name)
+                    self.assertEqual(record["base_weight"]["reconstruction_dtype"], dtype_name)
+                    tokens.add(preview["preview_token"])
+                    written = trim_lora(
+                        source, output=destination,
+                        expected_preview=preview["preview_token"], **options
+                    )
+                    self.assertTrue(written["written"])
+                    result = load_file(destination)
+                    self.assertNotIn(name + ".dora_scale", result)
+                    baked = (result[name + ".lora_up.weight"].double() @
+                             result[name + ".lora_down.weight"].double()) * (2.0 / 64)
+                    torch.testing.assert_close(baked, expected[convention], rtol=1e-5, atol=1e-5)
+                    target_network = make_network(rank=64, alpha=2.0, width=64)
+                    target_network.load_weights(str(destination))
+                    loaded_module = target_network.unet_loras[0]
+                    loaded_update = (loaded_module.lora_up.weight.double() @
+                                     loaded_module.lora_down.weight.double()) * (2.0 / 64)
+                    torch.testing.assert_close(loaded_update, expected[convention],
+                                               rtol=1e-5, atol=1e-5)
+            self.assertEqual(len(tokens), 4, "dtype and convention must both bind the preview token")
+            self.assertEqual(source.read_bytes(), source_before)
+            self.assertEqual(base_path.read_bytes(), base_before)
+
+    def test_bake_base_codecs_decode_like_their_quantizers_and_feed_the_reducer(self):
+        from toolkit.util.checkpoint_weights import decode_checkpoint_weight, describe_checkpoint_weight
+        from toolkit.util.ostris_quant import OstrisLinear
+
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            cases = []
+
+            def export_quantized(label, qtype, width, *, awq=False):
+                linear = torch.nn.Linear(width, 8, bias=False)
+                quantizer = get_ostris_quantizer(qtype)
+                self.assertTrue(convert_linear_to_ostris(linear, quantizer))
+                if awq:
+                    pre_scale = torch.linspace(0.7, 1.3, width)
+                    linear.register_buffer("nv4_pre_scale", pre_scale.contiguous().view(torch.uint8), persistent=False)
+                model = torch.nn.Module()
+                block = torch.nn.Module()
+                model.add_module("block", block)
+                block.add_module("proj", linear)
+                entries, exported, unsupported = export_comfy_quantized_layers(model)
+                self.assertEqual(exported, ["block.proj"])
+                self.assertEqual(unsupported, [])
+                if label == "nvfp4":
+                    from toolkit.util.comfy_quant_export import comfy_quant_marker
+                    entries["block.proj.comfy_quant"] = comfy_quant_marker(
+                        {"format": "nvfp4", "full_precision_matrix_mult": True}
+                    )
+                cases.append((label, entries, quantizer.dequantize(linear), width, awq))
+
+            torch.manual_seed(707)
+            export_quantized("nvfp4", "nvfp4", 64, awq=True)
+            export_quantized("w4a4", "convrotcomfyw4a4", 256)
+            export_quantized("fp8-marker", "float8_e4m3fn", 64)
+
+            # W4A8 has a published import/dequantize path rather than a fresh
+            # quantize_ method. Exercise its real buffer attachment and exporter.
+            from toolkit.util.comfy_w4a8_quant import ComfyW4A8Quantizer
+            qmodule = torch.nn.Linear(64, 8, bias=False)
+            qmodule.__class__ = OstrisLinear
+            qmodule.ostris_orig_dtype = torch.float32
+            w4a8 = ComfyW4A8Quantizer()
+            w4a8.qtype = "comfy_w4a8"
+            packed = torch.randint(-128, 127, (8, 32), dtype=torch.int8)
+            relative = torch.rand(8, 4) * 0.2 + 0.05
+            channel = torch.rand(8) * 0.4 + 0.1
+            codebook = torch.linspace(-1.0, 1.0, 16)
+            correction = torch.zeros(4, 8)
+            w4a8.attach_(qmodule, packed, relative, channel, codebook, correction, group_size=16, rotation=1)
+            qmodule.ostris_quantizer = w4a8
+            model = torch.nn.Module()
+            block = torch.nn.Module()
+            model.add_module("block", block)
+            block.add_module("proj", qmodule)
+            entries, exported, unsupported = export_comfy_quantized_layers(model)
+            self.assertEqual(exported, ["block.proj"])
+            self.assertEqual(unsupported, [])
+            cases.append(("w4a8", entries, w4a8.dequantize(qmodule), 64, False))
+
+            fp8_entries = next(entries for label, entries, _, _, _ in cases if label == "fp8-marker")
+            fp8_header = {k: v for k, v in fp8_entries.items() if not k.endswith(".comfy_quant")}
+            fp8_legacy = {k: v for k, v in fp8_header.items() if k != "block.proj.weight_scale"}
+            fp8_legacy["block.proj.scale_weight"] = fp8_header["block.proj.weight_scale"]
+            fp8_legacy["scaled_fp8"] = torch.ones(1, dtype=torch.uint8)
+            cases += [
+                ("fp8-header", fp8_header, next(w for label, _, w, _, _ in cases if label == "fp8-marker"), 64, False,
+                 {"_quantization_metadata": json.dumps({"layers": {"block.proj": {
+                     "format": "float8_e4m3fn", "full_precision_matrix_mult": False}}})}),
+                ("fp8-legacy", fp8_legacy, next(w for label, _, w, _, _ in cases if label == "fp8-marker"), 64, False, {}),
+            ]
+
+            for case in cases:
+                label, entries, expected, width, awq = case[:5]
+                metadata = case[5] if len(case) > 5 else None
+                with self.subTest(codec=label):
+                    base_path = root / f"{label}.safetensors"
+                    save_file(entries, base_path, metadata=metadata)
+                    with safe_open(str(base_path), framework="pt", device="cpu") as handle:
+                        descriptor = describe_checkpoint_weight(handle, "block.proj.weight")
+                        decoded = decode_checkpoint_weight(handle, descriptor)
+                        pre_scale = handle.get_tensor("block.proj.pre_quant_scale") if awq else None
+                    self.assertEqual(tuple(decoded.shape), (8, width))
+                    torch.testing.assert_close(decoded, expected.float(), rtol=1e-5, atol=1e-5)
+                    if label == "nvfp4":
+                        self.assertEqual(descriptor.quant_format, "nvfp4")
+                        self.assertEqual(descriptor.marker_key, "block.proj.comfy_quant")
+                        torch.testing.assert_close(pre_scale, torch.linspace(0.7, 1.3, width))
+                    if label == "w4a4":
+                        self.assertEqual(descriptor.quant_format, "convrot_w4a4")
+                    if label == "w4a8":
+                        self.assertEqual(descriptor.quant_format, "asym_w4a8_int8")
+                        self.assertIn("block.proj.weight_correction", descriptor.auxiliary_keys)
+                    if label == "fp8-header":
+                        self.assertEqual(descriptor.marker_key, "_quantization_metadata:block.proj")
+                    if label == "fp8-legacy":
+                        self.assertEqual(descriptor.marker_key, "scaled_fp8")
+                    if not awq:
+                        adapter_name = "lora_transformer_block.proj"
+                        torch.manual_seed(991)
+                        down, up = torch.randn(2, width) * 0.03, torch.randn(8, 2) * 0.04
+                        magnitude = torch.linspace(0.65, 1.2, 8).reshape(8, 1)
+                        source = root / f"{label}-dora.safetensors"
+                        output = root / f"{label}-baked.safetensors"
+                        save_file({adapter_name + ".lora_down.weight": down,
+                                   adapter_name + ".lora_up.weight": up,
+                                   adapter_name + ".alpha": torch.tensor(2.5),
+                                   adapter_name + ".dora_scale": magnitude}, source)
+                        preview = trim_lora(source, bake_dora_to_lora=True, base_model_path=base_path,
+                                            dora_convention="comfy", rank_policy="fixed", rank_value=8)
+                        self.assertEqual(preview["layers"][0]["base_weight"]["quant_format"], descriptor.quant_format)
+                        trim_lora(source, output=output, expected_preview=preview["preview_token"],
+                                  bake_dora_to_lora=True, base_model_path=base_path, dora_convention="comfy",
+                                  rank_policy="fixed", rank_value=8)
+                        self.assertTrue(output.exists())
+
+    def test_dora_bake_rejects_bare_integer_and_malformed_or_unknown_markers(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            name = "diffusion_model.block.proj"
+            source = root / "dora.safetensors"
+            down, up = make_spectral_factors(rank=3, width=4)
+            save_file({
+                name + ".lora_down.weight": down,
+                name + ".lora_up.weight": up,
+                name + ".dora_scale": torch.ones((4, 1)),
+            }, source)
+            invalid_bases = {
+                "bare-int8": {
+                    name + ".weight": torch.ones((4, 4), dtype=torch.int8),
+                },
+                "unknown-format": {
+                    name + ".weight": torch.ones((4, 4), dtype=torch.int8),
+                    name + ".weight_scale": torch.ones((4, 1)),
+                    name + ".comfy_quant": torch.tensor(
+                        list(b'{"format":"unknown_codec"}'), dtype=torch.uint8),
+                },
+                "malformed-nvfp4-layout": {
+                    name + ".weight": torch.ones((4, 4), dtype=torch.int8),
+                    name + ".weight_scale": torch.ones((4, 1)),
+                    name + ".comfy_quant": torch.tensor(
+                        list(b'{"format":"nvfp4"}'), dtype=torch.uint8),
+                },
+                "malformed-marker": {
+                    name + ".weight": torch.ones((4, 4), dtype=torch.int8),
+                    name + ".weight_scale": torch.ones((4, 1)),
+                    name + ".comfy_quant": torch.tensor(list(b"not-json"), dtype=torch.uint8),
+                },
+                "missing-scale": {
+                    name + ".weight": torch.ones((4, 4), dtype=torch.int8),
+                    name + ".comfy_quant": torch.tensor(
+                        list(b'{"format":"int8_tensorwise"}'), dtype=torch.uint8),
+                },
+            }
+            for label, tensors in invalid_bases.items():
+                with self.subTest(base=label):
+                    base = root / f"{label}.safetensors"
+                    save_file(tensors, base)
+                    original = base.read_bytes()
+                    with self.assertRaises(ValueError):
+                        trim_lora(source, bake_dora_to_lora=True, base_model_path=base,
+                                  dora_convention="toolkit", rank_policy="fixed", rank_value=4)
+                    self.assertEqual(base.read_bytes(), original)
+
+    def test_dora_bake_accepts_plain_tensorwise_int8_and_explicit_fp8_bases(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            name = "diffusion_model.block.proj"
+            source = root / "dora.safetensors"
+            down, up = make_spectral_factors(rank=3, width=64)
+            magnitude = torch.linspace(0.75, 1.2, 64).reshape(64, 1)
+            alpha = 2.0
+            save_file({
+                name + ".lora_down.weight": down,
+                name + ".lora_up.weight": up,
+                name + ".alpha": torch.tensor(alpha),
+                name + ".dora_scale": magnitude,
+            }, source)
+
+            torch.manual_seed(913)
+            original = torch.randn((64, 64), dtype=torch.float32)
+            int8_codes, row_scales = quantize_int8_rows(original)
+            int8_path = root / "plain-int8.safetensors"
+            save_file({
+                name + ".weight": int8_codes,
+                name + ".weight_scale": row_scales.reshape(-1, 1),
+                name + ".comfy_quant": comfy_quant_marker({"format": "int8_tensorwise"}),
+            }, int8_path)
+
+            fp8_linear = torch.nn.Linear(64, 64, bias=False)
+            fp8_linear.weight.data.copy_(original)
+            fp8_quantizer = get_ostris_quantizer("float8_e4m3fn")
+            self.assertTrue(convert_linear_to_ostris(fp8_linear, fp8_quantizer))
+            fp8_root = torch.nn.Module()
+            parent = torch.nn.Module()
+            block = torch.nn.Module()
+            fp8_root.add_module("diffusion_model", parent)
+            parent.add_module("block", block)
+            block.add_module("proj", fp8_linear)
+            fp8_entries, fp8_exported, fp8_unexportable = export_comfy_quantized_layers(fp8_root)
+            self.assertEqual(fp8_exported, ["diffusion_model.block.proj"])
+            self.assertEqual(fp8_unexportable, [])
+            fp8_path = root / "fp8.safetensors"
+            save_file(fp8_entries, fp8_path)
+
+            from toolkit.util.checkpoint_weights import decode_checkpoint_weight, describe_checkpoint_weight
+
+            for label, base_path, expected_format in (
+                ("plain-int8", int8_path, "int8_tensorwise"),
+                ("fp8", fp8_path, "float8_e4m3fn"),
+            ):
+                with self.subTest(codec=label):
+                    with safe_open(str(base_path), framework="pt", device="cpu") as handle:
+                        descriptor = describe_checkpoint_weight(handle, name + ".weight")
+                        decoded = decode_checkpoint_weight(handle, descriptor)
+                    self.assertEqual(descriptor.quant_format, expected_format)
+                    self.assertEqual(tuple(decoded.shape), (64, 64))
+                    self.assertTrue(torch.isfinite(decoded).all())
+                    preview = trim_lora(
+                        source, bake_dora_to_lora=True, base_model_path=base_path,
+                        dora_convention="toolkit", base_dequant_dtype="float32",
+                        rank_policy="fixed", rank_value=64,
+                    )
+                    self.assertEqual(preview["layers"][0]["base_weight"]["quant_format"], expected_format)
+                    destination = root / f"{label}-baked.safetensors"
+                    trim_lora(
+                        source, output=destination, expected_preview=preview["preview_token"],
+                        bake_dora_to_lora=True, base_model_path=base_path,
+                        dora_convention="toolkit", base_dequant_dtype="float32",
+                        rank_policy="fixed", rank_value=64,
+                    )
+                    result = load_file(destination)
+                    actual = (result[name + ".lora_up.weight"].double() @
+                              result[name + ".lora_down.weight"].double()) * (alpha / 64)
+                    direction = (up.double() @ down.double()) * (alpha / 3)
+                    adapted = decoded.double() + direction
+                    native_norm_weight = decoded.double() + (up.double() @ down.double())
+                    expected = adapted * (magnitude.double().reshape(-1) / native_norm_weight.norm(dim=1))[:, None] - decoded.double()
+                    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+    def test_quantized_base_working_budget_rejects_before_decoding_payload(self):
+        with self.temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            name = "diffusion_model.block.proj"
+            base_path = root / "marked.safetensors"
+            # Valid-looking marked layout is enough: the budget check must be
+            # performed from header dimensions before reading codes/scales.
+            save_file({
+                name + ".weight": torch.zeros((64, 64), dtype=torch.int8),
+                name + ".weight_scale": torch.ones((64, 1)),
+                name + ".comfy_quant": torch.tensor(
+                    list(b'{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":64}'),
+                    dtype=torch.uint8,
+                ),
+            }, base_path)
+            source = root / "dora.safetensors"
+            down, up = make_spectral_factors(rank=3, width=64)
+            save_file({
+                name + ".lora_down.weight": down,
+                name + ".lora_up.weight": up,
+                name + ".dora_scale": torch.ones((64, 1)),
+            }, source)
+            from unittest.mock import patch
+
+            with patch("toolkit.lora_trimming.decode_checkpoint_weight",
+                       side_effect=AssertionError("decoded before budget admission")) as decode:
+                with self.assertRaisesRegex(ValueError, "working-memory estimate"):
+                    trim_lora(source, bake_dora_to_lora=True, base_model_path=base_path,
+                              dora_convention="toolkit", max_working_mb=0.01)
+                decode.assert_not_called()
 
     def test_zero_update_is_finite_and_keeps_a_nonzero_rank(self):
         down = torch.zeros((3, 4), dtype=torch.float32)

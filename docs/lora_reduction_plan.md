@@ -68,7 +68,8 @@ files, external libraries, services or training jobs are changed.
 
 `bake_dora_to_lora=False`, `base_model_path=None`, `dora_convention=None`
 are additive file API options. Baking requires an explicit matching local single
-floating safetensors base file and explicit `comfy` or `toolkit` convention.
+safetensors base file and explicit `comfy` or `toolkit` convention. The original
+floating-only support is extended below with specific quantized codecs.
 The suffix alone cannot establish the intended consumer: toolkit exports can
 rename native magnitude to `.dora_scale`.
 
@@ -77,7 +78,7 @@ For output-row magnitudes, standard ComfyUI float32 patching uses
 toolkit/native uses `m/norm(W+scaled_direction)`, with ratio one on exactly-zero
 adapted rows. Compute the resulting full effective delta relative to W, then
 reduce that delta as ordinary LoRA. Magnitude may be removed only after this
-calculation. Reject quantized/auxiliary-scale bases, ambiguous key matching,
+calculation. Reject unsupported quantized/auxiliary-scale bases, ambiguous key matching,
 shape mismatches, unsupported magnitude axes and a missing explicit convention.
 Perform one-layer CPU float64 baking/SVD under the same working-memory admission
 budget; this opt-in path necessarily materializes a dense layer. No base-model
@@ -102,3 +103,78 @@ DoRA strengths can be nonlinear, so other strengths are not promised equivalent.
 Coordinator integration complete. Production build passed; only the UI branch
 was reloaded, preserving the queue worker. See
 [extension validation evidence](lora_trimming_validation.md#reducer-extension-and-dora-baking).
+
+## Quantized-base baking extension
+
+User scope clarification: support the DoRA families this fork can actually train,
+including MOSS split-QKV exports and native LoHa with DoRA (DoHa). Audit the
+actual training forward, normalization, bias, and export conversions; compare
+synthetic baked outputs with real loaders/forwards. Native DoRAModule currently
+rejects Conv2d; DoHa supports restricted Conv2d. Do not add new training modes.
+Extend existing CPU checkpoint codecs for FP8, int8/ConvRot8, NVFP4, W4A8 and
+exported ConvRot W4A4, with strict layout validation. AWQ normalization and
+forward weight views must remain separate. Native scaled biases require an
+explicit bias delta understood by inference loaders. Keep full-strength static
+weight equivalence distinct from dynamic activation quantization/low-precision
+arithmetic and numerical retention distinct from visual quality.
+
+Add a lightweight per-weight storage descriptor/CPU decoder shared helper in
+`toolkit/util/checkpoint_weights.py`. Support explicitly tensor-marked Comfy
+`int8_tensorwise` with FP32 per-row scales, including convrot8's self-inverse
+regular-Hadamard input-axis rotation. Support marked `float8_e4m3fn` with one
+FP32 scale. FP8/NVFP4's optional `full_precision_matrix_mult` accepts absent,
+true or false, since the stored-weight decoding matches the native import path;
+it does not establish activation-quantization parity. Reuse the toolkit quantizers'
+`dequantize` implementation rather than a second quantization codec; this matches
+the operation used by `OstrisLinear.weight`, without assuming that future
+activation-folded codecs have the same meaning.
+Validate marker JSON/dtype, code dtype, exact scale layout, rotation power-of-four
+and divisibility, positive finite scales, and final logical shape/values. Never
+crop padding or infer a rotation, scale, packed layout or unsupported format.
+
+Index headers/descriptors only; admit dense baking/SVD **plus decoder/rotation
+working storage** before reading/dequantizing the selected weight. Read at most
+one base layer at a time. Bind decoder semantics through the reducer algorithm
+version and preserve the full base-file hash (including markers/scales/metadata).
+Report quantization format/rotation/storage dtype, normalization epsilon and
+selected reconstruction dtype. Do not load full models, change external codecs,
+download weights, or invoke GPU kernels. FIBO2 canonical qkv/w13/MLP checkpoint
+names already match native adapter targets; structural split/fuse, kernel-layout
+or architecture remapping remains out of scope and fails exact shape matching.
+
+`base_dequant_dtype='float32'` optionally selects `bfloat16` or `float16` after
+quantized decoding to reproduce the training weight-view cast. Floating stored
+weights are unchanged. The setting participates in token identity and reports;
+non-default values require baking. Normalization/SVD still use FP64 and Comfy
+epsilon stays FP32. Static decoded-weight equivalence does not claim activation
+quantization or bit-exact low-precision/GPU forward equivalence. Root owns the
+existing-modal dtype selector/context; test owner verifies synthetic codec
+exports against actual training views and the existing bake/loader path.
+
+## Native-layout follow-up: MOSS, bias and DoHa
+
+The initial linear pair discovery misses MOSS's actual export: separate q/k/v
+factors (identical down projection and alpha, row-split up) with one fused QKV
+magnitude. Recognize this complete provable layout as one logical layer,
+validate all equal/shared invariants, reduce/bake jointly, and write compatible
+public split factors. Preserve fused magnitude only for unbaked native DoRA.
+Do not patch external models or silently discard leftover magnitude tensors.
+
+Match the fork's actual scalar native DoRA forward: normalization receives
+unscaled B@A, while the forward adapter update applies alpha/rank. Native biased
+linears additionally rescale the frozen bias; retain their exact bias delta as
+the supported `.diff_b` patch (ComfyUI and toolkit inference consumers), report
+that requirement, and preserve validated bias patches on ordinary-LoRA retrims.
+The ordinary training LoRA loader does not automatically apply `.diff_b`.
+Native DoRA's constructor explicitly rejects Conv2d, so adding convolution
+training is outside this request.
+
+DoHa is a native trainable magnitude-normalized LoHa, including flattened
+ungrouped/zero-padded Conv2d. Enable explicit base-aware baking of its 2D
+Hadamard-factor expansion, preserving promoted source output precision and
+preflighting expansion plus dense baking together. Public `.dora_scale` is
+already Comfy-normalized by the export hook; native magnitude uses the scaled
+Hadamard adapted-row norm with the module's FP32/FP64 tiny floor. Validate that
+known convention rather than normalizing exported magnitudes twice. For a
+matching 4D base, reshape baked ordinary factors using the explicit kernel
+dimensions; no guessed convolution layout, CP/Tucker or DoKr support.

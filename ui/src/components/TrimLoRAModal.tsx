@@ -10,13 +10,25 @@ import { encodeFilePathForUrl, getFilename } from '@/utils/basic';
 interface TrimLoRAModalState {
   path: string;
   initialBaseModelPath: string;
+  initialBaseDequantDtype: string;
   onCreated?: () => void;
   returnFocus: HTMLElement | null;
 }
 
 export const trimLoRAModalState = createGlobalState<TrimLoRAModalState | null>(null);
 
-export const openTrimLoRAModal = (path: string, onCreated?: () => void, trainingBaseModelPath?: string) => {
+const trainingPrecision = (dtype?: string) => {
+  if (dtype === 'bf16' || dtype === 'bfloat16') return 'bfloat16';
+  if (dtype === 'fp16' || dtype === 'float16') return 'float16';
+  return 'float32';
+};
+
+export const openTrimLoRAModal = (
+  path: string,
+  onCreated?: () => void,
+  trainingBaseModelPath?: string,
+  trainingDtype?: string,
+) => {
   trimLoRAModalState.set({
     path,
     initialBaseModelPath:
@@ -25,6 +37,7 @@ export const openTrimLoRAModal = (path: string, onCreated?: () => void, training
       trainingBaseModelPath.endsWith('.safetensors')
         ? trainingBaseModelPath
         : '',
+    initialBaseDequantDtype: trainingPrecision(trainingDtype),
     onCreated,
     returnFocus: document.activeElement instanceof HTMLElement ? document.activeElement : null,
   });
@@ -160,6 +173,7 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
   const [bakeDoRA, setBakeDoRA] = useState(false);
   const [baseModelPath, setBaseModelPath] = useState(info.initialBaseModelPath);
   const [doraConvention, setDoraConvention] = useState('');
+  const [baseDequantDtype, setBaseDequantDtype] = useState(info.initialBaseDequantDtype);
   const [maxWorkingMB, setMaxWorkingMB] = useState<number | null>(512);
   const [outputName, setOutputName] = useState(
     () => getFilename(info.path).replace(/\.safetensors$/i, '') + '_trimmed.safetensors',
@@ -275,6 +289,7 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
           'bake-dora-to-lora': bakeDoRA,
           'base-model-path': bakeDoRA ? baseModelPath : undefined,
           'dora-convention': bakeDoRA ? doraConvention : undefined,
+          'base-dequant-dtype': bakeDoRA ? baseDequantDtype : undefined,
           'max-working-mb': effectiveWorkingMB!,
           output: write ? outputPathFor(info.path, outputName) : undefined,
           'expected-preview': write ? preview!.preview_token : undefined,
@@ -397,8 +412,9 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
                   }}
                 />
                 <p className="text-xs text-gray-400">
-                  Required: a single local, floating-point .safetensors checkpoint matching this adapter. The server
-                  validates its weights and layer shapes.
+                  Required: a matching local .safetensors checkpoint. Floating weights, Comfy ConvRot8 / int8, FP8,
+                  NVFP4, W4A8 and ConvRot W4A4 are supported with their quantization metadata. Other layouts fail with
+                  details.
                 </p>
                 <SelectInput
                   id={`${id}-dora-convention`}
@@ -417,7 +433,26 @@ function TrimLoRAForm({ info }: { info: TrimLoRAModalState }) {
                 />
                 <p className="text-xs text-gray-400">
                   Required: choose how you normally load the adapter. A tensor-key suffix alone cannot determine the
-                  normalization convention.
+                  normalization convention. Exported DoHa uses ComfyUI; native DoHa magnitude uses AI Toolkit.
+                </p>
+                <SelectInput
+                  id={`${id}-base-dequant-dtype`}
+                  label="Quantized base precision"
+                  value={baseDequantDtype}
+                  disabled={busy !== null}
+                  options={[
+                    { value: 'float32', label: 'FP32' },
+                    { value: 'bfloat16', label: 'BF16' },
+                    { value: 'float16', label: 'FP16' },
+                  ]}
+                  onChange={value => {
+                    setBaseDequantDtype(value);
+                    invalidatePreview();
+                  }}
+                />
+                <p className="text-xs text-gray-400">
+                  Used only for quantized weights. Prefilled from the job training dtype; editable. Choose the precision
+                  used during training. FP32 is used when no supported training dtype is available.
                 </p>
               </div>
             )}

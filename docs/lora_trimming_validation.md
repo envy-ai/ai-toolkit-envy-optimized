@@ -1,5 +1,52 @@
 # Adaptive LoRA trimming validation
 
+## Quantized bases, MOSS and trainable DoRA families
+
+The quantized-base extension uses reducer algorithm `qr_core_svd_v4` and weight
+decoder `comfy_logical_weight_v2`. All fixtures are synthetic, CPU-only and
+temporary. Verification ran inside transient systemd units/scopes with
+`MemoryMax=16G`, `MemorySwapMax=0`; project Python used Conda `ai-toolkit`.
+
+- Full `testing/test_lora_trimming.py`: **35 tests and 57 subtests passed**.
+  After final test-only additions, the two affected cases passed again (two
+  tests, five subtests); unaffected full-suite passes were retained. Peak host
+  memory was 577.7 MiB for the full run and 530.2 MiB for the targeted run;
+  swap was zero. Coverage includes actual native DoRAModule forward with
+  alpha different from rank, scaled base bias, `.diff_b` through the real
+  InferenceLoRA hook, MOSS fused-magnitude/split-QKV loader compatibility,
+  and actual DoHa linear/Conv2d behavior and source factor dtype preservation.
+- Actual quantizers/exporters verify ConvRot8, plain int8, FP8, legacy scaled
+  FP8, header-described FP8, NVFP4, W4A8 and exported ConvRot W4A4 logical
+  weights. Reconstruction uses the stored training view, including BF16;
+  tests cover scaling/alpha, metadata, no-clobber copies, base/source hash
+  preservation, precision-bound previews and pre-decode memory rejection.
+- `testing/test_checkpoint_weights.py` adds W4A8 FP8/FP32 relative scales,
+  optional codebook/correction, AWQ native and Comfy output bases with unequal
+  alpha/rank, invalid packed shapes/configuration and nonfinite/nonpositive
+  scales. Initial execution exposed two test expectation/fixture errors.
+  The two affected methods passed after correction (two subtests), retaining
+  the unaffected W4A8 variant and AWQ invalid-scale passes. Peak was 373 MiB,
+  swap zero. Diagnostic logs are under `tmp/lora-quant-bake/`.
+- `ui/tests/lora-trim-api.test.cjs`: the real scripts route and Python CLI
+  passed, including the ConvRot8 BF16 reconstruction flag (446.7 MiB peak,
+  zero swap). Browser tests exercise the real preview/create flow, codec and
+  dtype reporting, preview invalidation after precision edits, immutable source
+  files, and explicit bake/convention choices. A focused final 390 px check
+  passed prefill, edit/toggle/reopen behavior and updated format/DoHa guidance;
+  screenshot: `tmp/lora-trim/quantized-bake-mobile.png`. Browser peak telemetry
+  was not captured; its 16 GiB/no-swap scope limits were enforced.
+- Final standalone UI typecheck and `npm run build` passed. The build used
+  3 min 22 s, peaked at 14.1 GiB and used no swap. Only the production UI branch
+  was reloaded: the queue worker remained PID 656564. A scoped live check
+  returned HTTP 200 and verified the new control/support copy in served assets.
+  The isolated test server was stopped afterward.
+
+These checks establish static full-strength weight/bias reconstruction and
+loading for the documented formats. They do not establish visual quality,
+bit-exact low-precision/GPU arithmetic, dynamic activation-quantized output
+equivalence, or arbitrary undocumented checkpoint layouts. AWQ outputs are
+consumer-specific; native biased bakes require a `.diff_b`-capable loader.
+
 All executions use synthetic tensors/checkpoints under `tmp/lora-trim` or
 temporary directories under `tmp`. No user checkpoint was trimmed, no GPU job
 was launched, and no training process was stopped.

@@ -19,8 +19,12 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from toolkit.lora_analysis import _normalized_module_name
+from toolkit.util.checkpoint_weights import (
+    WEIGHT_DECODER, checkpoint_input_scale, decode_checkpoint_weight, describe_checkpoint_weight,
+)
 
-ALGORITHM = "qr_core_svd_v2"
+ALGORITHM = "qr_core_svd_v4"
+BASE_DEQUANT_DTYPES = ('float32', 'bfloat16', 'float16')
 _FLOATS = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
 # Safetensors orders by descending dtype enum, then tensor name. See
 # huggingface/safetensors safetensors/src/tensor.rs: prepare(), Dtype.
@@ -255,12 +259,12 @@ def _check_metadata(metadata, formats):
             label = str(value).lower()
             if any(token in label for token in ('oft', 'ia3', 'loha', 'lokr', 'dora', 'lycoris')):
                 family = next((token for token in ('loha', 'lokr', 'dora') if token in label), None)
-                if family not in formats and not ('lycoris' in label and formats <= {'loha', 'lokr'}):
+                if family not in formats and not (family == 'loha' and 'doha' in formats) and not ('lycoris' in label and formats <= {'loha', 'lokr', 'doha'}):
                     raise ValueError(f"Adapter metadata {key}={value} conflicts with recognized tensor formats {sorted(formats)}")
         if key.lower() in ('use_rslora', 'rs_lora', 'rank_stabilized', 'use_rank_stabilized_lora') and enabled(value):
             raise ValueError(f"Unsupported rsLoRA scaling in metadata {key}")
-        if key.lower() in ('use_dora', 'loha_dora') and enabled(value) and formats != {'dora'}:
-            raise ValueError('DoRA metadata requires recognized magnitude tensors; DoHa conversion is unsupported')
+        if key.lower() in ('use_dora', 'loha_dora') and enabled(value) and formats not in ({'dora'}, {'doha'}):
+            raise ValueError('DoRA/DoHa metadata requires recognized magnitude tensors consistent with one adapter family')
         if isinstance(value, dict):
             for nested_key, nested_value in value.items():
                 check(nested_key, nested_value)
@@ -285,19 +289,51 @@ def _layers(keys):
         missing = set(required) - keys
         if missing:
             raise ValueError(f'Incomplete {kind} factors for {name}: missing {sorted(missing)}')
-        extras = {name + '.alpha'} & keys
+        extras = {name + '.alpha', name + '.diff_b'} & keys
         magnitudes = {name + suffix for suffix in _MAGNITUDES} & keys
         if len(magnitudes) > 1:
             raise ValueError(f'Ambiguous DoRA magnitude tensors for {name}')
-        if magnitudes and kind != 'lora':
-            raise ValueError(f'{name}: DoHa/LoKr magnitude conversion is unsupported')
-        kind = 'dora' if magnitudes else kind
+        if magnitudes and kind not in ('lora', 'loha'):
+            raise ValueError(f'{name}: LoKr magnitude conversion is unsupported')
+        if magnitudes and name+'.diff_b' in extras:
+            raise ValueError(f'{name}: a source DoRA/DoHa plus an external bias delta is ambiguous')
+        kind = ('doha' if kind == 'loha' else 'dora') if magnitudes else kind
         layer_keys = set(required) | extras | magnitudes
         consumed.update(layer_keys)
         found[name] = dict(name=name, kind=kind, keys=layer_keys,
-                           factors=list(required), magnitude=next(iter(magnitudes), None))
+                           factors=list(required), magnitude=next(iter(magnitudes), None), split_qkv=None)
+
+    # MOSS saves one fused DoRA magnitude after its model hook has split the
+    # shared A and row-sliced B into public q/k/v factors. Reconstruct exactly
+    # that known layout as one logical layer instead of dropping its magnitude.
+    for magnitude_key in sorted(keys):
+        suffix = next((suffix for suffix in _MAGNITUDES if magnitude_key.endswith('.proj.qkv'+suffix)), None)
+        if suffix is None:
+            continue
+        name = magnitude_key[:-len(suffix)]
+        root = name[:-len('qkv')]
+        pairs = [pair for pair in _PAIRS if root+'q'+pair[0] in keys]
+        if not pairs:
+            continue  # An ordinary fused qkv pair is discovered below.
+        if len(pairs) != 1:
+            raise ValueError(f'{name}: ambiguous split QKV factor conventions')
+        pair = pairs[0]
+        names = [root+projection for projection in ('q', 'k', 'v')]
+        required = [part+suffix for part in names for suffix in pair]
+        add(name, 'lora', required)
+        part_alpha = {part+'.alpha' for part in names} & keys
+        part_magnitudes = {part+suffix for part in names for suffix in _MAGNITUDES} & keys
+        if part_magnitudes or name+'.alpha' in keys:
+            raise ValueError(f'{name}: conflicting fused/split QKV magnitude or alpha tensors')
+        if part_alpha and len(part_alpha) != 3:
+            raise ValueError(f'{name}: split QKV alpha must be present for all three projections or absent for all')
+        found[name]['keys'].update(part_alpha)
+        consumed.update(part_alpha)
+        found[name]['split_qkv'] = dict(names=names, pair=pair)
 
     for key in sorted(keys):
+        if key in consumed:
+            continue
         pair = next((pair for pair in _PAIRS if key.endswith(pair[0])), None)
         if pair:
             name = key[:-len(pair[0])]
@@ -321,6 +357,20 @@ def _layers(keys):
         raise ValueError('Unrecognized/unsupported tensors (CP/Tucker, biases and scalars are not inferred): '
                          + ', '.join(sorted(keys - consumed)[:8]))
     return list(found.values())
+
+
+def _split_qkv_factors(layer, tensors):
+    names, pair = layer['split_qkv']['names'], layer['split_qkv']['pair']
+    downs = [tensors[name+pair[0]] for name in names]
+    ups = [tensors[name+pair[1]] for name in names]
+    if any(t.ndim != 2 for t in (*downs, *ups)) or any(t.shape != downs[0].shape or t.dtype != downs[0].dtype or not torch.equal(t, downs[0]) for t in downs[1:]):
+        raise ValueError(f"{layer['name']}: fused-magnitude MOSS QKV requires the exact shared down projection written by the toolkit exporter")
+    if any(t.shape != ups[0].shape or t.dtype != ups[0].dtype for t in ups) or ups[0].shape[1] != downs[0].shape[0]:
+        raise ValueError(f"{layer['name']}: split QKV up projections must have equal output widths and matching ranks")
+    alphas = [tensors.get(name+'.alpha') for name in names]
+    if alphas[0] is not None and any(not torch.equal(t, alphas[0]) or t.dtype != alphas[0].dtype for t in alphas[1:]):
+        raise ValueError(f"{layer['name']}: split QKV alpha values must agree exactly")
+    return downs[0], torch.cat(ups, 0), alphas[0]
 
 
 def _conversion_factors(parts, kind, alpha, max_working_mb):
@@ -391,23 +441,18 @@ def _conversion_factors(parts, kind, alpha, max_working_mb):
 
 def _base_index(path):
     """Index exact/dotted and recognized kohya-flat names; never guess a model."""
-    index = {}
+    index, descriptors = {}, {}
     with safe_open(str(path), framework='pt', device='cpu') as handle:
         keys = set(handle.keys())
-        if any(any(marker in key.lower() for marker in ('.comfy_quant', 'weight_scale', '.quant_state', '.weight._', '.scale_weight')) for key in keys):
-            raise ValueError('DoRA baking requires a plain floating base; quantization/scaling auxiliary tensors are unsupported')
+        metadata = handle.metadata() or {}
         for key in keys:
             if not key.endswith('.weight'):
                 continue
-            if key.removesuffix('.weight')+'.scale' in keys:
-                raise ValueError(f'DoRA baking does not infer auxiliary base scale tensors for {key}')
-            weight = handle.get_slice(key)
-            if weight.get_dtype() not in ('F16', 'BF16', 'F32', 'F64'):
-                raise ValueError(f'DoRA baking requires a plain floating base: {key} is {weight.get_dtype()}')
+            descriptors[key] = describe_checkpoint_weight(handle, key, keys, metadata)
             normalized = _normalized_module_name(key)
             for label in {normalized, normalized.replace('.', '_')}:
                 index.setdefault(label, set()).add(key)
-    return index
+    return index, descriptors
 
 
 def _base_weight_key(name, index):
@@ -423,36 +468,73 @@ def _base_weight_key(name, index):
     return next(iter(matches))
 
 
-def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, convention, max_working_mb):
+def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, convention, max_working_mb,
+                       descriptor, base_dequant_dtype, *, adapter_kind='dora', source_dtype=None):
     if down.ndim != 2 or up.ndim != 2 or up.shape[1] != down.shape[0]:
         raise ValueError('DoRA baking currently supports linear factor pairs only')
     rows, columns = up.shape[0], down.shape[1]
-    if convention == 'comfy' and tuple(magnitude.shape) != (rows, 1):
+    if convention == 'comfy' and tuple(magnitude.shape) not in ((rows, 1), (rows, 1, 1, 1)):
         raise ValueError('Comfy DoRA baking requires unambiguous output-axis magnitude shape (output_rows, 1); input-axis/1D layouts are unsupported')
     rank = min(rows, columns)
-    estimate = 8*(12*rows*columns + 32*rank*rank + 8*(rows+columns)*rank)
+    if (len(descriptor.shape) not in (2, 4) or descriptor.shape[0] != rows
+            or math.prod(descriptor.shape[1:]) != columns):
+        raise ValueError(f'{base_key}: base shape {descriptor.shape} does not match adapter {(rows, columns)}')
+    if len(descriptor.shape) == 4 and adapter_kind != 'doha':
+        raise ValueError('Native DoRA training supports linear layers only; convolution baking requires a recognized DoHa layout')
+    estimate = 8*(12*rows*columns + 32*rank*rank + 8*(rows+columns)*rank) + descriptor.decode_working_bytes
     if estimate > max_working_mb*1024**2:
         raise ValueError(f'DoRA baking working-memory estimate {estimate} bytes exceeds max_working_mb={max_working_mb}; dense effective-delta SVD requires an explicit sufficient CPU budget')
     with safe_open(str(base_path), framework='pt', device='cpu') as handle:
-        stored = handle.get_slice(base_key)
-        if tuple(stored.get_shape()) != (rows, columns):
-            raise ValueError(f'{base_key}: base shape {stored.get_shape()} does not match adapter {(rows, columns)}')
-        weight = handle.get_tensor(base_key)
+        weight = decode_checkpoint_weight(handle, descriptor)
+        if descriptor.quant_format != 'floating':
+            # OstrisLinear.weight applies exactly this orig-dtype cast to the
+            # decoded logical weight; callers choose the training-view dtype.
+            weight = weight.to(getattr(torch, base_dequant_dtype))
+        input_scale = checkpoint_input_scale(handle, descriptor)
+        bias_key = base_key.removesuffix('.weight')+'.bias'
+        base_bias = None
+        if adapter_kind == 'dora' and convention == 'toolkit' and bias_key in handle.keys():
+            bias_header = handle.get_slice(bias_key)
+            if tuple(bias_header.get_shape()) != (rows,) or bias_header.get_dtype() not in ('F16', 'BF16', 'F32', 'F64'):
+                raise ValueError(f'{bias_key}: expected a floating bias of shape ({rows},)')
+            base_bias = handle.get_tensor(bias_key)
     if not torch.isfinite(weight).all() or not torch.isfinite(down).all() or not torch.isfinite(up).all():
         raise ValueError('DoRA baking inputs contain nonfinite values')
+    weight = weight.flatten(1)
     scale = alpha/down.shape[0] if alpha is not None else 1.0
-    adapted = weight.double() + (up.double() @ down.double())*scale
+    unscaled_direction = up.double() @ down.double()
+    direction = unscaled_direction*scale
+    forward_weight = weight.double()
+    if input_scale is not None and convention == 'toolkit':
+        # AWQ is applied to the input of the frozen base only. The adapter
+        # branch still sees raw inputs; normalization uses the stored view.
+        forward_weight = forward_weight*input_scale.double()[None]
+    adapted = forward_weight + direction
     if convention == 'comfy':
         # Standard Comfy model patching calculates weights in float32, even
         # when the checkpoint stores bf16/fp16. Keep its epsilon explicit.
         denominator = weight.double().norm(dim=1) + torch.finfo(torch.float32).eps
         ratio = magnitude.double().reshape(-1)/denominator
     else:
-        norm = adapted.norm(dim=1)
-        zero = norm == 0
-        denominator = torch.where(zero, torch.ones_like(norm), norm)
-        ratio = torch.where(zero, torch.ones_like(norm), magnitude.double().reshape(-1)/denominator)
-    effective_delta = adapted*ratio[:, None] - weight.double()
+        # Current scalar native DoRAModule normalizes with unscaled B@A,
+        # while its adapter forward applies alpha/rank. DoHa uses scaled H.
+        normalization_update = unscaled_direction if adapter_kind == 'dora' else direction
+        norm = (weight.double()+normalization_update).norm(dim=1)
+        if adapter_kind == 'doha':
+            norm_dtype = torch.float64 if source_dtype == torch.float64 else torch.float32
+            ratio = magnitude.double().reshape(-1)/norm.clamp_min(torch.finfo(norm_dtype).tiny)
+        else:
+            zero = norm == 0
+            denominator = torch.where(zero, torch.ones_like(norm), norm)
+            ratio = torch.where(zero, torch.ones_like(norm), magnitude.double().reshape(-1)/denominator)
+    effective_delta = adapted*ratio[:, None] - forward_weight
+    bias_delta = None
+    if base_bias is not None:
+        if not torch.isfinite(base_bias).all():
+            raise ValueError(f'{bias_key}: base bias contains nonfinite values')
+        bias_delta = (ratio-1)*base_bias.double()
+        if not torch.isfinite(bias_delta).all():
+            raise ValueError('DoRA bias delta exceeds the supported float64 numeric range')
     if not torch.isfinite(effective_delta).all():
         raise ValueError('DoRA effective delta exceeds the supported float64 numeric range')
     u, singular, vh = torch.linalg.svd(effective_delta, full_matrices=False)
@@ -460,7 +542,12 @@ def _bake_dora_factors(base_path, base_key, down, up, magnitude, alpha, conventi
     # Preserve explicit alpha, compensating the ordinary expanded alpha/rank
     # scale. Missing alpha remains the standalone unit-scale convention.
     compensation = rank/alpha if alpha is not None else 1.0
-    return roots[:, None]*vh, u*(roots*compensation)[None], torch.promote_types(down.dtype, up.dtype), estimate
+    weight_info = dict(**descriptor.report(), reconstruction_dtype=str(weight.dtype).removeprefix('torch.'),
+        normalization_dtype='float64', requested_dequant_dtype=base_dequant_dtype if descriptor.quant_format != 'floating' else None,
+        forward_input_scale=input_scale is not None,
+        output_basis='awq_stored_weight' if input_scale is not None and convention == 'comfy' else 'raw_input',
+        normalization_update='unscaled_BA' if adapter_kind == 'dora' and convention == 'toolkit' else 'scaled_update')
+    return roots[:, None]*vh, u*(roots*compensation)[None], source_dtype or torch.promote_types(down.dtype, up.dtype), estimate, weight_info, bias_delta
 
 
 def _check_missing_alpha(path, metadata, rank):
@@ -504,13 +591,16 @@ def _destination(output, source):
 def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, max_rank=None,
               output=None, expected_preview=None, progress: Callable[[str], None] | None = None,
               rank_policy=None, rank_value=None, convert_to_lora=False, max_working_mb=512,
-              bake_dora_to_lora=False, base_model_path=None, dora_convention=None):
+              bake_dora_to_lora=False, base_model_path=None, dora_convention=None,
+              base_dequant_dtype='float32'):
     """Preview or atomically publish a new adapter, never replacing files."""
     options = _options(retained_energy, relative_error, min_rank, max_rank, rank_policy, rank_value)
     if type(convert_to_lora) is not bool:
         raise ValueError('convert_to_lora must be a boolean')
     if type(bake_dora_to_lora) is not bool:
         raise ValueError('bake_dora_to_lora must be a boolean')
+    if base_dequant_dtype not in BASE_DEQUANT_DTYPES:
+        raise ValueError(f'base_dequant_dtype must be one of {BASE_DEQUANT_DTYPES}')
     if bake_dora_to_lora:
         if not base_model_path or dora_convention not in ('comfy', 'toolkit'):
             raise ValueError('DoRA baking requires base_model_path and an explicit dora_convention: comfy or toolkit')
@@ -518,10 +608,13 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
             raise ValueError('Choose DoRA baking OR LoHa/LoKr conversion, not both')
     elif base_model_path is not None or dora_convention is not None:
         raise ValueError('base_model_path/dora_convention are only valid with bake_dora_to_lora=True')
+    elif base_dequant_dtype != 'float32':
+        raise ValueError('A non-default base_dequant_dtype is only valid with bake_dora_to_lora=True')
     if isinstance(max_working_mb, bool) or not isinstance(max_working_mb, (int, float)) or not math.isfinite(max_working_mb) or max_working_mb <= 0:
         raise ValueError('max_working_mb must be a positive finite number')
     options.update(convert_to_lora=convert_to_lora, max_working_mb=max_working_mb,
-                   bake_dora_to_lora=bake_dora_to_lora, dora_convention=dora_convention)
+                   bake_dora_to_lora=bake_dora_to_lora, dora_convention=dora_convention,
+                   base_dequant_dtype=base_dequant_dtype)
     source = Path(path).expanduser().resolve(strict=True)
     if not source.is_file() or source.suffix.lower() != '.safetensors':
         raise ValueError("Input must be a standalone .safetensors LoRA; pickle/adapter directories are not loaded")
@@ -535,9 +628,9 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
     if bake_dora_to_lora:
         base_path = Path(base_model_path).expanduser().resolve(strict=True)
         if not base_path.is_file() or base_path.suffix.lower() != '.safetensors' or base_path == source:
-            raise ValueError('DoRA baking requires a separate local single floating .safetensors base checkpoint')
-        base_info = dict(path=str(base_path), sha256=_sha256(base_path))
-        base_index = _base_index(base_path)
+            raise ValueError('DoRA baking requires a separate local single .safetensors base checkpoint')
+        base_info = dict(path=str(base_path), sha256=_sha256(base_path), weight_decoder=WEIGHT_DECODER)
+        base_index, base_descriptors = _base_index(base_path)
     token = hashlib.sha256(_json(dict(source_sha256=source_hash, options=options,
         base_model=base_info, algorithm=ALGORITHM)).encode()).hexdigest()
     if expected_preview is not None and expected_preview != token:
@@ -554,7 +647,9 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
             raise ValueError('LoHa/LoKr require explicit convert_to_lora=True (--convert-to-lora); output will be ordinary LoRA')
         if converted and len(formats) != 1:
             raise ValueError('Mixed adapter families cannot be converted with a single unambiguous output-format metadata contract')
-        if bake_dora_to_lora and formats != {'dora'}:
+        if 'doha' in formats and not bake_dora_to_lora:
+            raise ValueError('DoHa requires explicit base-aware DoRA baking; its magnitude cannot be dropped during LoHa conversion')
+        if bake_dora_to_lora and formats not in ({'dora'}, {'doha'}):
             raise ValueError('DoRA baking requires a checkpoint with recognized DoRA magnitude tensors on every layer')
         original_metadata = dict(metadata)
         input_tensor_bytes = 0
@@ -565,9 +660,10 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
             tensors = {key: handle.get_tensor(key) for key in layer['keys']}
             input_tensor_bytes += sum(t.numel()*t.element_size() for t in tensors.values())
             alpha_key = name + '.alpha'
+            group_down, group_up, group_alpha = _split_qkv_factors(layer, tensors) if layer['split_qkv'] else (None, None, None)
+            alpha_tensor = group_alpha if layer['split_qkv'] else tensors.get(alpha_key)
             alpha = None
-            if alpha_key in tensors:
-                alpha_tensor = tensors[alpha_key]
+            if alpha_tensor is not None:
                 if alpha_tensor.numel() != 1 or alpha_tensor.dtype not in _DTYPES:
                     raise ValueError(f"Invalid alpha tensor: {alpha_key}")
                 alpha = float(alpha_tensor.item())
@@ -575,31 +671,47 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
                     raise ValueError(f'{name}: alpha must be finite and nonzero; alpha=0 has ambiguous loader semantics')
             output_name = name
             base_key = None
-            if kind in ('loha', 'lokr'):
+            base_weight_info = None
+            bias_delta = None
+            if kind in ('loha', 'lokr', 'doha'):
                 parts = {key[len(name)+1:]: tensors[key] for key in layer['factors']}
-                down, up, output_dtype, stored_rank, input_scale, estimate = _conversion_factors(parts, kind, alpha, max_working_mb)
+                down, up, output_dtype, stored_rank, input_scale, estimate = _conversion_factors(parts, 'loha' if kind == 'doha' else kind, alpha, max_working_mb)
                 if alpha is None and stored_rank is not None:
                     _check_missing_alpha(source, metadata, stored_rank)
                 if name.startswith('lycoris_'):
                     output_name = 'lora_transformer_' + name[len('lycoris_'):]
                 down_key, up_key = output_name + '.lora_down.weight', output_name + '.lora_up.weight'
             else:
-                down_key, up_key = layer['factors']
-                down, up = tensors[down_key], tensors[up_key]
+                if layer['split_qkv']:
+                    down_key, up_key = (name+suffix for suffix in layer['split_qkv']['pair'])
+                    down, up = group_down, group_up
+                else:
+                    down_key, up_key = layer['factors']
+                    down, up = tensors[down_key], tensors[up_key]
                 output_dtype, stored_rank, input_scale, estimate = None, down.shape[0], None, None
                 if alpha is None:
                     _check_missing_alpha(source, metadata, stored_rank)
-                if kind == 'dora':
-                    magnitude = tensors[layer['magnitude']]
-                    if down.ndim != 2 or up.ndim != 2 or magnitude.ndim < 1 or magnitude.dtype not in _FLOATS or magnitude.shape[0] != up.shape[0] or magnitude.numel() != up.shape[0] or not torch.isfinite(magnitude).all():
-                        raise ValueError(f'{name}: DoRA magnitude must be a finite per-output-channel vector (or singleton trailing dimensions) for linear factors')
-                    if bake_dora_to_lora:
-                        base_key = _base_weight_key(name, base_index)
-                        input_scale = alpha/stored_rank if alpha is not None else 1.0
-                        down, up, output_dtype, estimate = _bake_dora_factors(base_path, base_key,
-                            down, up, magnitude, alpha, dora_convention, max_working_mb)
-                    else:
-                        result_tensors[layer['magnitude']] = magnitude.clone().contiguous()
+            if kind in ('dora', 'doha'):
+                magnitude = tensors[layer['magnitude']]
+                if down.ndim != 2 or up.ndim != 2 or magnitude.ndim < 1 or magnitude.dtype not in _FLOATS or magnitude.shape[0] != up.shape[0] or magnitude.numel() != up.shape[0] or not torch.isfinite(magnitude).all():
+                    raise ValueError(f'{name}: DoRA/DoHa magnitude must be a finite per-output-channel vector (or singleton trailing dimensions)')
+                if kind == 'doha':
+                    expected_convention = 'comfy' if layer['magnitude'].endswith('.dora_scale') else 'toolkit'
+                    if dora_convention != expected_convention:
+                        raise ValueError(f'{name}: exported DoHa .dora_scale is already Comfy-normalized; native .magnitude uses toolkit normalization. Select {expected_convention} for this magnitude key')
+                if bake_dora_to_lora:
+                    base_key = _base_weight_key(name, base_index)
+                    input_scale = alpha/stored_rank if alpha is not None else 1.0
+                    bake_budget = max_working_mb - (estimate or 0)/1024**2
+                    if bake_budget <= 0:
+                        raise ValueError(f'{name}: factor expansion leaves no working-memory budget for baking')
+                    down, up, output_dtype, bake_estimate, base_weight_info, bias_delta = _bake_dora_factors(base_path, base_key,
+                        down, up, magnitude, alpha, dora_convention, bake_budget,
+                        base_descriptors[base_key], base_dequant_dtype, adapter_kind=kind,
+                        source_dtype=output_dtype)
+                    estimate = bake_estimate + (estimate or 0)
+                else:
+                    result_tensors[layer['magnitude']] = magnitude.clone().contiguous()
             try:
                 new_down, new_up, record = trim_lora_factors(down, up, alpha=alpha,
                     output_dtype=output_dtype, **_factor_options(options))
@@ -607,9 +719,13 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
                 raise ValueError(f"{name}: {error}") from error
             if down_key in result_tensors or up_key in result_tensors:
                 raise ValueError(f'Conversion produces duplicate output layer {output_name}')
-            result_tensors[down_key], result_tensors[up_key] = new_down, new_up
+            if kind == 'doha' and len(base_descriptors[base_key].shape) == 4:
+                base_shape = base_descriptors[base_key].shape
+                new_down = new_down.reshape(new_down.shape[0], *base_shape[1:])
+                new_up = new_up.reshape(new_up.shape[0], new_up.shape[1], 1, 1)
+            output_alpha = None
             if alpha is not None:
-                result_tensors[output_name+'.alpha'] = alpha_tensor.clone().contiguous()
+                output_alpha = alpha_tensor.clone().contiguous()
             elif converted:
                 # A converted standalone file must describe unit scaling even
                 # when historical global alpha/config tags refer to native
@@ -617,17 +733,50 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
                 output_alpha = torch.tensor(record['new_rank'], dtype=torch.float32)
                 if float(output_alpha) != record['new_rank']:
                     raise ValueError('Converted rank cannot be represented exactly as a float32 alpha')
-                result_tensors[output_name+'.alpha'] = output_alpha
                 record['alpha'] = float(output_alpha)
+            split_outputs = []
+            if layer['split_qkv']:
+                names, pair = layer['split_qkv']['names'], layer['split_qkv']['pair']
+                if new_up.shape[0] % 3:
+                    raise ValueError(f'{name}: logical QKV output rows do not divide into three projections')
+                for part, block in zip(names, new_up.chunk(3, dim=0)):
+                    result_tensors[part+pair[0]] = new_down.clone().contiguous()
+                    result_tensors[part+pair[1]] = block.clone().contiguous()
+                    if output_alpha is not None:
+                        result_tensors[part+'.alpha'] = output_alpha.clone()
+                    split_outputs.append(part)
+            else:
+                result_tensors[down_key], result_tensors[up_key] = new_down, new_up
+                if output_alpha is not None:
+                    result_tensors[output_name+'.alpha'] = output_alpha
+            existing_bias = tensors.get(name+'.diff_b')
+            if existing_bias is not None:
+                if existing_bias.dtype not in _FLOATS or tuple(existing_bias.shape) != (new_up.shape[0],) or not torch.isfinite(existing_bias).all():
+                    raise ValueError(f'{name}: diff_b must be a finite floating output-channel vector')
+                result_tensors[output_name+'.diff_b'] = existing_bias.clone().contiguous()
+            if bias_delta is not None:
+                if bias_delta.dtype not in _FLOATS or tuple(bias_delta.shape) != (new_up.shape[0],) or not torch.isfinite(bias_delta).all():
+                    raise ValueError(f'{name}: baked bias delta must be a finite floating output-channel vector')
+                if split_outputs:
+                    for part, block in zip(split_outputs, bias_delta.chunk(3)):
+                        result_tensors[part+'.diff_b'] = block.clone().contiguous()
+                else:
+                    result_tensors[output_name+'.diff_b'] = bias_delta.clone().contiguous()
             if converted:
                 record['old_bytes'] = sum(tensors[key].numel()*tensors[key].element_size() for key in layer['factors'])
                 record['old_scale'] = input_scale
+            if split_outputs:
+                record['old_bytes'] = sum(tensors[key].numel()*tensors[key].element_size() for key in layer['factors'])
+                record['new_bytes'] = sum(result_tensors[part+suffix].numel()*result_tensors[part+suffix].element_size()
+                                          for part in split_outputs for suffix in layer['split_qkv']['pair'])
             records.append(dict(name=name, output_name=output_name, input_format=kind,
                 output_format='dora' if kind == 'dora' and not bake_dora_to_lora else 'lora',
                 metric_scope='pre_normalization_direction' if kind == 'dora' and not bake_dora_to_lora else 'effective_update',
                 original_alpha=alpha,
                 original_stored_rank=stored_rank, expanded_rank=down.shape[0] if converted else None,
                 conversion_working_bytes=estimate, baked=bake_dora_to_lora, base_weight_key=base_key,
+                base_weight=base_weight_info,
+                split_qkv_outputs=split_outputs, baked_bias=bias_delta is not None,
                 dora_convention=dora_convention,
                 normalization_epsilon=float(torch.finfo(torch.float32).eps) if bake_dora_to_lora and dora_convention == 'comfy' else None, **record))
     changed_metadata = []
@@ -661,7 +810,7 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
         options=options, original_hashes=originals,
         base_model=base_info,
         original_format_metadata=original_metadata if converted else None,
-        conversions=[{key: record[key] for key in ('name', 'output_name', 'input_format', 'output_format', 'original_stored_rank', 'expanded_rank', 'original_alpha', 'alpha')} for record in records] if converted else [],
+        conversions=[{key: record[key] for key in ('name', 'output_name', 'input_format', 'output_format', 'original_stored_rank', 'expanded_rank', 'original_alpha', 'alpha', 'base_weight', 'split_qkv_outputs', 'baked_bias')} for record in records] if converted else [],
         ranks={record['name']: record['new_rank'] for record in records}))
     changed_metadata.append(dict(key=provenance_key, before=None, after=metadata[provenance_key]))
     _, _, _, predicted_bytes = _archive_parts(result_tensors, metadata)
@@ -685,6 +834,14 @@ def trim_lora(path, *, retained_energy=None, relative_error=None, min_rank=1, ma
         report['warnings'].append('Explicit LoHa/LoKr conversion produces ordinary LoRA, not a resumable native-format adapter. old_rank is the expanded factor rank; original_stored_rank identifies the stored native rank, or null for all-full LoKr.')
     if bake_dora_to_lora:
         report['warnings'].append('DoRA is baked to an ordinary LoRA at full strength using the explicitly selected normalization convention and base checkpoint. Retention/error measures that baked effective delta. Native DoRA strengths can be nonlinear; other strengths and low-precision loader arithmetic are not guaranteed equivalent. old_rank is the full baked factor rank, not the stored direction rank.')
+        if any(r['base_weight']['quant_format'] != 'floating' for r in records):
+            report['warnings'].append('Quantized base weights are decoded to their original input basis and cast to the selected base_dequant_dtype before baking. Choose the same dtype as training to match the OstrisLinear.weight view. This represents static weights, not activation quantization or bit-exact low-precision/GPU forward outputs; normalization/SVD use float64, with explicit float32 epsilon for the Comfy convention.')
+        if any(r['base_weight']['forward_input_scale'] for r in records):
+            report['warnings'].append('AWQ input scaling makes the output consumer-specific. The comfy convention writes stored-weight-basis deltas for patching the original prescaled Comfy base; the toolkit convention writes raw-input deltas for the toolkit additive adapter branch. Do not interchange these consumers or merge a raw-input delta into AWQ storage. The per-layer output_basis identifies the chosen representation.')
+    if any(record['baked_bias'] for record in records):
+        report['warnings'].append('Native DoRA baking includes exact per-channel bias deltas as .diff_b tensors. Use a bias-delta-capable consumer such as ComfyUI or the toolkit inference engine; an ordinary training LoRA loader that ignores .diff_b cannot reproduce this biased bake. Weight retention metrics exclude the separately preserved bias delta.')
+    if any(record['split_qkv_outputs'] for record in records):
+        report['warnings'].append('MOSS split q/k/v factors with one fused qkv magnitude are reduced jointly. Output factors retain the public split names and a shared down projection; unbaked magnitude remains fused for native toolkit loading.')
     if options['rank_policy'] not in ('energy', 'relative_error'):
         report['warnings'].append('This spectrum/target-rank policy reports measured rounding error; it does not enforce the energy/error retention guarantee of the bounded policies.')
     if predicted_bytes >= report['input_bytes']:
@@ -721,6 +878,11 @@ def format_trimming_text(report):
                      f"relative error {layer['relative_error']:.8g}; "
                      f"energy {layer['retained_energy']:.8g}; {layer['dtype_down']}/{layer['dtype_up']}; "
                      f"alpha {layer['alpha']}; scale {layer['old_scale']:.8g} -> {layer['new_scale']:.8g}")
+        if layer['base_weight'] is not None:
+            base = layer['base_weight']
+            lines.append(f"  Base {base['key']}: {base['quant_format']}, storage {base['storage_dtype']}, "
+                         f"rotation {base['rotation']}, weight view {base['reconstruction_dtype']}, "
+                         f"normalization {base['normalization_dtype']}, epsilon {layer['normalization_epsilon']}")
     if report['base_model'] is not None:
         lines.append(f"Base: {report['base_model']['path']} (SHA256 {report['base_model']['sha256']})")
     lines.extend(report['warnings'])

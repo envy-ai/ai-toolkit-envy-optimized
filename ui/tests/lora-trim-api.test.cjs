@@ -12,6 +12,7 @@ const sourcePath = path.join(jobFolder, 'synthetic_lora.safetensors');
 const unsupportedPath = path.join(jobFolder, 'unsupported_doha.safetensors');
 const doraPath = path.join(jobFolder, 'synthetic_dora.safetensors');
 const basePath = path.join(jobFolder, 'synthetic_base.safetensors');
+const quantizedBasePath = path.join(jobFolder, 'synthetic_base_convrot8.safetensors');
 const lohaPath = path.join(jobFolder, 'synthetic_loha.safetensors');
 const outputPath = path.join(jobFolder, 'api_trimmed.safetensors');
 const pythonPath = process.env.AITK_TEST_PYTHON || path.join(process.env.CONDA_PREFIX || '', 'bin', 'python');
@@ -50,6 +51,7 @@ test('scripts route runs real CPU trimming CLI with preview binding and no-clobb
   assert.ok(fs.existsSync(unsupportedPath), 'Run playwright_scripts/prepare_lora_trim_e2e.py first');
   assert.ok(fs.existsSync(doraPath), 'Run playwright_scripts/prepare_lora_trim_e2e.py first');
   assert.ok(fs.existsSync(basePath), 'Run playwright_scripts/prepare_lora_trim_e2e.py first');
+  assert.ok(fs.existsSync(quantizedBasePath), 'Run playwright_scripts/prepare_lora_trim_e2e.py first');
   assert.ok(fs.existsSync(lohaPath), 'Run playwright_scripts/prepare_lora_trim_e2e.py first');
   assert.ok(fs.existsSync(pythonPath), `Expected ai-toolkit Python interpreter at ${pythonPath}`);
   assert.equal(process.env.CUDA_VISIBLE_DEVICES, '', 'This integration test must not see a CUDA device');
@@ -118,6 +120,26 @@ test('scripts route runs real CPU trimming CLI with preview binding and no-clobb
   assert.equal(doraBakeEnvelope.result.layers[0].metric_scope, 'effective_update');
   assert.equal(doraBakeEnvelope.result.layers[0].dora_convention, 'toolkit');
   assert.equal(doraBakeEnvelope.result.base_model.path, basePath);
+
+  const quantizedBakeResponse = await post(route, {
+    script: 'trim_lora.py',
+    args: {
+      input: doraPath,
+      'bake-dora-to-lora': true,
+      'base-model-path': quantizedBasePath,
+      'dora-convention': 'toolkit',
+      'base-dequant-dtype': 'bfloat16',
+      'rank-policy': 'fixed',
+      'rank-value': 64,
+      json: true,
+    },
+  });
+  const quantizedBakeEnvelope = await quantizedBakeResponse.json();
+  assert.equal(quantizedBakeResponse.status, 200, JSON.stringify(quantizedBakeEnvelope));
+  assert.equal(quantizedBakeEnvelope.ok, true, quantizedBakeEnvelope.stderr);
+  assert.equal(quantizedBakeEnvelope.result.layers[0].base_weight.quant_format, 'int8_tensorwise');
+  assert.equal(quantizedBakeEnvelope.result.layers[0].base_weight.requested_dequant_dtype, 'bfloat16');
+  assert.equal(quantizedBakeEnvelope.result.layers[0].dora_convention, 'toolkit');
 
   const lohaPreviewResponse = await post(route, {
     script: 'trim_lora.py',

@@ -172,6 +172,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
               jobName={job.name}
               isSliderSpace={trainingProcess.type === 'sliderspace'}
               trainingBaseModelPath={trainingProcess.model?.name_or_path}
+              trainingDtype={trainingProcess.train?.dtype}
             />
           </div>
         )}

@@ -11,13 +11,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
 
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from toolkit.util.comfy_quant_export import export_comfy_quantized_layers
+from toolkit.util.ostris_quant import convert_linear_to_ostris, get_ostris_quantizer
+
+
 ARTIFACTS = ROOT / "tmp" / "lora-trim"
 DATABASE = ARTIFACTS / "e2e.db"
 OUTPUT = ARTIFACTS / "e2e-output"
@@ -80,7 +86,7 @@ def main():
                 "process": [
                     {
                         "type": "diffusion_trainer",
-                        "train": {"steps": 8},
+                        "train": {"steps": 8, "dtype": "bf16"},
                         "model": {"name_or_path": str(job_folder / "synthetic_base.safetensors"), "arch": "synthetic"},
                         "network": {"type": "lora", "linear": 8, "linear_alpha": 8},
                         "sample": {"samples": []},
@@ -124,6 +130,25 @@ def main():
               job_folder / "synthetic_base.safetensors")
     save_file({"diffusion_model.block.proj.weight": base_weight + torch.eye(64)},
               job_folder / "synthetic_base_override.safetensors")
+
+    # Produce a real Comfy convrot8 checkpoint from the repository's CPU
+    # quantizer and exporter. The browser journey submits this path through
+    # /api/scripts and the real reducer CLI; all weights are synthetic.
+    torch.manual_seed(432)
+    quantized_linear = torch.nn.Linear(64, 64, bias=False, dtype=torch.bfloat16)
+    quantizer = get_ostris_quantizer("convrot8")
+    if not convert_linear_to_ostris(quantized_linear, quantizer):
+        raise RuntimeError("Synthetic 64x64 linear was unexpectedly not ConvRot8-quantizable")
+    export_root = torch.nn.Module()
+    diffusion_model = torch.nn.Module()
+    block = torch.nn.Module()
+    export_root.add_module("diffusion_model", diffusion_model)
+    diffusion_model.add_module("block", block)
+    block.add_module("proj", quantized_linear)
+    quantized_entries, exported, unexportable = export_comfy_quantized_layers(export_root)
+    if exported != ["diffusion_model.block.proj"] or unexportable:
+        raise RuntimeError(f"Unexpected synthetic ConvRot8 export result: {exported}, {unexportable}")
+    save_file(quantized_entries, job_folder / "synthetic_base_convrot8.safetensors")
 
     # Unsupported DoHa keeps exercising the visible-validation-error path;
     # plain DoRA is now intentionally supported by the reducer.

@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toolkit.lora_trimming import RANK_POLICIES, format_trimming_text, trim_lora
+from toolkit.lora_trimming import BASE_DEQUANT_DTYPES, RANK_POLICIES, format_trimming_text, trim_lora
 
 
 def build_parser():
@@ -26,8 +26,10 @@ def build_parser():
     parser.add_argument('--convert-to-lora', action='store_true', help='Explicitly convert supported 2D LoHa/LoKr to ordinary LoRA')
     parser.add_argument('--max-working-mb', type=float, default=512, help='Conversion working-memory admission budget in MiB (default 512)')
     parser.add_argument('--bake-dora-to-lora', action='store_true', help='Bake full-strength DoRA with matching base weights before reducing to ordinary LoRA')
-    parser.add_argument('--base-model-path', help='Single local floating safetensors base checkpoint, required for DoRA baking')
+    parser.add_argument('--base-model-path', help='Single local floating or supported Comfy-quantized safetensors base checkpoint, required for DoRA baking')
     parser.add_argument('--dora-convention', choices=('comfy', 'toolkit'), help='Explicit usual DoRA consumer: ComfyUI or AI Toolkit/native (required for baking)')
+    parser.add_argument('--base-dequant-dtype', choices=BASE_DEQUANT_DTYPES, default='float32',
+                        help='Decoded quantized-base weight view: float32 (default), bfloat16 or float16; floating base storage is unchanged')
     parser.add_argument('--min-rank', type=int, default=1)
     parser.add_argument('--max-rank', type=int)
     parser.add_argument('--output', help='Write a new .safetensors file; existing paths are never overwritten')
@@ -49,6 +51,7 @@ def main(argv=None, *, require_preview=False, json_output=False):
         convert_to_lora=args.convert_to_lora, max_working_mb=args.max_working_mb,
         bake_dora_to_lora=args.bake_dora_to_lora, base_model_path=args.base_model_path,
         dora_convention=args.dora_convention,
+        base_dequant_dtype=args.base_dequant_dtype,
         output=args.output, expected_preview=args.expected_preview,
         progress=lambda message: print(message, file=sys.stderr, flush=True))
     if args.json or json_output:
