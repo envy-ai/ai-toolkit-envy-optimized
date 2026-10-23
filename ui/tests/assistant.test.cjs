@@ -241,6 +241,27 @@ test('configuration validates budgets and URL prefixes without selecting guessed
     { reasoningEffort: 'made-up' },
   ])
     assert.throws(() => assistantConfigurationSchema.parse({ ...DEFAULT_ASSISTANT_CONFIGURATION, ...config }));
+  assert.equal(DEFAULT_ASSISTANT_CONFIGURATION.imageMegapixels, 1);
+  assert.equal(
+    assistantConfigurationSchema.parse({ ...DEFAULT_ASSISTANT_CONFIGURATION, imageMegapixels: 0.375 })
+      .imageMegapixels,
+    0.375,
+  );
+  for (const imageMegapixels of [0, -0.25, 16.01, Infinity, NaN])
+    assert.throws(() => assistantConfigurationSchema.parse({ ...DEFAULT_ASSISTANT_CONFIGURATION, imageMegapixels }));
+});
+test('image megapixel setting defaults for older saved configurations and accepts fractions', async () => {
+  const directory = path.join(root, 'legacy-image-settings');
+  await fsp.mkdir(directory);
+  const { imageMegapixels: _imageMegapixels, ...legacyConfig } = DEFAULT_ASSISTANT_CONFIGURATION;
+  await fsp.writeFile(path.join(directory, 'assistant.json'), JSON.stringify({ version: 1, config: legacyConfig }));
+  const store = await NodeAssistantConfiguration.create(directory);
+  assert.equal(store.state().config.imageMegapixels, 1);
+
+  const fractional = { ...store.state().config, imageMegapixels: 0.375 };
+  assert.equal((await store.update({ config: fractional })).config.imageMegapixels, 0.375);
+  for (const imageMegapixels of [0, -1, 16.01, Infinity, NaN])
+    await assert.rejects(() => store.update({ config: { ...fractional, imageMegapixels } }));
 });
 test('stored credentials remain private and outside configuration responses', async () => {
   const directory = path.join(root, 'settings');
@@ -1018,7 +1039,7 @@ for (const protocol of ['responses', 'chat-completions'])
       call_id: 'inspect-1',
       arguments: '{"path":"fixture.png"}',
     };
-    const { service, configuration } = await provider({ protocol, vision: true }, async (_url, options) => {
+    const { service, configuration } = await provider({ protocol, vision: true, imageMegapixels: 16 }, async (_url, options) => {
       requests.push(JSON.parse(options.body));
       const output = requests.length === 1 ? [toolCall] : [message('Red square')];
       return jsonResponse(
@@ -1141,6 +1162,86 @@ test('malformed image Base64 is rejected before provider transport', async () =>
     );
     assert.equal(requestCount, 0, `must reject ${JSON.stringify(dataBase64)} before provider transport`);
   }
+});
+test('image observations sent to the provider respect megapixel limits, fractions, orientation and no-upscale', async () => {
+  const width = 1800;
+  const height = 1200;
+  const pixels = Buffer.alloc(width * height * 3);
+  let noise = 0x10203040;
+  for (let index = 0; index < pixels.length; index++) {
+    noise = (Math.imul(noise, 1664525) + 1013904223) >>> 0;
+    pixels[index] = noise >>> 24;
+  }
+  const original = await sharp(pixels, { raw: { width, height, channels: 3 } })
+    .jpeg({ quality: 82 })
+    .withMetadata({ orientation: 6 })
+    .toBuffer();
+  const providerSource = await sharp(pixels, { raw: { width, height, channels: 3 } })
+    .png({ compressionLevel: 0 })
+    .toBuffer();
+  const providerSourceSnapshot = Buffer.from(providerSource);
+  assert.ok(providerSource.byteLength <= 8 * 1024 * 1024, 'provider fixture must stay within the existing byte limit');
+  const originalPath = path.join(root, 'datasets', 'megapixel-source.jpg');
+  await fsp.writeFile(originalPath, original);
+
+  for (const imageMegapixels of [1, 0.25]) {
+    const requests = [];
+    const { service, configuration } = await provider({ vision: true, imageMegapixels }, async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return jsonResponse(completed([message('Observed image')]));
+    });
+    const inspected = await executeAssistantTool(
+      call('inspect_image', { path: originalPath }),
+      await context({ provider: service }),
+    );
+    assert.deepEqual(await fsp.readFile(originalPath), original, 'inspection must leave the source image unchanged');
+
+    const inspectedBytes = Buffer.from(inspected.image.dataBase64, 'base64');
+    const observed = await sharp(inspectedBytes).metadata();
+    const targetPixels = imageMegapixels * 1_000_000;
+    assert.ok(observed.width * observed.height <= targetPixels, `${imageMegapixels} MP observation exceeded its area limit`);
+    assert.ok(Math.abs(observed.width / observed.height - 2 / 3) < 0.01, 'EXIF orientation and aspect ratio should be honored');
+
+    await service.createTurn({
+      ...turn(configuration.state().revision),
+      messages: [
+        {
+          role: 'user',
+          content: 'Inspect this image.',
+          images: [
+            {
+              artifactId: `megapixel-source-${imageMegapixels}`,
+              source: 'visible-image',
+              mimeType: 'image/png',
+              width,
+              height,
+              dataBase64: providerSource.toString('base64'),
+            },
+          ],
+        },
+      ],
+    });
+    const wireBody = JSON.stringify(requests[0]);
+    const encoded = wireBody.match(/data:image\/png;base64,([A-Za-z0-9+/=]+)/)?.[1];
+    assert.ok(encoded, 'provider request should contain a native PNG image part');
+    const sent = await sharp(Buffer.from(encoded, 'base64')).metadata();
+    assert.ok(sent.width * sent.height <= targetPixels, `${imageMegapixels} MP provider image exceeded its area limit`);
+    assert.ok(Math.abs(sent.width / sent.height - 3 / 2) < 0.01, 'provider image should retain its aspect ratio');
+    assert.deepEqual(await fsp.readFile(originalPath), original, 'provider normalization must leave the source image unchanged');
+    assert.deepEqual(providerSource, providerSourceSnapshot, 'provider normalization must leave the input bytes unchanged');
+  }
+
+  const small = await sharp({ create: { width: 80, height: 40, channels: 3, background: '#336699' } }).png().toBuffer();
+  const smallPath = path.join(root, 'datasets', 'megapixel-small.png');
+  await fsp.writeFile(smallPath, small);
+  const { service } = await provider({ vision: true, imageMegapixels: 0.25 });
+  const smallObservation = await executeAssistantTool(
+    call('inspect_image', { path: smallPath }),
+    await context({ provider: service }),
+  );
+  assert.equal(smallObservation.image.width, 80, 'the megapixel limit must not upscale smaller images');
+  assert.equal(smallObservation.image.height, 40, 'the megapixel limit must not upscale smaller images');
+  assert.deepEqual(await fsp.readFile(smallPath), small, 'small source image should remain unchanged');
 });
 test('a fresh run resets tool rounds and advertises tools again', async () => {
   const requests = [];

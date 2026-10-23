@@ -16,6 +16,8 @@ export const assistantConfigurationSchema = z
     strictTools: z.boolean(),
     stream: z.boolean(),
     vision: z.boolean().default(false),
+    /** Maximum image area sent to the provider, in decimal megapixels; never upscale. */
+    imageMegapixels: z.number().finite().min(0.000001).max(16).default(1),
     timeoutMs: z.number().int().min(1000).max(600_000),
     maxOutputTokens: z.number().int().min(64).max(131_072),
     maxRunTokens: z.number().int().min(128).max(2_000_000),
@@ -47,6 +49,7 @@ export const DEFAULT_ASSISTANT_CONFIGURATION: AssistantConfiguration = {
   strictTools: true,
   stream: true,
   vision: false,
+  imageMegapixels: 1,
   timeoutMs: 120_000,
   maxOutputTokens: 4096,
   maxRunTokens: 64_000,

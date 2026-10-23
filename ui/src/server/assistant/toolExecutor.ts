@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import sharp from 'sharp';
+import { normalizeAssistantImage } from './imageBytes';
 import { z } from 'zod';
 import { getDataRoot, getDatasetsRoot, getTrainingFolder, getHFToken, getModelsPath } from '@/server/settings';
 import type { AssistantImageInput, AssistantToolCall } from '@/assistant/AssistantProvider';
@@ -390,12 +391,7 @@ export async function executeAssistantTool(call: AssistantToolCall, context: Too
     const config = await context.provider.getConfiguration();
     if (!config.config.vision)
       throw new Error('Enable visual observations in Assistant Settings before inspecting images.');
-    const pipeline = sharp(filename, { limitInputPixels: 64 * 1024 * 1024 });
-    const metadata = await pipeline.metadata();
-    const { data, info } = await pipeline
-      .resize({ width: 1536, height: 1536, fit: 'inside', withoutEnlargement: true })
-      .png()
-      .toBuffer({ resolveWithObject: true });
+    const { data, info, metadata } = await normalizeAssistantImage(filename, config.config.imageMegapixels);
     if (data.length > 8 * 1024 * 1024) throw new Error('Normalized image exceeds observation size limit.');
     const caption = await readBounded(sidecar(filename)).catch(() => null);
     return {

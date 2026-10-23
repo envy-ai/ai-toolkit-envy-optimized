@@ -221,6 +221,23 @@ export default function AssistantSettings({
           <p className="text-xs text-gray-400">
             Lets the assistant send dataset images and sample outputs to the configured model.
           </p>
+          <label className="block space-y-1 text-sm">
+            Image size (megapixels)
+            <input
+              type="number"
+              className={field}
+              min={0.000001}
+              max={16}
+              step="any"
+              required
+              value={Number.isNaN(config.imageMegapixels) ? '' : config.imageMegapixels}
+              onChange={event => change({ imageMegapixels: event.target.valueAsNumber })}
+            />
+            <span className="block text-xs text-gray-400">
+              Shrink larger images before sending to the model, preserving aspect ratio. Smaller images and source files
+              stay unchanged. Maximum 16 MP and 4096 pixels per side.
+            </span>
+          </label>
           <details className="rounded-md border border-gray-700 p-3">
             <summary className="cursor-pointer text-sm">Execution limits</summary>
             <div className="mt-3 space-y-3">

@@ -1,4 +1,4 @@
-import { inspectImageBytes as inspectProjectMediaBytes } from './imageBytes';
+import { inspectImageBytes as inspectProjectMediaBytes, normalizeAssistantImage } from './imageBytes';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { z } from 'zod';
@@ -653,7 +653,7 @@ export class NodeAssistantProvider implements AssistantProviderService {
       if (images.length && !state.config.vision)
         throw new Error('Image input is disabled; enable vision explicitly before sending captured observations.');
       if (images.length > MAX_RUN_IMAGES) throw new Error('Assistant image count exceeds the run limit.');
-      const imageBytes = images.reduce((bytes, image) => bytes + validateImage(image), 0);
+      let imageBytes = images.reduce((bytes, image) => bytes + validateImage(image), 0);
       if (imageBytes > MAX_IMAGE_BYTES) throw new Error('Assistant image input exceeds the combined 8 MiB limit.');
       if (this.#retired.has(request.runId)) throw new Error('Assistant run has ended; use a fresh run ID.');
       if (this.#requests.has(request.requestId)) throw new Error('Assistant request ID is already in flight.');
@@ -671,11 +671,11 @@ export class NodeAssistantProvider implements AssistantProviderService {
         if (new Set(request.tools.map(tool => tool.name)).size !== request.tools.length)
           throw new Error('Assistant tool names must be unique.');
         run = {
-          input: request.messages.map(message => initialMessage(message, state.config.protocol)),
+          input: [],
           tools: request.tools,
           pending: [],
-          imageCount: images.length,
-          imageBytes,
+          imageCount: 0,
+          imageBytes: 0,
           seenCalls: new Set(),
           round: 0,
           spentTokens: 0,
@@ -694,10 +694,39 @@ export class NodeAssistantProvider implements AssistantProviderService {
         )
           throw new Error('Every function call requires exactly one correlated result.');
         const results = new Map(request.toolResults.map(result => [result.callId, result]));
-        if (run.imageCount + images.length > MAX_RUN_IMAGES || run.imageBytes + imageBytes > MAX_IMAGE_BYTES)
+        if (run.imageCount + images.length > MAX_RUN_IMAGES)
           throw new Error('Assistant retained image limit reached; start a fresh run.');
         if (request.attachments?.some(attachment => !results.has(attachment.callId)))
           throw new Error('Assistant image attachment is not correlated to a current tool result.');
+      }
+      const config = state.config;
+      // Reserve the run before asynchronous image work, just as for diagnostics and transport.
+      run.controller = new AbortController();
+      this.#requests.add(request.requestId);
+      registeredRequest = true;
+      for (const image of images) {
+        if (image.width * image.height <= Math.floor(config.imageMegapixels * 1_000_000)) continue;
+        const { data, info } = await normalizeAssistantImage(
+          Buffer.from(image.dataBase64, 'base64'),
+          config.imageMegapixels,
+        );
+        image.width = info.width;
+        image.height = info.height;
+        image.dataBase64 = data.toString('base64');
+      }
+      if (
+        run.controller.signal.aborted ||
+        this.#runs.get(request.runId) !== run ||
+        this.#configuration.state().revision !== state.revision
+      )
+        throw new Error('Assistant image preparation finished after the run was invalidated.');
+      imageBytes = images.reduce((bytes, image) => bytes + validateImage(image), 0);
+      if (run.imageBytes + imageBytes > MAX_IMAGE_BYTES)
+        throw new Error('Assistant retained image limit reached; start a fresh run.');
+      if (request.messages) {
+        run.input = request.messages.map(message => initialMessage(message, config.protocol));
+      } else {
+        const results = new Map(request.toolResults!.map(result => [result.callId, result]));
         for (const call of run.pending) {
           incomingToolNames.set(call.callId, call.name);
           const result = results.get(call.callId);
@@ -720,15 +749,10 @@ export class NodeAssistantProvider implements AssistantProviderService {
             ],
           });
         }
-        run.imageCount += images.length;
-        run.imageBytes += imageBytes;
         run.pending = [];
       }
-      const config = state.config;
-      // Diagnostic writes may await I/O; retain the existing single-request-per-run invariant.
-      run.controller = new AbortController();
-      this.#requests.add(request.requestId);
-      registeredRequest = true;
+      run.imageCount += images.length;
+      run.imageBytes += imageBytes;
       const inputLength = budgetText(run.input).length;
       const toolDefinitionsLength = JSON.stringify(run.tools).length;
       const contextEstimate =

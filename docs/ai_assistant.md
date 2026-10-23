@@ -128,8 +128,19 @@ coalesces refreshes while an existing request is in progress.
 Visual observation must be enabled to send images to the configured provider.
 `inspect_image` is advertised in model tools and `toolkit_help` only while visual
 observation is enabled; the server also checks the setting when the tool runs.
-Images are normalized to PNG on CPU, capped at 1536 pixels per axis, and sent as
-native image parts rather than base64 text in tool output. Each run retains at
+**Image size (megapixels)** in connection settings controls the maximum image
+area sent to the model, defaulting to **1 MP** (1,000,000 pixels), including for
+saved settings that predate this option. The saved config key is `imageMegapixels`.
+Decimal values from 0.000001 to 16 are
+accepted. Focus the number field with Tab, type a value or use its native number
+arrows, then save settings. Larger images shrink in memory while preserving
+aspect ratio and honoring EXIF orientation; smaller images are not enlarged.
+The existing 4096-pixel per-axis safety limit also applies, so very wide or tall
+images can use less than the requested area. Original files and UI previews
+keep their source dimensions. Both inspected images and direct native image
+inputs obey the area limit before provider transport.
+Images are normalized to PNG on CPU and sent as native image parts rather than
+base64 text in tool output. Each run retains at
 most four observations and 8 MiB of encoded image bytes. Missing/unsupported
 media produces a tool error; the assistant does not claim it viewed that file.
 Base64 validation uses a stack-safe character check for large observations,
