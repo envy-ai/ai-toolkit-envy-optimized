@@ -998,9 +998,19 @@ test('vision setting controls route tools, system guidance and toolkit_help outp
 for (const protocol of ['responses', 'chat-completions'])
   test(`${protocol} correlates tools and native images over complete turns`, async () => {
     const requests = [];
-    const fixtureImage = await sharp({ create: { width: 2, height: 2, channels: 3, background: '#ff0000' } })
-      .png()
+    const pixels = Buffer.alloc(1536 * 1536 * 3);
+    let noise = 0x12345678;
+    for (let index = 0; index < pixels.length; index++) {
+      noise = (Math.imul(noise, 1664525) + 1013904223) >>> 0;
+      pixels[index] = noise >>> 24;
+    }
+    const fixtureImage = await sharp(pixels, { raw: { width: 1536, height: 1536, channels: 3 } })
+      .png({ compressionLevel: 0 })
       .toBuffer();
+    assert.ok(fixtureImage.byteLength >= 6 * 1024 * 1024);
+    assert.ok(fixtureImage.byteLength <= 8 * 1024 * 1024);
+    const imageBase64 = fixtureImage.toString('base64');
+    assert.ok(imageBase64.length >= 9_000_000);
     const toolCall = {
       id: 'tool-item',
       type: 'function_call',
@@ -1050,20 +1060,133 @@ for (const protocol of ['responses', 'chat-completions'])
         {
           callId: 'inspect-1',
           image: {
-            artifactId: 'image-1',
+            artifactId: 'continuation-large-image',
             source: 'visible-image',
             mimeType: 'image/png',
-            width: 2,
-            height: 2,
-            dataBase64: fixtureImage.toString('base64'),
+            width: 1536,
+            height: 1536,
+            dataBase64: imageBase64,
           },
         },
       ],
     });
+    assert.ok(JSON.stringify(requests[1]).includes(imageBase64));
     assert.ok(JSON.stringify(requests[1]).includes(protocol === 'responses' ? 'input_image' : 'image_url'));
     assert.ok(JSON.stringify(requests[1]).includes(protocol === 'responses' ? 'function_call_output' : 'tool_call_id'));
     assert.equal(requests[0].model, 'fixture');
+
+    const initialImageTurn = {
+      ...turn(configuration.state().revision),
+      messages: [
+        {
+          role: 'user',
+          content: 'Inspect this image.',
+          images: [
+            {
+              artifactId: 'initial-large-image',
+              source: 'visible-image',
+              mimeType: 'image/png',
+              width: 1536,
+              height: 1536,
+              dataBase64: imageBase64,
+            },
+          ],
+        },
+      ],
+    };
+    await service.createTurn(initialImageTurn);
+    assert.ok(JSON.stringify(requests[2]).includes(imageBase64));
+    assert.ok(JSON.stringify(requests[2]).includes(protocol === 'responses' ? 'input_image' : 'image_url'));
   });
+test('malformed image Base64 is rejected before provider transport', async () => {
+  const malformed = [
+    'AA?=', // non-Base64 alphabet
+    '-_==', // URL-safe alphabet
+    'AQI=\n', // newline
+    'AAAA===', // excess padding
+    'A=AA', // padding before the end
+    'AQI', // omitted required padding
+    'A', // impossible Base64 length
+    'AB==', // noncanonical pad bits (canonical form is AA==)
+  ];
+  for (const dataBase64 of malformed) {
+    let requestCount = 0;
+    const { service, configuration } = await provider({ vision: true }, async () => {
+      requestCount++;
+      return jsonResponse(completed([message('Unexpected provider call')]));
+    });
+    const request = {
+      ...turn(configuration.state().revision),
+      messages: [
+        {
+          role: 'user',
+          content: 'Inspect this image.',
+          images: [
+            {
+              artifactId: 'malformed-image',
+              source: 'visible-image',
+              mimeType: 'image/png',
+              width: 1,
+              height: 1,
+              dataBase64,
+            },
+          ],
+        },
+      ],
+    };
+    await assert.rejects(
+      () => service.createTurn(request),
+      dataBase64 === 'AB==' ? /Assistant image encoding or byte size is invalid/ : { name: 'ZodError' },
+      `should reject ${JSON.stringify(dataBase64)}`,
+    );
+    assert.equal(requestCount, 0, `must reject ${JSON.stringify(dataBase64)} before provider transport`);
+  }
+});
+test('a fresh run resets tool rounds and advertises tools again', async () => {
+  const requests = [];
+  const { service, configuration } = await provider(
+    { maxToolRounds: 1 },
+    async (_url, options) => {
+      const body = JSON.parse(options.body);
+      requests.push(body);
+      return jsonResponse(
+        completed(
+          body.tools?.length
+            ? [{ type: 'function_call', name: 'fixture_tool', call_id: `call-${requests.length}`, arguments: '{}' }]
+            : [message('Done')],
+        ),
+      );
+    },
+  );
+  const makeRun = () => ({
+    ...turn(configuration.state().revision),
+    tools: [
+      {
+        name: 'fixture_tool',
+        description: 'Fixture tool.',
+        parameters: { type: 'object', properties: {} },
+        strict: false,
+      },
+    ],
+  });
+  const first = makeRun();
+  const firstResult = await service.createTurn(first);
+  assert.equal(firstResult.round, 1);
+  assert.equal(firstResult.toolCalls.length, 1);
+  const finalFirstRound = await service.createTurn({
+    runId: first.runId,
+    requestId: randomUUID(),
+    configurationRevision: first.configurationRevision,
+    toolResults: [{ callId: 'call-1', output: 'ok' }],
+  });
+  assert.equal(finalFirstRound.round, 2);
+  assert.equal(requests[1].tools.length, 0, 'the run limit suppresses tools after its first tool round');
+
+  const second = makeRun();
+  const secondResult = await service.createTurn(second);
+  assert.equal(secondResult.round, 1);
+  assert.equal(requests[2].tools.length, 1, 'a new run starts with its tools available');
+});
 test('fragmented SSE preserves UTF-8 and requires completed provider responses', async () => {
   const data = Buffer.from(
     'data: ' + JSON.stringify({ type: 'response.completed', response: completed([message('café')]) }) + '\r\n\r\n',

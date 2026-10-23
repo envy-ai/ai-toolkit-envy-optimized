@@ -318,7 +318,12 @@ const imageSchema = z
       .string()
       .min(4)
       .max(Math.ceil(MAX_IMAGE_BYTES / 3) * 4)
-      .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+      // Repeated four-character groups exhaust V8's regexp stack on large observations.
+      // A flat character run plus the length check preserves the same padding syntax.
+      .refine(
+        value => value.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(value),
+        'Invalid Base64 image encoding.',
+      ),
   })
   .strict();
 const turnSchema = z

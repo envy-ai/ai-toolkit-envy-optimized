@@ -25,6 +25,8 @@ detail. Reopening a chat restores its text, not active provider runs, approvals,
 encoded images, credentials, or tool execution. The existing last-40-non-tool
 message context policy and per-run token budgets are unchanged. A preview can
 be unavailable if its source file was moved or deleted.
+Each sent question starts a fresh run with its tool-round counter and token
+usage at zero; saved chat history does not consume tool rounds.
 
 New/load/rename/delete controls wait while a reply, upload, or session operation
 is active; use **Stop assistant** before switching a running conversation.
@@ -130,6 +132,8 @@ Images are normalized to PNG on CPU, capped at 1536 pixels per axis, and sent as
 native image parts rather than base64 text in tool output. Each run retains at
 most four observations and 8 MiB of encoded image bytes. Missing/unsupported
 media produces a tool error; the assistant does not claim it viewed that file.
+Base64 validation uses a stack-safe character check for large observations,
+while retaining strict padding, canonical encoding, byte-size, and image checks.
 Video and audio samples can be listed and opened in their existing UI viewers;
 the visual observation tool supports still images. Start a fresh request for
 additional observations. Image attachment uploads are capped at four files,
