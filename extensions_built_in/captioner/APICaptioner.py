@@ -9,7 +9,9 @@ class APICaptionConfig(CaptionConfig):
         kwargs = {**kwargs, "device": "cpu", "compile": False, "quantize": False, "loras": [],
                   "extensions": kwargs.get("extensions", sorted(IMAGE_EXTENSIONS))}
         validate_api_settings(kwargs)
-        super().__init__(**kwargs)
+        # The shared local-model config requires an ID. An empty internal value
+        # satisfies that contract without adding a model to the API settings.
+        super().__init__(**{"model_name_or_path": "", **kwargs})
         self.api_settings = kwargs
 
 

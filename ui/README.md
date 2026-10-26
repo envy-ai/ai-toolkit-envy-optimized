@@ -107,8 +107,10 @@ does not exist. Ordinary `?thumb=1`
 gallery thumbnails keep their existing square crop. First-image discovery
 supports PNG, JPEG, WebP, GIF, BMP, and AVIF.
 
-Dataset **AutoCaption** includes **API (OpenAI-compatible)**. Enter the API URL, optional key, model ID, system prompt,
-and caption prompt; **Advanced options** contains sampling settings, timeout, and the response-token limit (4096 by
+Dataset **AutoCaption** includes **API (OpenAI-compatible)**. Enter the API URL, optional key, optional model ID, system prompt,
+and caption prompt. Leave **Model (optional)** blank for servers such as Strata that choose their own model; blank or
+omitted IDs send no `model` field, with no model lookup or default substitution.
+**Advanced options** contains sampling settings, timeout, and the response-token limit (4096 by
 default, configurable). Click the Advanced summary or focus it and press Enter/Space to expand it. API captioning uses
 its own CPU/API queue alongside training and loads no captioning model onto this toolkit's GPUs. Keys are saved
 privately on the server, separately from job configurations. See the [API captioner guide](../docs/api_captioner.md) for

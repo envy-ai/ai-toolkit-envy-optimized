@@ -170,6 +170,19 @@ def test_blank_key_omits_auth_and_unset_sampling_options_are_not_injected(tmp_pa
     assert not ({"temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop"} & payload.keys())
 
 
+@pytest.mark.parametrize("model", [None, "", " \t\n "])
+def test_missing_or_blank_model_is_omitted_from_http_payload(tmp_path, model):
+    with CaptionServer() as server:
+        settings = config(server)
+        if model is None:
+            settings.pop("model_name_or_path")
+        else:
+            settings["model_name_or_path"] = model
+        generate_api_caption(image_fixture(tmp_path), settings)
+
+    assert "model" not in server.requests[0]["payload"]
+
+
 @pytest.mark.parametrize(("source_size", "limit", "expected_size"), [
     ((1600, 900), 0.25, (667, 375)),
     ((10, 6), 0.001, (41, 24)),
@@ -437,6 +450,14 @@ def test_response_token_limit_must_be_a_positive_safe_integer(limit):
         })
 
 
+@pytest.mark.parametrize("model", [None, 42, True, [], {}])
+def test_malformed_supplied_model_type_is_rejected(model):
+    settings = {"api_url": "http://127.0.0.1:12345/v1", "max_new_tokens": 4096,
+                "model_name_or_path": model}
+    with pytest.raises(ValueError, match="model"):
+        validate_api_settings(settings)
+
+
 def test_response_token_limit_over_default_is_valid_and_kept_exact():
     settings = {"api_url": "http://127.0.0.1:12345/v1", "model_name_or_path": "fixture", "max_new_tokens": 16384}
     assert validate_api_settings(settings) == "http://127.0.0.1:12345/v1/chat/completions"
@@ -543,7 +564,8 @@ def test_api_captioner_defaults_to_preserving_existing_sidecars_and_recaptions_w
     assert image.with_suffix(".txt").read_text(encoding="utf-8") == "fresh API caption"
 
 
-def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports():
+@pytest.mark.parametrize("model", [None, "fixture-model"])
+def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports(model):
     """Exercise the real CLI bootstrap while keeping inference local and synthetic."""
     import yaml
 
@@ -571,7 +593,6 @@ def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports():
                             "path_to_caption": str(image_dir),
                             "extensions": ["png"],
                             "caption_extension": "txt",
-                            "model_name_or_path": "fixture-model",
                             "api_url": server.url,
                             "system_prompt": "Return one concise caption.",
                             "caption_prompt": "Describe the synthetic fixture.",
@@ -588,6 +609,11 @@ def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports():
                     }],
                 },
             }), encoding="utf-8")
+
+            if model is not None:
+                config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                config_data["config"]["process"][0]["caption"]["model_name_or_path"] = model
+                config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
 
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = ""
@@ -614,7 +640,10 @@ def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports():
         request = server.requests[0]
         assert request["path"] == "/v1/chat/completions"
         assert request["authorization"] is None
-        assert request["payload"]["model"] == "fixture-model"
+        if model is None:
+            assert "model" not in request["payload"]
+        else:
+            assert request["payload"]["model"] == model
         assert request["payload"]["max_tokens"] == 48
         assert "regex_replace" not in request["payload"]
         assert request["payload"]["messages"][-1]["content"][0]["text"] == "Describe the synthetic fixture."

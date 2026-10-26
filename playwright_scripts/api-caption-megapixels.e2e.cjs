@@ -80,7 +80,10 @@ async function main() {
 
     const firstDialog = await openSetup(page, datasets[0]);
     const firstInput = firstDialog.getByLabel(megapixelsLabel);
+    const firstModel = firstDialog.getByLabel('Model (optional)');
     assert.equal(await firstInput.inputValue(), '1', 'missing/default preferences should show the 1 MP default');
+    await firstModel.fill('');
+    assert.equal(await firstModel.inputValue(), '', 'the API model may be left blank');
     fs.mkdirSync(outputDir, { recursive: true });
     await page.screenshot({ path: path.join(outputDir, 'image-megapixels-default.png'), fullPage: true });
     await firstInput.fill('');
@@ -89,11 +92,17 @@ async function main() {
 
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0].job_config.config.process[0].caption.image_megapixels, null);
-    assert.equal((await getPreferences(page)).caption.image_megapixels, null);
+    assert.equal(jobs[0].job_config.config.process[0].caption.model_name_or_path, '');
+    const firstPreferences = await getPreferences(page);
+    assert.equal(firstPreferences.caption.image_megapixels, null);
+    assert.equal(firstPreferences.caption.model_name_or_path, '');
 
     const secondDialog = await openSetup(page, datasets[1]);
     const secondInput = secondDialog.getByLabel(megapixelsLabel);
+    const secondModel = secondDialog.getByLabel('Model (optional)');
     assert.equal(await secondInput.inputValue(), '', 'explicit null should restore as a blank field');
+    assert.equal(await secondModel.inputValue(), '', 'a saved blank model should restore blank');
+    await secondModel.fill(' \t ');
     await secondInput.fill('0.25');
     assert.equal(await secondInput.inputValue(), '0.25');
     await page.screenshot({ path: path.join(outputDir, 'image-megapixels-quarter.png'), fullPage: true });
@@ -101,10 +110,14 @@ async function main() {
 
     assert.equal(jobs.length, 2);
     assert.equal(jobs[1].job_config.config.process[0].caption.image_megapixels, 0.25);
-    assert.equal((await getPreferences(page)).caption.image_megapixels, 0.25);
+    assert.equal(jobs[1].job_config.config.process[0].caption.model_name_or_path, '');
+    const secondPreferences = await getPreferences(page);
+    assert.equal(secondPreferences.caption.image_megapixels, 0.25);
+    assert.equal(secondPreferences.caption.model_name_or_path, '', 'whitespace-only model input normalizes to blank');
 
     const thirdDialog = await openSetup(page, datasets[2]);
     assert.equal(await thirdDialog.getByLabel(megapixelsLabel).inputValue(), '0.25');
+    assert.equal(await thirdDialog.getByLabel('Model (optional)').inputValue(), '', 'normalized blank model should restore blank');
     await thirdDialog.getByRole('button', { name: 'Cancel' }).click();
 
     assert.equal(providerRequests, 0, 'browser test must not contact the configured fake provider endpoint');
@@ -113,6 +126,7 @@ async function main() {
       result: 'passed',
       defaultMegapixels: 1,
       blankSavedAndRestoredAs: null,
+      blankModelSavedRestoredAndNormalized: true,
       fractionalSavedAndRestored: 0.25,
       submittedJobs: jobs.length,
       providerRequests,

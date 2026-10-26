@@ -145,8 +145,8 @@ def validate_api_settings(config):
         raise ValueError("API URL must be an HTTP(S) base URL without credentials, query, or fragment")
     # Accessing port also validates malformed/out-of-range ports.
     parsed.port
-    if not isinstance(config.get("model_name_or_path"), str) or not config["model_name_or_path"].strip():
-        raise ValueError("API model ID is required")
+    if "model_name_or_path" in config and not isinstance(config["model_name_or_path"], str):
+        raise ValueError("API model ID must be text when provided")
     limit = config.get("max_new_tokens", 4096)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 9_007_199_254_740_991:
         raise ValueError("Maximum response tokens must be a positive safe integer")
@@ -214,8 +214,11 @@ def generate_api_caption(filename, config, api_key="", opener=None):
         {"type": "text", "text": config.get("caption_prompt") or DEFAULT_PROMPT},
         {"type": "image_url", "image_url": {"url": image_data_url(filename, config.get('image_megapixels', 1))}},
     ]})
-    payload = {"model": config["model_name_or_path"], "messages": messages, "stream": False,
+    payload = {"messages": messages, "stream": False,
                config.get("api_max_tokens_field", "max_tokens"): config.get("max_new_tokens", 4096)}
+    model = config.get("model_name_or_path", "")
+    if model.strip():
+        payload["model"] = model
     for name in ("temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop"):
         if config.get(name) is not None:
             payload[name] = config[name]

@@ -40,7 +40,7 @@ export function restoreCaptionJobPreferences(
     process.caption = {
       ...process.caption,
       ...(preferences.type === API_CAPTIONER
-        ? { max_new_tokens: 4096, api_timeout: 300, api_max_tokens_field: 'max_tokens' as const, image_megapixels: 1 } : {}),
+        ? { model_name_or_path: '', max_new_tokens: 4096, api_timeout: 300, api_max_tokens_field: 'max_tokens' as const, image_megapixels: 1 } : {}),
       ...preferences.caption,
     };
   }

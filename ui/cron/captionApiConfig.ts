@@ -42,7 +42,7 @@ const apiUrl = z
 export const apiCaptionSettingsSchema = z
   .object({
     api_url: apiUrl,
-    model_name_or_path: z.string().trim().min(1).max(500),
+    model_name_or_path: z.string().trim().max(500).default(''),
     system_prompt: z.string().max(64_000).optional(),
     caption_prompt: z.string().min(1).max(64_000),
     max_new_tokens: z.number().int().positive().safe(),

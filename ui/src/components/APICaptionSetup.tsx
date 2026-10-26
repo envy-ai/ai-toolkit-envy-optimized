@@ -60,13 +60,18 @@ export default function APICaptionSetup({
           onChange={onClearKeyChange}
         />
       </div>
-      <TextInput
-        label="Model"
-        value={caption.model_name_or_path}
-        onChange={value => set('model_name_or_path', value)}
-        placeholder="Exact model ID served by the API"
-        required
-      />
+      <div>
+        <TextInput
+          id={`${cleanupId}-model`}
+          label="Model (optional)"
+          value={caption.model_name_or_path ?? ''}
+          onChange={value => set('model_name_or_path', value)}
+          placeholder="Leave blank to let the server choose"
+        />
+        <p className="mt-1 text-xs text-gray-500">
+          Enter an exact model ID if your API requires it. Leave blank for servers such as Strata that choose the model.
+        </p>
+      </div>
       <TextAreaInput
         label="System prompt"
         value={caption.system_prompt ?? ''}

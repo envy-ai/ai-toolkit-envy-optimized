@@ -85,6 +85,13 @@ function apiCaptionConfig(root, credentialId) {
 test('caption settings accept the 4096 limit and reject invalid settings or credential fields', () => {
   const config = loadConfig();
   const valid = config.apiCaptionSettingsSchema.parse(apiCaptionConfig('/tmp').config.process[0].caption);
+  const { model_name_or_path: _model, ...withoutModel } = valid;
+  assert.equal(config.apiCaptionSettingsSchema.parse(withoutModel).model_name_or_path, '');
+  assert.equal(config.apiCaptionSettingsSchema.parse({ ...valid, model_name_or_path: ' \t\n ' }).model_name_or_path, '');
+  assert.equal(config.apiCaptionSettingsSchema.parse({ ...valid, model_name_or_path: '  fixture-model  ' }).model_name_or_path, 'fixture-model');
+  for (const model of [null, 42, true, [], {}]) {
+    assert.throws(() => config.apiCaptionSettingsSchema.parse({ ...valid, model_name_or_path: model }));
+  }
   assert.equal(valid.max_new_tokens, 4096);
   assert.equal(valid.image_megapixels, 1, 'missing image limit defaults to one megapixel');
   assert.equal(config.apiCaptionSettingsSchema.parse({ ...valid, max_new_tokens: 16384 }).max_new_tokens, 16384);
@@ -333,6 +340,12 @@ test('remembered caption preferences round-trip all safe API settings and restor
   assert.deepEqual(restored.config.process[0].caption.regex_replace, job.config.process[0].caption.regex_replace);
   assert.equal(restored.config.process[0].caption.image_megapixels, 0.25);
   assert.deepEqual(credentialCalls, [{ toolkitRoot: root, id: credentialId, apiUrl: 'http://127.0.0.1:34343/v1' }]);
+
+  const legacyPreferences = structuredClone(preferences);
+  delete legacyPreferences.caption.model_name_or_path;
+  const legacyRestored = modules.jobConfig.restoreCaptionJobPreferences(legacyPreferences, '/legacy/dataset');
+  assert.equal(legacyRestored.config.process[0].caption.model_name_or_path, '',
+    'an older API preference without a model must not inherit the local captioner default');
 
   const loaded = await modules.route.GET();
   assert.deepEqual((await loaded.json()).preferences, preferences);

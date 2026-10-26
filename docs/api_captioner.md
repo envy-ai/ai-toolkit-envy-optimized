@@ -1,8 +1,13 @@
 # API dataset captioning
 
 Open a dataset's **AutoCaption** dialog and choose **API (OpenAI-compatible)**.
-The main form contains API URL, optional API key, model ID, optional system
-prompt, and caption prompt. Use the exact model ID exposed by your server.
+The main form contains API URL, optional API key, optional model ID, optional
+system prompt, and caption prompt. Enter the exact model ID if your server
+requires it. For local servers such as Strata that choose their own model,
+leave **Model (optional)** blank: a blank, whitespace-only, or omitted
+`model_name_or_path` omits the `model` field from the request. A supplied
+nonblank model ID is sent to the server; the toolkit does not discover models
+or substitute a default. Non-string model values, including null, are rejected.
 The endpoint must support Chat Completions messages containing an `image_url`
 data URL; a text-only model cannot caption images.
 
