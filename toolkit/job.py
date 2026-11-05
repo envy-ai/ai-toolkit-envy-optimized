@@ -3,11 +3,24 @@ from typing import Union, OrderedDict
 from toolkit.config import get_config
 
 
+def is_api_caption_job(config):
+    if config.get('job') != 'extension':
+        return False
+    processes = config.get('config', {}).get('process')
+    return isinstance(processes, list) and bool(processes) and all(
+        isinstance(process, dict) and process.get('type') == 'APICaptioner'
+        for process in processes
+    )
+
+
 def get_job(
         config_path: Union[str, dict, OrderedDict],
-        name=None
+        name=None,
+        *,
+        already_parsed=False,
 ):
-    config = get_config(config_path, name)
+    # run.py classifies the parsed config before calling the job factory.
+    config = config_path if already_parsed else get_config(config_path, name)
     if not config['job']:
         raise ValueError('config file is invalid. Missing "job" key')
 

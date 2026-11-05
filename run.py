@@ -29,35 +29,53 @@ suppress_child_consoles()
 # turn off diffusers telemetry until I can figure out how to make it opt-in
 os.environ['DISABLE_TELEMETRY'] = 'YES'
 
-# set torch to trace mode
-import torch
-    
-# check if we have DEBUG_TOOLKIT in env
-if os.environ.get("DEBUG_TOOLKIT", "0") == "1":
-    torch.autograd.set_detect_anomaly(True)
-
-# on unified memory devices (DGX Spark), offloading modules to cpu is useless and very slow
-from toolkit.util.unified_memory import apply_unified_memory_patches
-apply_unified_memory_patches()
-
-if seed is not None:
-    import random
-    import numpy as np
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
 import argparse
-from toolkit.job import get_job
-from toolkit.accelerator import get_accelerator
-from toolkit.print import print_acc, setup_log_to_file
+from toolkit.config import get_config
+from toolkit.job import get_job, is_api_caption_job
+from toolkit.print import setup_log_to_file
 
-accelerator = get_accelerator()
+accelerator = None
+
+
+def initialize_gpu_runtime():
+    """Initialize the existing training runtime once, before model imports."""
+    global accelerator
+    if accelerator is not None:
+        return
+    import torch
+    if os.environ.get("DEBUG_TOOLKIT", "0") == "1":
+        torch.autograd.set_detect_anomaly(True)
+    # On unified-memory GPUs, CPU offloading does not free model memory.
+    from toolkit.util.unified_memory import apply_unified_memory_patches
+    apply_unified_memory_patches()
+    if seed is not None:
+        import random
+        import numpy as np
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    from toolkit.accelerator import get_accelerator
+    accelerator = get_accelerator()
+
+
+def is_main_process():
+    if accelerator is None:
+        return os.environ.get('RANK', '0') == '0'
+    return accelerator.is_main_process
+
+
+def print_acc(*args, **kwargs):
+    if accelerator is None:
+        local_main = os.environ.get('LOCAL_RANK', '0') == '0'
+    else:
+        local_main = accelerator.is_local_main_process
+    if local_main:
+        print(*args, **kwargs)
 
 
 def print_end_message(jobs_completed, jobs_failed):
-    if not accelerator.is_main_process:
+    if not is_main_process():
         return
     failure_string = f"{jobs_failed} failure{'' if jobs_failed == 1 else 's'}" if jobs_failed > 0 else ""
     completed_string = f"{jobs_completed} completed job{'' if jobs_completed == 1 else 's'}"
@@ -106,9 +124,6 @@ def main():
     )
     args = parser.parse_args()
     
-    if args.log is not None:
-        setup_log_to_file(args.log)
-
     config_file_list = args.config_file_list
     if len(config_file_list) == 0:
         raise Exception("You must provide at least one config file")
@@ -116,17 +131,34 @@ def main():
     jobs_completed = 0
     jobs_failed = 0
 
-    if accelerator.is_main_process:
-        print_acc(f"Running {len(config_file_list)} job{'' if len(config_file_list) == 1 else 's'}")
+    if args.log is not None:
+        # LOCAL_RANK is supplied by distributed launchers. The API path needs
+        # a log before config validation without constructing an Accelerator.
+        local_rank = os.environ.get('LOCAL_RANK', '0')
+        setup_log_to_file(args.log, is_local_main_process=local_rank == '0')
+
+    announced = False
+
+    def announce_jobs():
+        nonlocal announced
+        if not announced:
+            announced = True
+            if is_main_process():
+                print_acc(f"Running {len(config_file_list)} job{'' if len(config_file_list) == 1 else 's'}")
 
     for config_file in config_file_list:
         job = None
         try:
-            job = get_job(config_file, args.name)
+            config = get_config(config_file, args.name)
+            if not is_api_caption_job(config):
+                initialize_gpu_runtime()
+            announce_jobs()
+            job = get_job(config, args.name, already_parsed=True)
             job.run()
             job.cleanup()
             jobs_completed += 1
         except DatasetValidationError as e:
+            announce_jobs()
             from toolkit.ui_job_status import UIJobStatus
             print_acc(f'\n{e}\n')
             UIJobStatus(e.sqlite_db_path).update_status('stopped', str(e))
@@ -135,6 +167,7 @@ def main():
                 print_end_message(jobs_completed, jobs_failed)
                 sys.exit(2)
         except Exception as e:
+            announce_jobs()
             print_acc(f"Error running job: {e}")
             jobs_failed += 1
             if job is not None:
@@ -146,6 +179,7 @@ def main():
                 print_end_message(jobs_completed, jobs_failed)
                 raise e
         except KeyboardInterrupt as e:
+            announce_jobs()
             if job is not None:
                 try:
                     job.process[0].on_error(e)

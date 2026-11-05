@@ -59,6 +59,3 @@ class BaseProcess(object):
 
     def add_meta(self, additional_meta: OrderedDict):
         self.meta.update(additional_meta)
-
-
-from jobs import BaseJob

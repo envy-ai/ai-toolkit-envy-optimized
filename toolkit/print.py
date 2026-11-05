@@ -1,10 +1,14 @@
 import sys
 import os
-from toolkit.accelerator import get_accelerator
+
+
+def _is_local_main_process():
+    from toolkit.accelerator import get_accelerator
+    return get_accelerator().is_local_main_process
 
 
 def print_acc(*args, **kwargs):
-    if get_accelerator().is_local_main_process:
+    if _is_local_main_process():
         print(*args, **kwargs)
 
 
@@ -26,8 +30,10 @@ class Logger:
         return self.terminal.isatty()
 
 
-def setup_log_to_file(filename):
-    if get_accelerator().is_local_main_process:
+def setup_log_to_file(filename, is_local_main_process=None):
+    if is_local_main_process is None:
+        is_local_main_process = _is_local_main_process()
+    if is_local_main_process:
         if not os.path.exists(os.path.dirname(filename)):
             os.makedirs(os.path.dirname(filename))
     # Capture the real streams before replacing them — wrapping the

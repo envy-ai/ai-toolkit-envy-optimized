@@ -2,7 +2,7 @@
 
 import base64
 import hashlib
-import importlib.util
+import importlib
 import io
 import json
 import math
@@ -13,7 +13,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import types
 from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -463,34 +462,9 @@ def test_response_token_limit_over_default_is_valid_and_kept_exact():
     assert validate_api_settings(settings) == "http://127.0.0.1:12345/v1/chat/completions"
 
 
-def _load_api_captioner_with_test_base():
-    """Load the real run loop while stubbing BaseCaptioner to avoid model/toolkit startup."""
-    package_name = "_api_captioner_test_pkg"
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(MODULE_PATH.parent)]
-    sys.modules[package_name] = package
-    base = types.ModuleType(package_name + ".BaseCaptioner")
-
-    class CaptionConfig:
-        def __init__(self, **kwargs):
-            self.recaption = kwargs.get("recaption", False)
-
-    class BaseCaptioner:
-        caption_config_class = CaptionConfig
-
-    base.CaptionConfig = CaptionConfig
-    base.BaseCaptioner = BaseCaptioner
-    sys.modules[base.__name__] = base
-
-    def load(name, filename):
-        spec = importlib.util.spec_from_file_location(name, filename)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        spec.loader.exec_module(module)
-        return module
-
-    load(package_name + ".api_caption", MODULE_PATH)
-    return load(package_name + ".APICaptioner", MODULE_PATH.parent / "APICaptioner.py")
+def _load_api_captioner():
+    """Load the API captioner and its shared, lightweight caption process."""
+    return importlib.import_module("extensions_built_in.captioner.APICaptioner")
 
 
 def _fake_run_loop(captioner, *, should_stop=False, fail=None):
@@ -516,7 +490,7 @@ def _fake_run_loop(captioner, *, should_stop=False, fail=None):
 
 
 def test_api_captioner_failure_and_stop_never_write_completion_status():
-    module = _load_api_captioner_with_test_base()
+    module = _load_api_captioner()
     captioner = module.APICaptioner.__new__(module.APICaptioner)
     statuses, saved, called = _fake_run_loop(captioner, fail=RuntimeError("synthetic 401"))
     with pytest.raises(RuntimeError, match="synthetic 401"):
@@ -564,15 +538,31 @@ def test_api_captioner_defaults_to_preserving_existing_sidecars_and_recaptions_w
     assert image.with_suffix(".txt").read_text(encoding="utf-8") == "fresh API caption"
 
 
-@pytest.mark.parametrize("model", [None, "fixture-model"])
-def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports(model):
+@pytest.mark.parametrize(("model", "debug_and_seed"), [(None, False), ("fixture-model", True)])
+def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports(model, debug_and_seed):
     """Exercise the real CLI bootstrap while keeping inference local and synthetic."""
     import yaml
 
     repo_root = Path(__file__).resolve().parents[1]
-    (repo_root / "tmp").mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="api-caption-cli-", dir=repo_root / "tmp") as work_dir:
+    artifact_dir = repo_root / "tmp/caption-startup"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="api-caption-cli-", dir=artifact_dir) as work_dir:
         work = Path(work_dir)
+        # sitecustomize runs before the real entry point and catches dynamic as
+        # well as ordinary imports. An empty CUDA visibility mask alone still
+        # allows the costly GPU libraries to initialize.
+        (work / "sitecustomize.py").write_text('''\
+import importlib.abc
+import sys
+
+class RejectHeavyImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in {"torch", "accelerate", "diffusers"}:
+            raise RuntimeError("Unexpected heavy import: " + fullname)
+        return None
+
+sys.meta_path.insert(0, RejectHeavyImports())
+''', encoding="utf-8")
         image_dir = work / "images"
         image_dir.mkdir()
         Image.new("RGBA", (9, 5), (30, 90, 180, 123)).save(image_dir / "fixture.png")
@@ -618,11 +608,20 @@ def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports(mode
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = ""
             env["AITK_API_CAPTION_KEY"] = ""
+            env["PYTHONPATH"] = str(work) + os.pathsep + env.get("PYTHONPATH", "")
             # Prevent a developer shell's provider credentials from reaching this test.
             for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "AITK_JOB_ID", "SEED"):
                 env.pop(key, None)
+            env.pop("DEBUG_TOOLKIT", None)
+            if debug_and_seed:
+                env.update(SEED="42", DEBUG_TOOLKIT="1")
+            log_path = work / "logs" / "run.log"
+            cli_args = [str(config_path)]
+            if debug_and_seed:
+                # Recovery must keep logging when the first config cannot load.
+                cli_args = [str(work / "missing.yaml"), str(config_path), "--recover"]
             result = subprocess.run(
-                ["conda", "run", "-n", "ai-toolkit", "python", "run.py", str(config_path)],
+                ["conda", "run", "-n", "ai-toolkit", "python", "run.py", *cli_args, "--log", str(log_path)],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
@@ -636,6 +635,10 @@ def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports(mode
             f"stdout tail:\n{result.stdout[-5000:]}"
         )
         assert (image_dir / "fixture.txt").read_text(encoding="utf-8") == "blue\nvase"
+        log = log_path.read_text(encoding="utf-8")
+        assert log.count(f"Running {2 if debug_and_seed else 1} job") == 1
+        if debug_and_seed:
+            assert "Error running job:" in log
         assert len(server.requests) == 1
         request = server.requests[0]
         assert request["path"] == "/v1/chat/completions"
@@ -650,7 +653,7 @@ def test_run_py_api_captioner_works_without_cuda_or_eager_extension_imports(mode
 
 
 def test_empty_regex_cleanup_keeps_existing_caption_unchanged(tmp_path):
-    module = _load_api_captioner_with_test_base()
+    module = _load_api_captioner()
     image = image_fixture(tmp_path)
     sidecar = image.with_suffix(".txt")
     sidecar.write_text("existing caption must survive", encoding="utf-8")
@@ -727,3 +730,55 @@ def test_extension_job_only_bypasses_global_discovery_for_api_captioner(monkeypa
     make_job([{"type": "OtherExtension"}])
     assert loaded[-1] == {"APICaptioner": global_process, "OtherExtension": global_process}
     assert discovered == [True, True]
+
+
+def test_gpu_runtime_initialization_preserves_debug_seed_patches_and_accelerator(monkeypatch):
+    import random
+    import numpy as np
+    import run
+
+    calls = []
+    accelerator = object()
+    torch = SimpleNamespace(
+        autograd=SimpleNamespace(set_detect_anomaly=lambda value: calls.append(("debug", value))),
+        manual_seed=lambda value: calls.append(("torch_seed", value)),
+        cuda=SimpleNamespace(manual_seed_all=lambda value: calls.append(("cuda_seed", value))),
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "toolkit.util.unified_memory", SimpleNamespace(
+        apply_unified_memory_patches=lambda: calls.append(("patch",)),
+    ))
+    monkeypatch.setitem(sys.modules, "toolkit.accelerator", SimpleNamespace(
+        get_accelerator=lambda: calls.append(("accelerator",)) or accelerator,
+    ))
+    monkeypatch.setattr(random, "seed", lambda value: calls.append(("random_seed", value)))
+    monkeypatch.setattr(np.random, "seed", lambda value: calls.append(("numpy_seed", value)))
+    monkeypatch.setattr(run, "seed", 42)
+    monkeypatch.setattr(run, "accelerator", None)
+    monkeypatch.setenv("DEBUG_TOOLKIT", "1")
+
+    run.initialize_gpu_runtime()
+    run.initialize_gpu_runtime()
+    assert run.accelerator is accelerator
+    assert calls == [("debug", True), ("patch",), ("random_seed", 42), ("numpy_seed", 42),
+                     ("torch_seed", 42), ("cuda_seed", 42), ("accelerator",)]
+
+
+@pytest.mark.parametrize(("package", "name"), [
+    ("jobs", "ExtensionJob"),
+    ("jobs.process", "BaseTrainProcess"),
+])
+def test_direct_submodule_import_preserves_package_class_export(package, name):
+    # Isolate import order from the rest of pytest's already-loaded modules.
+    script = (
+        "import importlib, inspect\n"
+        f"module = importlib.import_module({(package + '.' + name)!r})\n"
+        f"package = importlib.import_module({package!r})\n"
+        f"exported = getattr(package, {name!r})\n"
+        f"assert inspect.isclass(exported) and exported is getattr(module, {name!r})\n"
+    )
+    result = subprocess.run(
+        ["conda", "run", "-n", "ai-toolkit", "python", "-c", script],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=150,
+    )
+    assert result.returncode == 0, result.stderr

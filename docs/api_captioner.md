@@ -193,8 +193,18 @@ GPU queue behavior remain unchanged.
 
 API-only jobs resolve the built-in API captioner directly during Python startup.
 They do not discover unrelated GPU model extensions or load other captioner
-implementations. Mixed-process and other extension jobs retain their existing
+implementations. When `run.py` receives only API caption configs, it also skips
+PyTorch, Accelerate, Diffusers, training imports, and CUDA device checks. This
+applies with `--log`, `--name`, `--recover`, `SEED`, and `DEBUG_TOOLKIT` set. A
+later GPU job in the same command initializes the usual torch runtime before
+loading its models, including unified-memory patches, debug mode, seeding, and
+Accelerate. Mixed-process and other extension jobs retain their existing
 registration behavior.
+
+In a local empty-dataset CLI check through `conda run`, API startup fell from
+7.33 seconds and about 921 MiB peak resident memory to 0.96 seconds and about
+50 MiB. This measures Python startup and job setup with no images or provider
+request; actual caption time also depends on image encoding and API latency.
 
 Authentication, connection, server, malformed-response, refusal, and truncation
 errors stop the job and remain visible in job status/logs. Provider response

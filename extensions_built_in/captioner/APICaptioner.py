@@ -1,6 +1,6 @@
 import os
 import tqdm
-from .BaseCaptioner import BaseCaptioner, CaptionConfig
+from .CaptionerProcess import CaptionerProcess, CaptionConfig
 from .api_caption import DEFAULT_PROMPT, IMAGE_EXTENSIONS, generate_api_caption, validate_api_settings
 
 
@@ -15,7 +15,7 @@ class APICaptionConfig(CaptionConfig):
         self.api_settings = kwargs
 
 
-class APICaptioner(BaseCaptioner):
+class APICaptioner(CaptionerProcess):
     caption_config_class = APICaptionConfig
 
     def load_model(self):
@@ -31,7 +31,7 @@ class APICaptioner(BaseCaptioner):
         for filename in tqdm.tqdm(self.file_paths, desc="API captioning", unit="image"):
             self.maybe_stop()
             # Unlike model batch captioners, transport/auth/truncation failures stop
-            # the job and reach BaseCaptioner.on_error; never report false completion.
+            # the job and reach CaptionerProcess.on_error; never report false completion.
             caption = self.get_caption_for_file(filename)
             self.maybe_stop()
             self.save_caption_for_file(filename, caption)

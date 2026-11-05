@@ -77,6 +77,9 @@ class DatasetValidationReportTests(unittest.TestCase):
             error.sqlite_db_path = db
             output = io.StringIO()
             with patch.dict(os.environ, AITK_JOB_ID='test'), patch('sys.argv', ['run.py', 'test.yaml']), \
+                    patch.object(run, 'get_config', return_value={
+                        'job': 'extension', 'config': {'process': [{'type': 'APICaptioner'}]}
+                    }), \
                     patch.object(run, 'get_job', side_effect=error), contextlib.redirect_stdout(output):
                 with self.assertRaises(SystemExit) as caught:
                     run.main()
