@@ -244,7 +244,6 @@ export default function SimpleJob({
   const showProdigyOptimizerParams = selectedOptimizer.toLowerCase().startsWith('prodigy');
   const networkType = jobConfig.config.process[0].network?.type ?? 'lora';
   const frequencyLossType = jobConfig.config.process[0].train.frequency_loss_type ?? 'none';
-  const showNetworkConv = !isFizgigSlider && (networkType == 'dora' || !disableSections.includes('network.conv'));
   const comfyConfig = jobConfig.config.process[0].sample.comfy;
   const comfyEnabled = comfyConfig?.enabled || false;
   const [comfyOptions, setComfyOptions] = useState<ComfyOptions>(emptyComfyOptions);
@@ -1138,18 +1137,29 @@ export default function SimpleJob({
               ]}
             />
             {networkType == 'lokr' && (
-              <SelectInput
-                label="LoKr Factor"
-                value={`${jobConfig.config.process[0].network?.lokr_factor ?? -1}`}
-                onChange={value => setJobConfig(parseInt(value), 'config.process[0].network.lokr_factor')}
-                options={[
-                  { value: '-1', label: 'Auto' },
-                  { value: '4', label: '4' },
-                  { value: '8', label: '8' },
-                  { value: '16', label: '16' },
-                  { value: '32', label: '32' },
-                ]}
-              />
+              <>
+                <SelectInput
+                  label="LoKr Factor"
+                  value={`${jobConfig.config.process[0].network?.lokr_factor ?? -1}`}
+                  onChange={value => setJobConfig(parseInt(value), 'config.process[0].network.lokr_factor')}
+                  options={[
+                    { value: '-1', label: 'Auto' },
+                    { value: '4', label: '4' },
+                    { value: '8', label: '8' },
+                    { value: '16', label: '16' },
+                    { value: '32', label: '32' },
+                  ]}
+                />
+                <Checkbox
+                  label="LoKr Full Rank"
+                  checked={jobConfig.config.process[0].network?.lokr_full_rank ?? false}
+                  onChange={value => setJobConfig(value, 'config.process[0].network.lokr_full_rank')}
+                  docKey="config.process[0].network.lokr_full_rank"
+                />
+                <p className="text-xs text-gray-400">
+                  Full Rank uses full LoKr factors. Turn it off to use the Linear and Conv Rank/Alpha values below.
+                </p>
+              </>
             )}
             {networkType == 'loha' && (
               <Checkbox
@@ -1167,7 +1177,7 @@ export default function SimpleJob({
                 docKey="config.process[0].network.lokr_dora"
               />
             )}
-            {(networkType == 'lora' || networkType == 'dora' || networkType == 'loha') && (
+            {(networkType == 'lora' || networkType == 'dora' || networkType == 'loha' || networkType == 'lokr') && (
               <>
                 <TextInput
                   label="Pretrained LoRA Path"
@@ -1222,44 +1232,40 @@ export default function SimpleJob({
                     onChange={value => setJobConfig(value, 'config.process[0].network.save_magnitude_less_lora')}
                   />
                 )}
-                {showNetworkConv ? (
-                  <>
-                    <NumberInput
-                      label="Conv Rank"
-                      value={jobConfig.config.process[0].network?.conv ?? 16}
-                      onChange={value => {
-                        const currentConv = jobConfig.config.process[0].network?.conv;
-                        const currentConvAlpha = jobConfig.config.process[0].network?.conv_alpha;
-                        setJobConfig(value, 'config.process[0].network.conv');
-                        if (
-                          (networkType == 'lora' || networkType == 'loha') &&
-                          (currentConvAlpha === undefined ||
-                            currentConvAlpha === null ||
-                            currentConvAlpha === currentConv)
-                        ) {
-                          setJobConfig(value, 'config.process[0].network.conv_alpha');
-                        }
-                      }}
-                      placeholder="eg. 16"
-                      min={0}
-                      max={1024}
-                    />
-                    {(networkType == 'lora' || networkType == 'dora' || networkType == 'loha') && (
-                      <NumberInput
-                        label="Conv Alpha"
-                        value={
-                          jobConfig.config.process[0].network?.conv_alpha ??
-                          jobConfig.config.process[0].network?.conv ??
-                          16
-                        }
-                        onChange={value => setJobConfig(value, 'config.process[0].network.conv_alpha')}
-                        placeholder="eg. 16"
-                        min={0}
-                        max={1024}
-                      />
-                    )}
-                  </>
-                ) : null}
+                <NumberInput
+                  label="Conv Rank"
+                  value={jobConfig.config.process[0].network?.conv ?? 16}
+                  onChange={value => {
+                    const currentConv = jobConfig.config.process[0].network?.conv;
+                    const currentConvAlpha = jobConfig.config.process[0].network?.conv_alpha;
+                    setJobConfig(value, 'config.process[0].network.conv');
+                    if (
+                      (networkType == 'lora' || networkType == 'loha' || networkType == 'lokr') &&
+                      (currentConvAlpha === undefined ||
+                        currentConvAlpha === null ||
+                        currentConvAlpha === currentConv)
+                    ) {
+                      setJobConfig(value, 'config.process[0].network.conv_alpha');
+                    }
+                  }}
+                  placeholder="eg. 16"
+                  min={0}
+                  max={1024}
+                  docKey="config.process[0].network.conv"
+                />
+                <NumberInput
+                  label="Conv Alpha"
+                  value={
+                    jobConfig.config.process[0].network?.conv_alpha ??
+                    jobConfig.config.process[0].network?.conv ??
+                    16
+                  }
+                  onChange={value => setJobConfig(value, 'config.process[0].network.conv_alpha')}
+                  placeholder="eg. 16"
+                  min={0}
+                  max={1024}
+                  docKey="config.process[0].network.conv_alpha"
+                />
               </>
             )}
           </Card>

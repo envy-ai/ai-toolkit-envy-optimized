@@ -1,3 +1,7 @@
+## Instruction inheritance
+
+Before working in this project, read `/home/bart/AGENTS.md` first, then read this project `AGENTS.md`. Apply both sets of instructions; where they conflict, this project file takes precedence. Higher-priority system/developer instructions and permission boundaries still apply.
+
 # Shared instructions
 
 Read and follow `~/AGENTS.md` in addition to this file. If the two files

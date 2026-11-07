@@ -51,6 +51,18 @@ test('ordinary MOSS jobs reject the bundled Krea preview workflow before saving'
   assert.match(simpleJob, /value: 'config\/comfy_templates\/moss_image_lora_sample\.json\.njk', label: 'MOSS-Image LoRA image'/);
 });
 
+test('ordinary LoKr and DoKr jobs allow compatible previews and enforce workflow compatibility', () => {
+  for (const dora of [false, true]) {
+    const job = config('moss_image:base', 'diffusion_trainer', 'lokr');
+    const process = job.config.process[0];
+    process.network.lokr_dora = dora;
+    process.sample.comfy = { enabled: true, workflow_path: 'config/comfy_templates/moss_image_lora_sample.json.njk' };
+    assert.deepEqual(caps.validateTrainingCapabilities(job), []);
+    process.sample.comfy.workflow_path = 'config/comfy_templates/krea2_lora_sample.json.njk';
+    assert.match(caps.validateTrainingCapabilities(job).join('\n'), /Krea 2 ComfyUI workflows are incompatible/);
+  }
+});
+
 test('all specialized MOSS modes and aliases accept ComfyUI previews while retaining workflow validation', () => {
   for (const mode of [...modes, ...Object.keys(caps.trainingModeAliases)]) {
     const job = config('moss_image:base', caps.canonicalTrainingMode(mode));

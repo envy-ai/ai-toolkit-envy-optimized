@@ -81,3 +81,70 @@ test('LoRA-only training modes still reset a previously selected LoKr', () => {
     assert.equal(config.config.process[0].network.type, 'lora', type);
   }
 });
+
+test('convolution controls remain available across adapter types and form hints', () => {
+  const controls = new Map();
+  function visit(node) {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === 'NumberInput') {
+      const label = node.attributes.properties.find(a => ts.isJsxAttribute(a) && a.name.getText(tree) === 'label');
+      if (label && ['Conv Rank', 'Conv Alpha'].includes(label.initializer.text)) controls.set(label.initializer.text, node);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(tree);
+  assert.equal(controls.size, 2);
+  for (const [label, node] of controls) {
+    for (const networkType of ['lora', 'dora', 'loha', 'lokr', 'unknown']) {
+      for (const isFizgigSlider of [false, true]) {
+        for (const disableSections of [[], ['network.conv']]) {
+          for (let parent = node.parent; parent && !ts.isJsxElement(parent); parent = parent.parent) {
+            if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
+                parent.right.pos <= node.pos && parent.right.end >= node.end) {
+              const condition = parent.left.getText(tree);
+              const visible = new Function('networkType', 'isFizgigSlider', 'disableSections', `return (${condition})`)
+                (networkType, isFizgigSlider, disableSections);
+              assert.equal(!!visible, networkType !== 'unknown', `${label}: ${networkType}, fizgig=${isFizgigSlider}, ${condition}`);
+            }
+          }
+        }
+      }
+    }
+  }
+  const handler = label => controls.get(label).attributes.properties
+    .find(a => ts.isJsxAttribute(a) && a.name.getText(tree) === 'onChange').initializer.expression.getText(tree);
+  for (const networkType of ['lora', 'loha', 'lokr']) {
+    for (const [alpha, expected] of [[4, 1], [8, 2], [undefined, 2]]) {
+      const updates = [];
+      const jobConfig = { config: { process: [{ network: { conv: 8, conv_alpha: alpha } }] } };
+      new Function('jobConfig', 'networkType', 'setJobConfig', `return (${handler('Conv Rank')})`)
+        (jobConfig, networkType, (...args) => updates.push(args))(12);
+      assert.equal(updates.length, expected);
+      assert.deepEqual(updates[0], [12, 'config.process[0].network.conv']);
+      if (expected === 2) assert.deepEqual(updates[1], [12, 'config.process[0].network.conv_alpha']);
+    }
+  }
+  const updates = [];
+  new Function('setJobConfig', `return (${handler('Conv Alpha')})`)((...args) => updates.push(args))(5);
+  assert.deepEqual(updates, [[5, 'config.process[0].network.conv_alpha']]);
+});
+
+test('LoKr full rank can be switched off and survives serialization', () => {
+  let checkbox;
+  function visit(node) {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === 'Checkbox' &&
+        node.attributes.getText(tree).includes('label="LoKr Full Rank"')) checkbox = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(tree);
+  assert.ok(checkbox);
+  const attr = name => checkbox.attributes.properties.find(a => ts.isJsxAttribute(a) && a.name.getText(tree) === name);
+  assert.match(attr('checked').getText(tree), /lokr_full_rank \?\? false/);
+  const config = structuredClone(defaults.defaultJobConfig);
+  assert.equal(config.config.process[0].network.lokr_full_rank, true);
+  const setJobConfig = (value, field) => {
+    assert.equal(field, 'config.process[0].network.lokr_full_rank');
+    config.config.process[0].network.lokr_full_rank = value;
+  };
+  new Function('setJobConfig', `return (${attr('onChange').initializer.expression.getText(tree)})`)(setJobConfig)(false);
+  assert.equal(JSON.parse(JSON.stringify(config)).config.process[0].network.lokr_full_rank, false);
+});

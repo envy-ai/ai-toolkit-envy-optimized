@@ -164,9 +164,38 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'Linear Alpha',
     description: (
       <>
-        Controls the LoRA update scale as <code>alpha / rank</code>. The value is used during training and saved as
-        per-layer alpha in the output safetensors file so compatible loaders such as ComfyUI preserve the same scale.
-        Set alpha equal to rank for a scale of 1.
+        Scales ranked Linear adapter updates as <code>alpha / rank</code>. The value is saved per layer in the
+        output safetensors file for compatible loaders such as ComfyUI. Set alpha equal to rank for a scale of 1.
+        LoKr Full Rank ignores the configured rank and alpha values.
+      </>
+    ),
+  },
+  'config.process[0].network.conv': {
+    title: 'Conv Rank',
+    description: (
+      <>
+        Rank for adapted Conv2d layers. This setting affects the network only when its selected targets include
+        Conv2d layers. The current DoRA implementation cannot attach to Conv2d layers. LoKr Full Rank ignores
+        the configured rank.
+      </>
+    ),
+  },
+  'config.process[0].network.conv_alpha': {
+    title: 'Conv Alpha',
+    description: (
+      <>
+        Scales ranked Conv2d adapter updates as <code>alpha / rank</code>. This setting affects the network only
+        when its selected targets include Conv2d layers. The current DoRA implementation cannot attach to Conv2d
+        layers. LoKr Full Rank ignores the configured alpha.
+      </>
+    ),
+  },
+  'config.process[0].network.lokr_full_rank': {
+    title: 'LoKr Full Rank',
+    description: (
+      <>
+        Uses full LoKr factors and ignores the configured Linear and Conv Rank/Alpha values. This is the existing
+        default for new jobs. Turn it off to train ranked factors with those values.
       </>
     ),
   },

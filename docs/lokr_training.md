@@ -2,10 +2,13 @@
 
 Choose **LoKr** in the ordinary training form's **Target Type** selector. Enable
 **DoRA Weight Decomposition (DoKr)** to train an output-row magnitude in addition
-to LoKr's Kronecker factors. The simple form retains LoKr's existing factor
-selector and full-rank default. YAML supports the existing linear rank/alpha,
-optional convolution rank/alpha, pretrained checkpoint, and layer learning-rate
-settings.
+to LoKr's Kronecker factors. The form shows the **LoKr Full Rank** switch, which
+retains the existing enabled default. While enabled, the backend uses full LoKr
+factors and overrides the configured Linear and Conv Rank/Alpha values. Turn it
+off to make those editable form values effective. **Conv Rank** and **Conv Alpha**
+apply only when the selected adapter targets contain Conv2d layers. The form
+also exposes the pretrained checkpoint path. YAML supports these settings and
+layer learning-rate settings.
 
 ```yaml
 network:
@@ -41,7 +44,9 @@ When both Kronecker factors are stored as full matrices, their scale is one,
 matching the local ComfyUI loader regardless of a checkpoint's nominal alpha.
 
 The attached network supports native training previews; ComfyUI can load the
-exported adapter. The separate native inference LoRA loader rejects DoKr
+exported adapter. The ordinary ComfyUI preview renderer saves the active
+LoKr/DoKr adapter through the same checkpoint path as other adapter types; the
+chosen model and workflow must still support that checkpoint. The separate native inference LoRA loader rejects DoKr
 checkpoints because its standalone hook and merge paths do not apply the DoRA
 weight decomposition. Saving a merged full model with
 `merge_network_on_save` is unsupported. The LoRA trimming utility does not bake

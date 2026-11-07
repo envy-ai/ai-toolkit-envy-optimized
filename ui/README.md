@@ -90,8 +90,14 @@ these controls and the shared `Modal`; numeric validation uses
 For ordinary LoKr training, select **LoKr** under **Target Type** and enable
 **DoRA Weight Decomposition (DoKr)** beneath the LoKr factor selector. The
 shared checkbox supports clicking its label or focusing it with Tab and pressing
-Space/Enter. It saves `network.lokr_dora`, which defaults to false. Existing
-LoKr factor and memory settings are retained. See
+Space/Enter. It saves `network.lokr_dora`, which defaults to false. **LoKr Full
+Rank** preserves the new-job default of true; turn it off to use the editable
+Linear and Conv Rank/Alpha fields. An imported config without the full-rank flag
+uses the backend default of false. The shared Conv Rank/Alpha controls are
+available for LoRA, DoRA, LoHa, and LoKr across model architectures and training
+forms; they affect the network only when its targets include Conv2d layers.
+The current DoRA implementation cannot attach to Conv2d layers.
+Existing LoKr factor and memory settings are retained. See
 [LoKr and optional DoRA](../docs/lokr_training.md) for checkpoint conventions and limits.
 
 The AI assistant drawer autosaves titled chats on this toolkit server. Open

@@ -220,6 +220,42 @@ class LoKrDoRATests(unittest.TestCase):
         network.is_active = True
         return network, model
 
+    def test_comfy_training_snapshot_and_workflow_for_lokr_and_dokr(self):
+        from unittest.mock import Mock
+        from jobs.process.BaseSDTrainProcess import BaseSDTrainProcess
+        from toolkit.comfy_sample import ComfySampleRequest, render_nunjucks_workflow
+
+        temp_root = Path(__file__).resolve().parents[1] / 'tmp'
+        temp_root.mkdir(exist_ok=True)
+        for dora in (False, True):
+            with self.subTest(dora=dora), tempfile.TemporaryDirectory(dir=temp_root) as directory:
+                network, model = self.network_fixture(dora)
+                trainer = types.SimpleNamespace(
+                    network=network, save_root=directory, last_save_path=None,
+                    update_training_metadata=Mock(), meta={}, job=types.SimpleNamespace(name='test'),
+                    embedding=None, save_config=types.SimpleNamespace(dtype='float32'),
+                    clean_up_saves=Mock(),
+                    _get_comfy_lora_output_path=lambda step: str(Path(directory) / 'current.safetensors'),
+                )
+                path = BaseSDTrainProcess._save_current_network_for_comfy(trainer, step=1)
+                weights = load_file(path)
+                self.assertTrue(any('lokr_' in key for key in weights))
+                self.assertEqual(any(key.endswith('.dora_scale') for key in weights), dora)
+                request = ComfySampleRequest(
+                    prompt='test', width=512, height=512, steps=4, cfg=1, seed=1,
+                    model='model.safetensors', vae='vae.safetensors', text_encoder='clip.safetensors',
+                    sampler='euler', scheduler='simple', inference_lora='', inference_lora_strength=1,
+                    output_format='png', output_quality='high', training_lora_path=path,
+                    training_lora_filename=Path(path).name, filename_prefix='sample',
+                )
+                workflow = render_nunjucks_workflow('config/comfy_templates/krea2_lora_sample.json.njk', request)
+                self.assertEqual(workflow['36']['inputs']['absolute_path'], path)
+
+    def test_lokr_full_rank_false_preserves_explicit_convolution_values(self):
+        config = NetworkConfig(type='lokr', lokr_full_rank=False, linear=8, linear_alpha=4,
+                               conv=6, conv_alpha=3)
+        self.assertEqual((config.linear, config.linear_alpha, config.conv, config.conv_alpha), (8, 4, 6, 3))
+
     def test_full_factor_import_across_nominal_ranks_preserves_unit_scale(self):
         source, source_model = self.network_fixture(True, rank=8)
         target, target_model = self.network_fixture(True, rank=9999999999)
