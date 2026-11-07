@@ -51,6 +51,20 @@ test('ordinary MOSS jobs reject the bundled Krea preview workflow before saving'
   assert.match(simpleJob, /value: 'config\/comfy_templates\/moss_image_lora_sample\.json\.njk', label: 'MOSS-Image LoRA image'/);
 });
 
+test('all specialized MOSS modes and aliases accept ComfyUI previews while retaining workflow validation', () => {
+  for (const mode of [...modes, ...Object.keys(caps.trainingModeAliases)]) {
+    const job = config('moss_image:base', caps.canonicalTrainingMode(mode));
+    const process = job.config.process[0];
+    process.type = mode;
+    for (const workflow of ['config/comfy_templates/moss_image_lora_sample.json.njk', 'custom/moss_sample.json']) {
+      process.sample.comfy = { enabled: true, workflow_path: workflow };
+      assert.deepEqual(caps.validateTrainingCapabilities(job), [], `${mode}: ${workflow}`);
+    }
+    process.sample.comfy.workflow_path = 'config/comfy_templates/krea2_lora_sample.json.njk';
+    assert.match(caps.validateTrainingCapabilities(job).join('\n'), /Krea 2 ComfyUI workflows are incompatible/, mode);
+  }
+});
+
 test('capability matrix agrees with Python and supports all objectives without duplicate legacy choices', () => {
   const backend = fs.readFileSync(path.resolve(__dirname, '../../toolkit/training_capabilities.py'), 'utf8');
   const declarations = [...backend.matchAll(/'([^']+)': FlowTrainingCapability\('([^']+)', (\d+)([^\n]*)/g)];

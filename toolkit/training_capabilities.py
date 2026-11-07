@@ -97,8 +97,6 @@ def validate_specialized_model(config, mode=None):
         raise ValueError(f'{mode} requires {" or ".join(labels[item] for item in networks)}{suffix}')
     kwargs = model.get('model_kwargs') or {}
     if arch == 'moss_image':
-        if ((config.get('sample') or {}).get('comfy') or {}).get('enabled'):
-            raise ValueError('MOSS-Image specialized modes require native previews; disable the ComfyUI renderer')
         if kwargs.get('kv_cache') and not kwargs.get('edit'):
             raise ValueError('MOSS-Image kv_cache requires model_kwargs.edit=true')
         if (kwargs.get('edit') or kwargs.get('kv_cache')) and mode not in ('flow_dpo', 'guidance_distillation'):

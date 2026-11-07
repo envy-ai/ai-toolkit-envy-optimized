@@ -162,8 +162,9 @@ through one accumulation, including backward; transformer K/V are recomputed for
 each teacher/policy pass. `kv_cache` controls reference attention isolation in
 training and branch-specific K/V caching only during native inference. Fizgig,
 SliderSpace and KTO reject MOSS edit/kv_cache settings explicitly. MOSS specialized
-previews currently require the native renderer; Comfy previews are rejected before
-model loading. No Comfy nodes are installed or patched by this integration.
+training can use ComfyUI for text-to-image previews with the dedicated MOSS
+workflow; preview edit references still require native rendering. No Comfy nodes
+are installed or patched by this integration.
 
 Specialized modes do not block `model.inference_lora_path` or clear it when
 switching modes. Inference adapters are for previews, not training references.
@@ -207,14 +208,15 @@ including glyph noise scheduling and shared edit reference latents. Existing
 ordered sample references and signed adapter strengths are retained. Prompts
 render individually; practice/discovery generation remains native.
 
-Ordinary MOSS-Image training can use native previews or the dedicated
+MOSS-Image training, including specialized modes, can use native previews or the dedicated
 [`moss_image_lora_sample.json.njk` workflow](moss_image_comfy_samples.md).
 It uses MOSS's Qwen3.5 encoder type, standard VAE loader, `KSampler` and PNG
 `SaveImage`, with model-only inference LoRA. Its prompts render individually
 even when batch submission is enabled. The bundled Krea 2 workflows are
 incompatible with MOSS's encoder, sampling graph and VAE and are rejected before
-sampling. Existing compatible custom workflows remain selectable for ordinary
-MOSS jobs. Specialized MOSS modes still require native previews.
+sampling. Existing compatible custom workflows remain selectable for
+MOSS jobs. The ComfyUI workflow supports text-to-image only and does not
+reproduce native specialized schedules or negative-branch layer skipping.
 
 - Krea: `config/comfy_templates/krea2_lora_sample.json.njk` or its Easy Use batch
   variant. Specialized modes send the native, resolution-aware sigma grid through

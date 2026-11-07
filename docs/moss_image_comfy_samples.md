@@ -1,7 +1,8 @@
 # MOSS-Image ComfyUI previews
 
-Ordinary `diffusion_trainer` MOSS-Image Base/SFT jobs can select **MOSS-Image
-LoRA image** in the existing Comfy Workflow selector:
+MOSS-Image Base/SFT jobs, including specialized training modes, can select
+**MOSS-Image LoRA image** for text-to-image previews in the existing Comfy
+Workflow selector:
 `config/comfy_templates/moss_image_lora_sample.json.njk`. The selector retains
 its existing mouse and keyboard controls. Select component files explicitly;
 the renderer rejects known incompatible bundled workflows rather than changing
@@ -58,9 +59,11 @@ the single-image template raises a useful error. Existing foreground/background
 sampling and training offload behavior still applies.
 
 This graph supports text-to-image previews only; edit reference images are
-rejected. MOSS specialized training modes still require native previews because
-their native schedule and negative-branch layer skipping are not represented
-by this ordinary `KSampler` graph. No native/Comfy numerical parity is claimed.
+rejected, including when an edit-training job supplies them. Specialized MOSS
+training can use this ComfyUI graph for text-to-image previews, while native
+previews retain the specialized schedule and negative-branch layer skipping.
+The ordinary `KSampler` graph does not reproduce those native details, so no
+native/Comfy numerical parity is claimed.
 The trainer validates this template against the target server's node schema
 before posting a prompt; missing components or node support produce explicit
 errors. This integration does not install or patch ComfyUI nodes.

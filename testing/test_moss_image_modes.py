@@ -35,6 +35,7 @@ from toolkit.flow_training import (
 from toolkit.training_capabilities import (
     FLOW_TRAINING_MODELS,
     SPECIALIZED_MODES,
+    MODE_ALIASES,
     canonical_flow_arch,
     normalize_moss_training_config,
     validate_edit_references,
@@ -121,11 +122,12 @@ class MossTrainingModeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "edit=true"):
             validate_edit_references(t2i, t2i["datasets"], paired=True)
 
-    def test_native_only_preview_and_invalid_skip_layers_fail_preload(self):
-        comfy = self.config()
-        comfy["sample"] = {"comfy": {"enabled": True}}
-        with self.assertRaisesRegex(ValueError, "native previews"):
-            validate_specialized_model(comfy)
+    def test_specialized_modes_accept_comfy_preview_and_invalid_skip_layers_fail_preload(self):
+        for mode in (*SPECIALIZED_MODES, *MODE_ALIASES):
+            with self.subTest(mode=mode):
+                config = self.config(mode=mode)
+                config["sample"] = {"comfy": {"enabled": True, "workflow_path": "config/comfy_templates/moss_image_lora_sample.json.njk"}}
+                self.assertEqual(validate_specialized_model(config), FLOW_TRAINING_MODELS["moss_image"])
         for values in ([42], [-1], [1.5], "22"):
             config = self.config(uncond_skip_layers=values)
             with self.subTest(values=values), self.assertRaisesRegex(ValueError, "zero-based"):
@@ -400,21 +402,16 @@ class MossUiContractTests(unittest.TestCase):
         self.assertEqual(model.get_text_embedding_space_version(),
                          "moss_image_flow_components_v1_specialized")
 
-    def test_specialized_moss_rechecks_native_preview_renderer_for_live_samples(self):
-        comfy_sample = SimpleNamespace(comfy=SimpleNamespace(enabled=True))
+    def test_specialized_moss_accepts_live_comfy_samples_and_rejects_krea_workflow(self):
         specialized = object.__new__(MossImageModel)
         specialized.arch = "moss_image"
         prepare_specialized_conditioning(specialized)
-        with self.assertRaisesRegex(ValueError, "native previews"):
-            specialized.validate_sample_config(comfy_sample)
-
-        ordinary = object.__new__(MossImageModel)
-        ordinary.arch = "moss_image"
-        custom_sample = SimpleNamespace(comfy=SimpleNamespace(
-            enabled=True, workflow_path="custom/moss_sample.json"))
-        ordinary.validate_sample_config(custom_sample)
+        for workflow in ("custom/moss_sample.json", "config/comfy_templates/moss_image_lora_sample.json.njk"):
+            with self.subTest(workflow=workflow):
+                specialized.validate_sample_config(SimpleNamespace(comfy=SimpleNamespace(
+                    enabled=True, workflow_path=workflow)))
         with self.assertRaisesRegex(ValueError, "Krea 2 ComfyUI workflows are incompatible"):
-            ordinary.validate_sample_config(SimpleNamespace(comfy=SimpleNamespace(
+            specialized.validate_sample_config(SimpleNamespace(comfy=SimpleNamespace(
                 enabled=True, workflow_path="config/comfy_templates/krea2_lora_sample.json.njk")))
 
     def test_ui_capability_table_and_variant_options_include_moss_modes(self):
@@ -424,7 +421,6 @@ class MossUiContractTests(unittest.TestCase):
         self.assertIn("moss_image: { label: 'MOSS-Image', bucketDivisibility: 16, editReferences: true }", capabilities)
         for variant in ("moss_image", "moss_image:base", "moss_image:edit", "moss_image:base_edit"):
             self.assertIn(f'name: "{variant}"', model_options)
-        self.assertIn("MOSS-Image specialized modes require native previews", capabilities)
         self.assertIn("MOSS-Image edit training requires fixed edit-source images for every dataset", capabilities)
 
 

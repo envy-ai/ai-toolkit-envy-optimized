@@ -129,7 +129,7 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     const workflow = (process.sample.comfy.workflow_path ?? 'config/comfy_templates/krea2_lora_sample.json.njk')
       .replaceAll('\\', '/').split('/').pop() ?? '';
     if (workflow.startsWith('krea2_') && workflow.endsWith('.json.njk')) {
-      errors.push('Krea 2 ComfyUI workflows are incompatible with MOSS-Image. Select MOSS-Image LoRA image for ordinary text-to-image previews, or disable Use ComfyUI Renderer to use native MOSS previews.');
+      errors.push('Krea 2 ComfyUI workflows are incompatible with MOSS-Image. Select MOSS-Image LoRA image for text-to-image previews, or disable Use ComfyUI Renderer to use native MOSS previews.');
     }
   }
   if (!isSpecializedTrainingMode(mode)) return errors;
@@ -139,7 +139,6 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
   if (!networks.includes(process.network?.type ?? '')) errors.push(`${mode} requires ${networks.length === 1 ? 'LoRA only' : 'LoRA or DoRA'}.`);
   const kwargs = model.model_kwargs ?? {};
   if (model.arch === 'moss_image') {
-    if (process.sample?.comfy?.enabled) errors.push('MOSS-Image specialized modes require native previews. Disable the ComfyUI renderer.');
     if (kwargs.kv_cache && !kwargs.edit) errors.push('MOSS-Image kv_cache requires model_kwargs.edit=true.');
     if ((kwargs.edit || kwargs.kv_cache) && !['flow_dpo', 'guidance_distillation'].includes(mode)) errors.push(`${mode} is text-to-image. Disable MOSS-Image edit and kv_cache.`);
     const skipped = kwargs.uncond_skip_layers ?? [22];

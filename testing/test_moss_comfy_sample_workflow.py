@@ -106,7 +106,7 @@ class MossComfySampleWorkflowTests(unittest.TestCase):
         self.assertEqual(graph["7"]["class_type"], "ConditioningZeroOut")
         self.assertEqual(graph["7"]["inputs"]["conditioning"], ["6", 0])
 
-    def test_template_rejects_other_architectures_edit_references_and_specialized_modes(self):
+    def test_template_rejects_other_architectures_and_edit_references(self):
         base_variant = get_workflow_for_sample(
             DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH, self.request(model_arch="moss_image:base")
         )
@@ -120,10 +120,16 @@ class MossComfySampleWorkflowTests(unittest.TestCase):
             get_workflow_for_sample(
                 DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH, self.request(control_image="reference.png")
             )
-        with self.assertRaisesRegex(ValueError, "require native previews"):
-            get_workflow_for_sample(
-                DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH, self.request(specialized_flow=True)
-            )
+
+    def test_specialized_flow_renders_signed_strength_and_dynamic_sampling(self):
+        request = self.request(specialized_flow=True, training_lora_strength=-0.75,
+                               width=512, height=896, steps=17, cfg=4.5, seed=123)
+        graph = get_workflow_for_sample(DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH, request)
+        self.assertEqual(graph["4"]["inputs"]["lora_strength"], -0.75)
+        self.assertEqual(graph["8"]["inputs"], {"width": 512, "height": 896, "batch_size": 1})
+        sampler = graph["9"]["inputs"]
+        self.assertEqual((sampler["steps"], sampler["cfg"], sampler["seed"]), (17, 4.5, 123))
+        self.assertEqual((sampler["sampler_name"], sampler["scheduler"]), (request.sampler, request.scheduler))
 
     def test_individual_workflow_rejects_batch_api(self):
         with self.assertRaisesRegex(ValueError, "individual requests"):
@@ -168,10 +174,9 @@ class MossComfySampleWorkflowTests(unittest.TestCase):
             simple_job,
         )
         self.assertIn(
-            "Select MOSS-Image LoRA image for ordinary text-to-image previews",
+            "Select MOSS-Image LoRA image for text-to-image previews",
             capabilities,
         )
-        self.assertIn("MOSS-Image specialized modes require native previews", capabilities)
 
 
 if __name__ == "__main__":
