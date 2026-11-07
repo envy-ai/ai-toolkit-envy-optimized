@@ -45,7 +45,7 @@ def resume_signature(config):
                         if key in ('conv', 'conv_alpha',
                                    'lokr_full_rank', 'lokr_factor', 'transformer_only',
                                    'network_kwargs', 'ignore_if_contains', 'only_if_contains',
-                                   'old_lokr_format', 'loha_dora', 'all_layers', 'lorm',
+                                   'old_lokr_format', 'loha_dora', 'lokr_dora', 'all_layers', 'lorm',
                                    'split_multistage_loras', 'save_magnitude_less_lora')}}
                        if network is not None else None,
             'sliderspace': sliderspace,

@@ -2082,6 +2082,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 from toolkit.util.quantize import get_torchao_config
                 can_force_quantized_merge = (
                     self.network.network_type.lower() != 'loha'
+                    and not (self.network.network_type.lower() == 'lokr'
+                             and getattr(self.network.network_config, 'lokr_dora', False))
                     and self.model_config.quantize and not self.model_config.layer_offloading
                     and get_torchao_config(self.model_config.qtype) is not None
                 )

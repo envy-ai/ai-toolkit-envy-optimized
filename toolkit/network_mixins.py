@@ -704,6 +704,14 @@ class ToolkitNetworkMixin:
                         new_keymap[ldm_key.removesuffix('alpha') + suffix] = diffusers_key.removesuffix('alpha') + suffix
             keymap = new_keymap
 
+        if (self.network_type.lower() == 'lokr'
+                and getattr(self.network_config, 'lokr_dora', False)
+                and keymap is not None):
+            for ldm_key, diffusers_key in list(keymap.items()):
+                if ldm_key.endswith('.alpha'):
+                    keymap[ldm_key.removesuffix('alpha') + 'magnitude'] = (
+                        diffusers_key.removesuffix('alpha') + 'magnitude')
+
         return keymap
     
     def get_state_dict(self: Network, extra_state_dict=None, dtype=torch.float16):
@@ -716,7 +724,7 @@ class ToolkitNetworkMixin:
                 save_keymap[diffusers_key] = ldm_key
 
         state_dict = self.state_dict()
-        if self.network_type.lower() == "loha":
+        if self.network_type.lower() in ("loha", "lokr"):
             for module in self.get_all_modules():
                 if getattr(module, "use_dora", False):
                     state_dict[module.lora_name + ".magnitude"] = module.comfy_magnitude()
@@ -765,7 +773,7 @@ class ToolkitNetworkMixin:
         # ComfyUI's vanilla LoRA loaders look for ``<layer>.dora_scale``.
         # Keep ``magnitude`` as the module parameter name internally, but write
         # the interoperable suffix after all model-specific key conversion.
-        if self.network_type.lower() in ("dora", "loha"):
+        if self.network_type.lower() in ("dora", "loha", "lokr"):
             save_dict = OrderedDict(
                 (
                     _dora_key_for_comfy(key),
@@ -835,14 +843,14 @@ class ToolkitNetworkMixin:
             weights_sd = self.base_model_ref().convert_lora_weights_before_load(weights_sd)
 
         load_sd = OrderedDict()
-        public_loha_magnitudes = set()
+        public_lycoris_magnitudes = set()
         for key, value in weights_sd.items():
             # New checkpoints use ComfyUI's public DoRA suffix.  Translate it
             # before consulting legacy keymaps so both new and old files can
             # still be resumed by ai-toolkit.
             input_key = (
                 _dora_key_for_internal_load(key)
-                if self.network_type.lower() in ("dora", "loha")
+                if self.network_type.lower() in ("dora", "loha", "lokr")
                 else key
             )
             load_key = keymap[input_key] if input_key in keymap else input_key
@@ -862,12 +870,12 @@ class ToolkitNetworkMixin:
                 # lora_transformer_transformer_blocks_7_attn_to_v.lokr_w1 to lycoris_transformer_blocks_7_attn_to_v.lokr_w1
                 load_key = load_key.replace('lycoris_', 'lora_transformer_')
 
-            if self.network_type.lower() == "loha" and key.endswith(".dora_scale"):
-                public_loha_magnitudes.add(load_key.removesuffix(".magnitude"))
+            if self.network_type.lower() in ("loha", "lokr") and key.endswith(".dora_scale"):
+                public_lycoris_magnitudes.add(load_key.removesuffix(".magnitude"))
 
             load_sd[load_key] = (
                 _dora_value_for_internal_load(key, value)
-                if self.network_type.lower() in ("dora", "loha")
+                if self.network_type.lower() in ("dora", "loha", "lokr")
                 else value
             )
 
@@ -894,6 +902,37 @@ class ToolkitNetworkMixin:
                     raise ValueError("Tucker-convolution LoHa checkpoints are not supported; use flattened LoHa factors")
             if not matched:
                 raise ValueError("No matching LoHa factors found in the pretrained checkpoint")
+
+        if self.network_type.lower() == "lokr":
+            matched = False
+            expected_magnitudes = set()
+            for module in self.get_all_modules():
+                if not hasattr(module, 'lokr_w1') and not hasattr(module, 'lokr_w1_a'):
+                    continue
+                prefix = module.lora_name
+                magnitude_key = prefix + '.magnitude'
+                if module.use_dora:
+                    expected_magnitudes.add(magnitude_key)
+                if magnitude_key in load_sd and not module.use_dora:
+                    raise ValueError("This is a DoKr checkpoint: enable network.lokr_dora to preserve its magnitude")
+                if not module.use_dora:
+                    continue
+                factor_keys = [prefix + '.' + name for name in module.state_dict()
+                               if name.startswith('lokr_')]
+                present = [key in load_sd for key in factor_keys]
+                if any(present) and not all(present):
+                    raise ValueError(f"Incomplete LoKr factors for {prefix}")
+                if magnitude_key in load_sd and not all(present):
+                    raise ValueError(f"DoKr magnitude without complete LoKr factors for {prefix}")
+                matched = matched or all(present)
+            if getattr(self.network_config, 'lokr_dora', False) and not matched:
+                raise ValueError("No matching LoKr factors found in the pretrained checkpoint")
+            if not getattr(self.network_config, 'lokr_dora', False) and any(
+                    key.endswith('.magnitude') for key in load_sd):
+                raise ValueError("This is a DoKr checkpoint: enable network.lokr_dora to preserve its magnitude")
+            unexpected_magnitudes = {key for key in load_sd if key.endswith('.magnitude')} - expected_magnitudes
+            if unexpected_magnitudes:
+                raise ValueError(f"DoKr magnitude has no matching LoKr module: {sorted(unexpected_magnitudes)}")
 
         if self.peft_format and self.network_type.lower() in ("lora", "dora"):
             # Historical ai-toolkit PEFT checkpoints omitted alpha and were
@@ -970,16 +1009,22 @@ class ToolkitNetworkMixin:
                 and hasattr(module, "_set_runtime_scale")
             ):
                 alpha = float(module.alpha.detach().float().item())
-                module._set_runtime_scale(alpha / module.lora_dim)
-            if module.lora_name in public_loha_magnitudes and getattr(module, "use_dora", False):
+                if (self.network_type.lower() == "lokr" and getattr(module, "use_dora", False)
+                        and module.use_w1 and module.use_w2):
+                    # Comfy ignores alpha for two full LoKr factors; the
+                    # constructor likewise gives this layout unit scale.
+                    module._set_runtime_scale(1.0)
+                else:
+                    module._set_runtime_scale(alpha / module.lora_dim)
+            if module.lora_name in public_lycoris_magnitudes and getattr(module, "use_dora", False):
                 module.load_comfy_magnitude()
             elif (
-                self.network_type.lower() == "loha"
+                self.network_type.lower() in ("loha", "lokr")
                 and getattr(module, "use_dora", False)
                 and module.lora_name + '.magnitude' not in load_sd
             ):
-                # Initializing DoHa from plain LoHa should preserve that LoHa,
-                # not unexpectedly normalize its adapted weights to base norms.
+                # Initializing a decomposed LyCORIS adapter from plain factors
+                # should preserve the already adapted weight.
                 with torch.no_grad():
                     module.magnitude.copy_(module._weight_norms(True))
         if len(extra_dict.keys()) == 0:
@@ -1095,7 +1140,9 @@ class ToolkitNetworkMixin:
             module.reset_weights()
 
     def merge_in(self, merge_weight=1.0):
-        if self.network_type.lower() in ('dora', 'loha'):
+        if self.network_type.lower() in ('dora', 'loha') or (
+                self.network_type.lower() == 'lokr'
+                and getattr(self.network_config, 'lokr_dora', False)):
             return
         self.is_merged_in = True
         for module in self.get_all_modules():

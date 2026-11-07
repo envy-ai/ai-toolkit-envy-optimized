@@ -1159,6 +1159,14 @@ export default function SimpleJob({
                 docKey="config.process[0].network.loha_dora"
               />
             )}
+            {networkType == 'lokr' && (
+              <Checkbox
+                label="DoRA Weight Decomposition (DoKr)"
+                checked={jobConfig.config.process[0].network?.lokr_dora ?? false}
+                onChange={value => setJobConfig(value, 'config.process[0].network.lokr_dora')}
+                docKey="config.process[0].network.lokr_dora"
+              />
+            )}
             {(networkType == 'lora' || networkType == 'dora' || networkType == 'loha') && (
               <>
                 <TextInput

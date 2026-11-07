@@ -182,6 +182,18 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'config.process[0].network.lokr_dora': {
+    title: 'LoKr with DoRA (DoKr)',
+    description: (
+      <>
+        Adds trainable output-row magnitudes to the LoKr weight update. Linear updates stay factorized;
+        detached normalization uses row chunks and can temporarily dequantize one base layer. Exports
+        standard LoKr factors with ComfyUI-compatible DoRA scales. Available for ordinary adapter training.
+        Training previews and ComfyUI can use the adapter; the separate inference-engine loader and
+        merged full-model saves do not support DoKr.
+      </>
+    ),
+  },
   'datasets.control_path': {
     title: 'Control Dataset',
     description: (

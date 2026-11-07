@@ -102,6 +102,7 @@ export interface NetworkConfig {
   conv_alpha: number;
   lokr_full_rank: boolean;
   lokr_factor: number;
+  lokr_dora?: boolean;
   save_magnitude_less_lora?: boolean;
   loha_dora?: boolean;
   network_kwargs: {

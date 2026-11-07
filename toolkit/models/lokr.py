@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from toolkit.network_mixins import ToolkitModuleMixin
+from toolkit.network_mixins import ToolkitModuleMixin, broadcast_and_multiply
 
 from typing import TYPE_CHECKING, Union, List
 
@@ -91,6 +91,8 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
         decompose_both=False,
         network: 'LoRASpecialNetwork' = None,
         factor: int = -1,  # factorization factor
+        use_dora: bool = False,
+        lokr_norm_chunk_size: int = 128,
         **kwargs,
     ):
         """ if alpha == 0 or None, alpha is rank (no scaling). """
@@ -102,7 +104,14 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
         self.cp = False
         self.use_w1 = False
         self.use_w2 = False
-        self.can_merge_in = True
+        self.use_dora = bool(use_dora)
+        self.can_merge_in = not self.use_dora
+        self.norm_chunk_size = int(lokr_norm_chunk_size)
+        if self.use_dora and self.norm_chunk_size <= 0:
+            raise ValueError("lokr_norm_chunk_size must be positive")
+        if self.use_dora and hasattr(org_module, "kernel_size"):
+            if org_module.groups != 1 or org_module.padding_mode != "zeros":
+                raise ValueError("DoKr supports ungrouped, zero-padded Conv2d layers only")
         # only the plain Linear path (no cp/Conv2d) gets the factorized forward;
         # Conv2d and the cp branch keep using get_weight()/make_kron() below.
         self._fast_linear = False
@@ -231,6 +240,8 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
 
         self.multiplier = multiplier
         self.org_module = [org_module]
+        if self.use_dora:
+            self.magnitude = nn.Parameter(self._weight_norms(adapted=False))
         weight = make_kron(
             self.lokr_w1 if self.use_w1 else self.lokr_w1_a@self.lokr_w1_b,
             (self.lokr_w2 if self.use_w2
@@ -328,6 +339,75 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
                 return self.org_module[0].bias.data.detach()
         return None
 
+    @torch.no_grad()
+    def _weight_norms(self, adapted):
+        """Detached output-row norms, reconstructing only bounded LoKr rows."""
+        ref = self.lokr_w1 if self.use_w1 else self.lokr_w1_a
+        dtype = torch.float64 if ref.dtype == torch.float64 else torch.float32
+        base = self.get_orig_weight(ref.device).detach().flatten(1)
+        norms = torch.empty(base.shape[0], device=ref.device, dtype=dtype)
+        with torch.autocast(device_type=ref.device.type, enabled=False):
+            if adapted:
+                a = (self.lokr_w1.to(dtype) if self.use_w1 else
+                     self.lokr_w1_a.to(dtype) @ self.lokr_w1_b.to(dtype))
+                if self.use_w2:
+                    b = self.lokr_w2.to(dtype)
+                elif self.cp:
+                    b = make_weight_cp(self.lokr_t2.to(dtype), self.lokr_w2_a.to(dtype),
+                                       self.lokr_w2_b.to(dtype))
+                else:
+                    b = self.lokr_w2_a.to(dtype) @ self.lokr_w2_b.to(dtype)
+                out_k = b.shape[0]
+            for start in range(0, base.shape[0], self.norm_chunk_size):
+                end = min(start + self.norm_chunk_size, base.shape[0])
+                rows = base[start:end].to(dtype)
+                if adapted:
+                    indices = torch.arange(start, end, device=ref.device)
+                    delta = (a[indices // out_k, :, None] *
+                             b[indices % out_k].reshape(end - start, 1, -1))
+                    rows = rows + delta.reshape(end - start, -1) * self.scale
+                norms[start:end] = rows.norm(dim=1)
+        return norms
+
+    @torch.no_grad()
+    def comfy_magnitude(self):
+        # The local Comfy LoKr loader divides by BASE row norms + fp32 eps.
+        # Training divides by the detached complete +1 ADAPTED row norms.
+        adapted = self._weight_norms(True)
+        base = self._weight_norms(False)
+        safe = torch.where(adapted > 0, adapted, torch.ones_like(adapted))
+        value = torch.where(adapted > 0, self.magnitude * (base + torch.finfo(torch.float32).eps) / safe,
+                            base + torch.finfo(torch.float32).eps)
+        return value.reshape(-1, *([1] * (3 if len(self.shape) == 4 else 1)))
+
+    @torch.no_grad()
+    def load_comfy_magnitude(self):
+        adapted = self._weight_norms(True)
+        base = self._weight_norms(False)
+        self.magnitude.mul_(adapted / (base + torch.finfo(torch.float32).eps))
+
+    def _dora_delta(self, base, delta):
+        norm = self._weight_norms(True)
+        safe = torch.where(norm > 0, norm, torch.ones_like(norm))
+        ratio = torch.where(norm > 0, self.magnitude / safe, torch.ones_like(norm))
+        view = (1, -1, 1, 1) if len(self.shape) == 4 else (-1,)
+        ratio = ratio.to(device=delta.device, dtype=delta.dtype).view(view)
+        unbiased = base.to(delta.dtype)
+        bias = self.get_orig_bias(delta.device)
+        if bias is not None:
+            unbiased = unbiased - bias.to(device=delta.device, dtype=delta.dtype).view(view)
+        return unbiased * (ratio - 1) + delta * ratio
+
+    @torch.no_grad()
+    def reset_weights(self):
+        if not self.use_dora:
+            return
+        if self.use_w2:
+            self.lokr_w2.zero_()
+        else:
+            self.lokr_w2_b.zero_()
+        self.magnitude.copy_(self._weight_norms(False))
+
     def _get_delta_factors(self):
         """(A, w2_or_w2a, w2_b_or_None) without ever combining the two kron
         factors into a full-size matrix."""
@@ -391,14 +471,38 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
             drop = torch.rand(delta.size(-1), device=delta.device) < self.rank_dropout
             delta = delta * drop.to(delta.dtype)
 
-        multiplier = torch.mean(self.network_ref().torch_multiplier).to(compute_dtype)
-        delta = delta * multiplier
+        if self.use_dora:
+            delta = self._dora_delta(base_out, delta)
+            strength = self.network_ref().torch_multiplier.to(device=delta.device, dtype=delta.dtype)
+            if strength.ndim == 1 and strength.numel() > 1 and delta.shape[0] != strength.numel():
+                if delta.shape[0] % strength.numel():
+                    raise ValueError("DoKr strengths must match the batch (including CFG duplication)")
+                strength = strength.repeat_interleave(delta.shape[0] // strength.numel())
+            delta = broadcast_and_multiply(delta, strength)
+        else:
+            multiplier = torch.mean(self.network_ref().torch_multiplier).to(compute_dtype)
+            delta = delta * multiplier
 
         return (base_out + delta).to(orig_dtype)
 
     def _call_forward(self, x):
         if self._fast_linear:
             return self._call_forward_fast_linear(x)
+
+        if self.use_dora:
+            base = self.org_forward(x)
+            if isinstance(x, QTensor) or isinstance(x, QBytesTensor):
+                x = x.dequantize()
+            orig_dtype = base.dtype
+            weight = self.get_weight().to(device=x.device)
+            delta = self.op(x.to(weight.dtype), weight.view(self.shape), None, **self.extra_args)
+            delta = self._dora_delta(base, delta)
+            strength = self.network_ref().torch_multiplier.to(device=delta.device, dtype=delta.dtype)
+            if strength.ndim == 1 and strength.numel() > 1 and delta.shape[0] != strength.numel():
+                if delta.shape[0] % strength.numel():
+                    raise ValueError("DoKr strengths must match the batch (including CFG duplication)")
+                strength = strength.repeat_interleave(delta.shape[0] // strength.numel())
+            return (base + broadcast_and_multiply(delta, strength).to(orig_dtype)).to(orig_dtype)
 
         # legacy path: Conv2d / cp branch. Still materializes the full kron
         # product -- TODO: extend the factorized path to cover these.

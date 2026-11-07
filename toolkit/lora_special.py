@@ -418,6 +418,8 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
         elif self.network_type.lower() == "lokr":
             self.module_class = LokrModule
             module_class = LokrModule
+            if getattr(self.network_config, "lokr_dora", False):
+                self.can_merge_in = False
 
         self.peft_format = peft_format
         self.is_transformer = is_transformer
@@ -617,6 +619,8 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                             
                             if self.network_type.lower() == "lokr":
                                 module_kwargs["factor"] = self.network_config.lokr_factor
+                                module_kwargs["use_dora"] = getattr(self.network_config, "lokr_dora", False)
+                                module_kwargs["lokr_norm_chunk_size"] = kwargs.get("lokr_norm_chunk_size", 128)
                             elif self.network_type.lower() == "loha":
                                 module_kwargs["use_dora"] = getattr(self.network_config, "loha_dora", False)
                                 module_kwargs["loha_chunk_size"] = kwargs.get("loha_chunk_size", 128)

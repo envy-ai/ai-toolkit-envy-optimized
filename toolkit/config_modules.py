@@ -271,6 +271,7 @@ class NetworkConfig:
         # Use the old lokr format
         self.old_lokr_format = kwargs.get('old_lokr_format', False)
         self.loha_dora: bool = kwargs.get('loha_dora', False)
+        self.lokr_dora: bool = kwargs.get('lokr_dora', False)
 
         # for multi stage models
         self.split_multistage_loras = kwargs.get('split_multistage_loras', True)

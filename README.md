@@ -482,6 +482,10 @@ To learn more about LoKr, read more about it at [KohakuBlueleaf/LyCORIS](https:/
 ```
 
 Everything else should work the same including layer targeting.
+For DoRA magnitudes on LoKr (DoKr), set `network.lokr_dora: true` or enable the
+ordinary training form's **DoRA Weight Decomposition (DoKr)** option. See the
+[DoKr training guide](docs/lokr_training.md) for supported layers, checkpoint
+format, memory behavior, and export limitations.
 
 
 ## Support My Work

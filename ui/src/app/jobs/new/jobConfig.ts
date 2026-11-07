@@ -132,6 +132,7 @@ export const defaultJobConfig: JobConfig = {
           conv_alpha: 16,
           lokr_full_rank: true,
           lokr_factor: -1,
+          lokr_dora: false,
           save_magnitude_less_lora: false,
           loha_dora: false,
           network_kwargs: {

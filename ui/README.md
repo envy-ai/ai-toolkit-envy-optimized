@@ -87,6 +87,13 @@ the shared textareas' IDs for its From/To labels. The trimming workflow uses
 these controls and the shared `Modal`; numeric validation uses
 `clampOnBlur={false}` to reject invalid values without silently changing them.
 
+For ordinary LoKr training, select **LoKr** under **Target Type** and enable
+**DoRA Weight Decomposition (DoKr)** beneath the LoKr factor selector. The
+shared checkbox supports clicking its label or focusing it with Tab and pressing
+Space/Enter. It saves `network.lokr_dora`, which defaults to false. Existing
+LoKr factor and memory settings are retained. See
+[LoKr and optional DoRA](../docs/lokr_training.md) for checkpoint conventions and limits.
+
 The AI assistant drawer autosaves titled chats on this toolkit server. Open
 **Chat history** to search recent sessions, resume one, rename it, or delete it.
 **New conversation** preserves the previous chat. Titles are generated locally

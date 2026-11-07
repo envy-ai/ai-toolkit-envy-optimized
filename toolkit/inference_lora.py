@@ -176,6 +176,13 @@ class InferenceLoRA:
                 sd = convert(sd)
             except Exception as e:
                 self.convert_error = f"{type(e).__name__}: {e}"
+        lokr_bases = {key.rsplit('.lokr_', 1)[0] for key in sd if '.lokr_' in key}
+        if any(base + suffix in sd for base in lokr_bases
+               for suffix in ('.dora_scale', '.magnitude')):
+            raise ValueError(
+                'Standalone native inference cannot apply LoKr DoRA magnitudes; '
+                'use the attached training network for native previews or load the exported adapter in ComfyUI'
+            )
         roots = self._roots(holder)
         grouped: Dict[Tuple[int, str], dict] = {}
         self.num_skipped_keys = 0
