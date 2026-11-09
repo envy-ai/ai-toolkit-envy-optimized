@@ -111,6 +111,15 @@ jobs with an explicit text encoder path also key cached text embeddings by
 that path and local file identity, so changing the encoder rebuilds them.
 Other ordinary MOSS latent caches and other models keep their existing contracts.
 
+MOSS prefers cuDNN SDPA for masked CUDA attention when the installed PyTorch
+enables it; unsupported shapes can use efficient or math SDPA. Unmasked and
+reference-isolated attention retain their normal dispatch. With dynamic block
+compilation enabled, known MOSS, Krea 2 and Qwen Image 2.1 block inputs mark
+their token-length axes before the first trace. The eager gradient-checkpoint
+boundary, quantization, layer offloading and `compile_dynamic: false` behavior
+remain as before. The first distinct shape still requires compilation; throughput
+and memory improvement have not been measured on this fork.
+
 These objectives use one frozen base with adapters disabled for reference
 predictions, not a second full model. Sequential backward/recomputation, CPU
 embedding banks, transformer checkpointing, quantization and offload settings

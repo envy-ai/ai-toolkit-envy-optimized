@@ -78,6 +78,9 @@ def get_optimizer(
         optimizer = torch.optim.Adam(params, lr=float(learning_rate), eps=1e-6, **optimizer_params)
     elif lower_type == 'adamw':
         optimizer = torch.optim.AdamW(params, lr=float(learning_rate), eps=1e-6, **optimizer_params)
+    elif lower_type == 'muon':
+        from toolkit.optimizers.muon import BatchedMuon
+        optimizer = BatchedMuon(params, lr=float(learning_rate), **optimizer_params)
     elif lower_type == 'lion':
         try:
             from lion_pytorch import Lion

@@ -1930,11 +1930,18 @@ export default function SimpleJob({
                     { value: 'automagic', label: 'Automagic' },
                     { value: 'automagic2', label: 'Automagic v2' },
                     { value: 'automagic3', label: 'Automagic v3' },
+                    { value: 'muon', label: 'Muon' },
                     { value: 'prodigy', label: 'Prodigy' },
                     { value: 'prodigy8bit', label: 'Prodigy8Bit' },
                     { value: 'rose', label: 'Rose' },
                   ]}
                 />
+                {selectedOptimizer.toLowerCase() === 'muon' && (
+                  <p className="mt-1 text-xs text-gray-400">
+                    Orthogonalized momentum with AdamW-sized updates. Learning rate may need tuning.
+                    Matrix, convolution, and vector adapter weights are supported.
+                  </p>
+                )}
                 <NumberInput
                   label="Learning Rate"
                   className="pt-2"

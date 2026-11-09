@@ -81,6 +81,7 @@ import diffusers
 import hashlib
 
 from toolkit.util.blended_blur_noise import get_blended_blur_noise
+from toolkit.util.compile_dynamic_shapes import sequence_length_hook
 from toolkit.util.get_model import get_model_class
 from toolkit.basic import flush
 from toolkit.comfy_sample import (
@@ -3867,12 +3868,17 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 continue
 
                             compiled_refs.append((block_list, i, block))
-                            block_list[i] = torch.compile(
+                            compiled_block = torch.compile(
                                 block,
                                 mode=compile_mode,
                                 dynamic=compile_dynamic,
                                 fullgraph=compile_fullgraph,
                             )
+                            if compile_dynamic:
+                                hook = sequence_length_hook(block)
+                                if hook is not None:
+                                    compiled_block.register_forward_pre_hook(hook, with_kwargs=True)
+                            block_list[i] = compiled_block
                             compiled_block_count += 1
 
                     if compiled_block_count > 0:

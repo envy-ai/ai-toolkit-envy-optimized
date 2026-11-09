@@ -27,6 +27,12 @@ from torch.utils.checkpoint import checkpoint
 
 from toolkit.models.v2._mixin import OstrisModelMixin
 
+try:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+except ImportError:
+    SDPBackend = None
+    sdpa_kernel = None
+
 
 @dataclass
 class MossImageParams:
@@ -95,7 +101,27 @@ def _attention(
         )
         out = torch.cat((live, ref), 2)
     else:
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        if (
+            mask is not None and q.is_cuda and sdpa_kernel is not None
+            and SDPBackend is not None and torch.backends.cuda.cudnn_sdp_enabled()
+        ):
+            # Padded training batches need a key mask. Prefer cuDNN for this
+            # case while allowing efficient attention and math when cuDNN
+            # cannot handle the shape. Unmasked and split edit/reference calls
+            # retain the caller's normal SDPA backend selection.
+            backends = [backend for backend in (
+                getattr(SDPBackend, "CUDNN_ATTENTION", None),
+                getattr(SDPBackend, "EFFICIENT_ATTENTION", None),
+                getattr(SDPBackend, "MATH", None),
+            ) if backend is not None]
+            try:
+                context = sdpa_kernel(backends, set_priority=True)
+            except TypeError:
+                context = sdpa_kernel(backends)
+            with context:
+                out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
     return out.transpose(1, 2).flatten(2)
 
 
