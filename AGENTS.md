@@ -22,6 +22,17 @@ After changes that affect the UI or server build, run `npm run build` from
 inability to restart the server is not a reason to skip the build. Report the
 build result and whether the server was restarted separately.
 
+Use a **16 GB Node.js heap** for UI builds. The default heap and an 8 GB heap
+have both exhausted memory while building this project. From `ui/`, run:
+
+```bash
+NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=16384" npm run build
+```
+
+Keep the launcher's default Node heap at 16 GB as well, so its automatic UI
+build uses the same setting. This is a Node heap setting; the separate 16 GB
+systemd memory limit for test commands still applies.
+
 # Network services
 
 This machine is behind a firewall and is accessed remotely over the local
