@@ -14,6 +14,7 @@ This fork is optimized for advanced LoRA/DoRA training on newer transformer imag
 - **Quantization improvements**: better handling for TorchAO/Quanto quantized models, including Nucleus mixture-of-experts quantization support and safer quantized save/load paths.
 - **Optimizer stability fixes**: Prodigy8Bit has improved checkpoint serialization and numerical stability for small gradients.
 - **Training UI additions**: DoRA selection, clearer content/style controls, Min SNR Gamma, Prodigy/Prodigy8Bit naming cleanup, and an experimental Rose optimizer option.
+- **Selective Fizgig improvements**: dynamic compile hints, masked MOSS attention, [optional batched Muon](docs/muon.md), and [training maps](docs/training_maps.md). See [performance ports and PyTorch trial limits](docs/fizgig_performance.md).
 - **Utility scripts**: helpers for [analyzing which layers a LoRA changes most](docs/lora_analysis.md), resizing LoRA/DoRA checkpoints, extracting LoRAs from Hugging Face model differences, and marking stuck training jobs as stopped.
 
 ### What this means for you

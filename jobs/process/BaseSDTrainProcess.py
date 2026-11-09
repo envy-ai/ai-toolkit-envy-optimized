@@ -201,6 +201,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
             self.first_sample_config = self.sample_config
         self._live_sample_config_mtime = None
         self.logging_config = LoggingConfig(**self.get_conf('logging', {}))
+        if self.logging_config.training_maps:
+            from toolkit.training_maps import validate_request
+            validate_request(self)
         self.logger = create_logger(self.logging_config, config, self.save_root)
         self._record_low_index_path = os.path.join(self.save_root, '.record_low_checkpoints.json')
         self._record_low_pending_step = None
@@ -266,6 +269,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.is_caching_text_embeddings = any(
             dataset.cache_text_embeddings for dataset in self.dataset_configs
         )
+        if (self.logging_config.training_maps and self.train_config.unload_text_encoder
+                and not self.is_caching_text_embeddings):
+            raise ValueError('Training maps need cached text embeddings when the text encoder is unloaded')
 
         self.embed_config = None
         embedding_raw = self.get_conf('embedding', None)
@@ -4031,6 +4037,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         self.sd.set_device_state(self.train_device_state_preset)
         flush()
+        if getattr(self, '_training_maps', None) is not None:
+            self._training_maps.capture(self, self.step_num)
         # self.step_num = 0
 
         # print_acc(f"Compiling Model")
@@ -4205,6 +4213,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if is_validate_step:
                     with self.timer('validate'):
                         self.validate()
+
+            if (not did_oom and not self.is_grad_accumulation_step
+                    and getattr(self, '_training_maps', None) is not None
+                    and self.step_num + 1 - self._training_maps.last_step >= self.logging_config.training_maps_every):
+                self._training_maps.capture(self, self.step_num + 1)
 
             if not did_first_flush:
                 flush()

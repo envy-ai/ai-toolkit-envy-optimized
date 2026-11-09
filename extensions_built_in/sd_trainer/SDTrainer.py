@@ -326,6 +326,13 @@ class SDTrainer(BaseSDTrainProcess):
             self.taesd.requires_grad_(False)
 
     def hook_before_train_loop(self):
+        if self.logging_config.training_maps and self.accelerator.is_main_process:
+            from toolkit.training_maps import TrainingMaps
+            self._training_maps = TrainingMaps(self)
+            try:
+                self._training_maps.setup(self)
+            except Exception as error:
+                self._training_maps.error(error)
         super().hook_before_train_loop()
         if self.is_caching_text_embeddings:
             # make sure model is on cpu for this part so we don't oom.

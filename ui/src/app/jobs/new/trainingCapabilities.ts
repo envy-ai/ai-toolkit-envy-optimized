@@ -104,11 +104,23 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
   if (!process) return ['Job configuration must contain a training process.'];
   const mode = canonicalTrainingMode(process.type);
   const errors: string[] = [];
-  for (const key of ['record_training_examples', 'record_training_rng'] as const) {
+  for (const key of ['record_training_examples', 'record_training_rng', 'training_maps'] as const) {
     const value = process.logging?.[key];
     if (value !== undefined && typeof value !== 'boolean') errors.push(`Logging ${key} must be a boolean.`);
   }
   if (process.logging?.record_training_rng && process.logging?.record_training_examples === false) errors.push('Recording noise RNG state requires per-image loss logging.');
+  for (const key of ['training_maps_every', 'training_maps_images'] as const) {
+    const value = process.logging?.[key];
+    if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) errors.push(`Logging ${key} must be a positive integer.`);
+  }
+  if (process.logging?.training_maps) {
+    if (!['sd_trainer', 'ui_trainer', 'diffusion_trainer'].includes(mode)
+        || !['qwen_image', 'qwen_image_2', 'krea2', 'moss_image'].includes(canonicalFlowArch(process.model?.arch ?? '')))
+      errors.push('Training maps support ordinary Qwen Image 2.1, Krea 2 and MOSS-Image training.');
+    if (!['lora', 'dora'].includes(process.network?.type ?? '')) errors.push('Training maps require LoRA or DoRA.');
+    if ((process.model && effectiveFlowModel(process.model).model_kwargs?.edit) || process.train?.train_text_encoder)
+      errors.push('Training maps require text-to-image training with a frozen text encoder.');
+  }
   if (process.model?.arch === 'krea2_edit') errors.push(...validateKrea2Edit(config));
   if (process.model?.arch === 'fibo2') {
     const kwargs = process.model.model_kwargs ?? {};

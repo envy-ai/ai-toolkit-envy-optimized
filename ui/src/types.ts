@@ -334,6 +334,9 @@ export interface LoggingConfig {
   use_ui_logger: boolean;
   record_training_examples?: boolean;
   record_training_rng?: boolean;
+  training_maps?: boolean;
+  training_maps_every?: number;
+  training_maps_images?: number;
 }
 
 export interface SliderTargetConfig {

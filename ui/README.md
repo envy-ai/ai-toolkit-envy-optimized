@@ -216,6 +216,17 @@ memory savings. Native Generate is unavailable for this extension. Existing
 jobs retain their saved architecture and settings. See the
 [Comfy sample workflow guide](../docs/krea2_edit_comfy_samples.md).
 
+The Training card's **Training maps** switch is off by default. Set its positive
+integer step interval and picture count before starting/resuming a supported
+ordinary image LoRA/DoRA job. The job's **Training Maps** tab reuses the existing
+searchable select and button styles. Select a fixed processed picture, map and
+noise level; use Previous/Next, the step slider, Play, and Map opacity. Focus the
+viewer for Left/Right stepping and Space play/pause. Refresh reads newly saved
+frames manually. Errors persist with expandable tracebacks. Saved crop geometry
+determines the image and overlay aspect ratio, including on narrow screens.
+See [training maps](../docs/training_maps.md) for supported configurations,
+diagnostic meaning, storage and resume behavior.
+
 ## Getting Started
 
 First, run the development server:

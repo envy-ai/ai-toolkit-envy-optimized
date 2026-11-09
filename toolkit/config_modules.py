@@ -51,9 +51,18 @@ class LoggingConfig:
         self.use_ui_logger: bool = kwargs.get('use_ui_logger', False)
         self.record_training_examples: bool = kwargs.get('record_training_examples', True)
         self.record_training_rng: bool = kwargs.get('record_training_rng', False)
+        self.training_maps: bool = kwargs.get('training_maps', False)
+        self.training_maps_every: int = kwargs.get('training_maps_every', 250)
+        self.training_maps_images: int = kwargs.get('training_maps_images', 3)
         for key in ('record_training_examples', 'record_training_rng'):
             if type(getattr(self, key)) is not bool:
                 raise ValueError(f'logging.{key} must be true or false')
+        if type(self.training_maps) is not bool:
+            raise ValueError('logging.training_maps must be true or false')
+        if type(self.training_maps_every) is not int or self.training_maps_every <= 0:
+            raise ValueError('logging.training_maps_every must be a positive integer')
+        if type(self.training_maps_images) is not int or self.training_maps_images <= 0:
+            raise ValueError('logging.training_maps_images must be a positive integer')
         if self.record_training_rng and not self.record_training_examples:
             raise ValueError('Record training examples before enabling training RNG snapshots')
         self.project_name: str = kwargs.get('project_name', 'ai-toolkit')

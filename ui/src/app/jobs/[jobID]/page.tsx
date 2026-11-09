@@ -2,7 +2,7 @@
 
 import { useState, useEffect, use } from 'react';
 import { FaChevronLeft } from 'react-icons/fa';
-import { MdDashboard, MdImage, MdShowChart, MdAssessment, MdCode, MdExtension, MdNotes } from 'react-icons/md';
+import { MdDashboard, MdImage, MdShowChart, MdAssessment, MdGridOn, MdCode, MdExtension, MdNotes } from 'react-icons/md';
 import { Button } from '@headlessui/react';
 import { TopBar, MainContent } from '@/components/layout';
 import useJob from '@/hooks/useJob';
@@ -14,12 +14,13 @@ import JobActionBar from '@/components/JobActionBar';
 import JobConfigViewer from '@/components/JobConfigViewer';
 import JobLossGraph from '@/components/JobLossGraph';
 import JobLossReport from '@/components/JobLossReport';
+import JobTrainingMaps from '@/components/JobTrainingMaps';
 import JobPlugin from '@/components/JobPlugin';
 import JobNotes from '@/components/JobNotes';
 import { Job } from '@prisma/client';
 import { apiClient } from '@/utils/api';
 
-type PageKey = 'overview' | 'samples' | 'config' | 'loss_log' | 'loss_report' | 'notes' | 'plugin';
+type PageKey = 'overview' | 'samples' | 'config' | 'loss_log' | 'loss_report' | 'training_maps' | 'notes' | 'plugin';
 
 interface Page {
   name: string;
@@ -61,6 +62,14 @@ const pages: Page[] = [
     value: 'loss_report',
     icon: MdAssessment,
     component: JobLossReport,
+    mainCss: 'pt-24 pb-4',
+    jobTypes: ['train'],
+  },
+  {
+    name: 'Training Maps',
+    value: 'training_maps',
+    icon: MdGridOn,
+    component: JobTrainingMaps,
     mainCss: 'pt-24 pb-4',
     jobTypes: ['train'],
   },

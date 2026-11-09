@@ -54,6 +54,7 @@ class SDTrainerPromptOffloadTests(unittest.TestCase):
                 return FakeEmbeds()
 
         trainer = SDTrainer.__new__(SDTrainer)
+        trainer.logging_config = SimpleNamespace(training_maps=False)
         trainer.optimizer = object()
         trainer.device_torch = torch.device("cuda")
         trainer.is_caching_text_embeddings = False

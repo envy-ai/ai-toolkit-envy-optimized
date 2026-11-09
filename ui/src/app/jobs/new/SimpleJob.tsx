@@ -1881,6 +1881,18 @@ export default function SimpleJob({
                 checked={jobConfig.config.process[0].logging.record_training_rng ?? false}
                 disabled={jobConfig.config.process[0].logging.record_training_examples === false}
                 onChange={checked => setJobConfig(checked, 'config.process[0].logging.record_training_rng')} />
+              <Checkbox label="Training maps"
+                checked={jobConfig.config.process[0].logging.training_maps ?? false}
+                onChange={checked => setJobConfig(checked, 'config.process[0].logging.training_maps')} />
+              <p className="text-gray-400">Optional fixed-image probes show spatial error, learned changes and adapter effects in the Training Maps tab. Adds model passes at the chosen interval. Supports ordinary text-to-image LoRA/DoRA training on Qwen Image 2.1, Krea 2 and MOSS-Image.</p>
+              {jobConfig.config.process[0].logging.training_maps && <div className="grid gap-3 sm:grid-cols-2">
+                <NumberInput id="training-maps-every" label="Map interval (training steps)"
+                  value={jobConfig.config.process[0].logging.training_maps_every ?? 250} min={1} clampOnBlur={false}
+                  onChange={value => setJobConfig(value, 'config.process[0].logging.training_maps_every')} />
+                <NumberInput id="training-maps-images" label="Map pictures"
+                  value={jobConfig.config.process[0].logging.training_maps_images ?? 3} min={1} clampOnBlur={false}
+                  onChange={value => setJobConfig(value, 'config.process[0].logging.training_maps_images')} />
+              </div>}
             </div>
             {isSliderSpace && <p className="text-sm text-gray-400">
               {jobConfig.config.process[0].train.steps.toLocaleString()} total training steps · approximately{' '}

@@ -198,6 +198,9 @@ export const defaultJobConfig: JobConfig = {
           use_ui_logger: true,
           record_training_examples: true,
           record_training_rng: false,
+          training_maps: false,
+          training_maps_every: 250,
+          training_maps_images: 3,
         },
         model: {
           name_or_path: 'ostris/Flex.1-alpha',
@@ -292,6 +295,9 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
   }
   jobConfig.config.process[0].logging.record_training_examples ??= true;
   jobConfig.config.process[0].logging.record_training_rng ??= false;
+  jobConfig.config.process[0].logging.training_maps ??= false;
+  jobConfig.config.process[0].logging.training_maps_every ??= 250;
+  jobConfig.config.process[0].logging.training_maps_images ??= 3;
   if (jobConfig.config.process[0].save) {
     jobConfig.config.process[0].save.record_low_enabled ??= false;
   }
