@@ -10,6 +10,7 @@ import { ConfigDoc, GroupedSelectOption, SelectOption } from '@/types';
 import { filterSelectOption } from '@/utils/search';
 
 const Select = dynamic(() => import('react-select'), { ssr: false });
+const CreatableSelect = dynamic(() => import('react-select/creatable'), { ssr: false });
 
 const labelClasses = 'block text-xs mb-1 mt-2 text-gray-300';
 const inputClasses =
@@ -273,6 +274,8 @@ export interface MultiSelectInputProps extends SelectInputPropsBase {
   multiple: true;
   value: string[];
   onChange: (value: string[]) => void;
+  /** Offer typed values as new chips and retain values absent from options. */
+  allowCustomValues?: boolean;
 }
 
 export type SelectInputProps = SingleSelectInputProps | MultiSelectInputProps;
@@ -291,9 +294,16 @@ export const SelectInput = (props: SelectInputProps) => {
         : (options as SelectOption[])
       : [];
 
+  const allowCustomValues = multiple && props.allowCustomValues;
+  const availableOptions = allowCustomValues
+    ? [...flatOptions, ...(value as string[]).filter(item => !flatOptions.some(option => option.value === item))
+      .map(item => ({ value: item, label: item }))]
+    : options;
   const selectedOption = multiple
-    ? flatOptions.filter(opt => (value as string[]).includes(opt.value))
+    ? (allowCustomValues ? (value as string[]).map(item =>
+      (availableOptions as SelectOption[]).find(option => option.value === item)!) : flatOptions.filter(opt => (value as string[]).includes(opt.value)))
     : flatOptions.find(opt => opt.value === (value as string));
+  const SelectControl = allowCustomValues ? CreatableSelect : Select;
 
   return (
     <div
@@ -311,15 +321,16 @@ export const SelectInput = (props: SelectInputProps) => {
           )}
         </label>
       )}
-      <Select
+      <SelectControl
         inputId={props.id}
         instanceId={props.id}
         filterOption={filterSelectOption}
         value={selectedOption}
-        options={options}
+        options={availableOptions}
         isDisabled={props.disabled}
         isMulti={multiple}
-        className="aitk-react-select-container"
+        placeholder={props.placeholder}
+        className={classNames('aitk-react-select-container', { 'aitk-react-select-container--multiple': multiple })}
         classNamePrefix="aitk-react-select"
         menuPosition="fixed"
         menuPlacement="auto"

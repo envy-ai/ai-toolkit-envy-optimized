@@ -15,7 +15,8 @@ function load(file, overrides = {}) {
   return mod.exports;
 }
 const defaults = load('../src/helpers/defaultSamples.ts');
-const ui = load('../../extensions_built_in/diffusion_models/ui.tsx', { 'next/link': () => null, '@/helpers/defaultSamples': defaults });
+const capabilities = load('../src/app/jobs/new/trainingCapabilities.ts');
+const ui = load('../../extensions_built_in/diffusion_models/ui.tsx', { 'next/link': () => null, '@/helpers/defaultSamples': defaults, '@/app/jobs/new/options': capabilities });
 function job(arch) {
   return { config: { process: [{ type: 'diffusion_trainer', model: { arch, name_or_path: '/my/model', low_vram: true,
     model_kwargs: { partition: arch === 'minimax_h3_image' ? 'image' : 'fl2va_pruned' } }, network: { type: 'lora', network_kwargs: {} },
@@ -41,4 +42,40 @@ test('existing video recipe remains separate and prior job is not silently rewri
   assert.equal(ui.getMinimaxH3TrainingRecipe(input), 'video'); assert.deepEqual(input, before);
   const p = ui.applyMinimaxH3PhotoRecipe(input).config.process[0];
   assert.equal(p.model.arch, 'minimax_h3'); assert.equal(p.sample.width, 512); assert.equal(p.sample.sample_steps, 20);
+});
+test('effective network filters preserve legacy aliases and prefer populated nested values', () => {
+  const p = { only_if_contains: ['legacy'], network: { network_kwargs: {} } };
+  assert.deepEqual(capabilities.effectiveNetworkFilter(p, 'only_if_contains'), ['legacy']);
+  p.network.network_kwargs.only_if_contains = [];
+  assert.deepEqual(capabilities.effectiveNetworkFilter(p, 'only_if_contains'), ['legacy']);
+  p.network.network_kwargs.only_if_contains = ['nested'];
+  assert.deepEqual(capabilities.effectiveNetworkFilter(p, 'only_if_contains'), ['nested']);
+});
+test('H3 dataset cache controls preserve imports and inherit a common choice', () => {
+  const entry = ui.AI_TOOLKIT_UI_MODELS.find(model => model.name === 'minimax_h3_image');
+  const diskCache = entry.advancedModelOptions.find(option => option.label === 'Cache dataset text embeddings to disk');
+  const quantCache = entry.advancedModelOptions.find(option => option.label === 'Cache quantized models');
+  const config = job('minimax_h3_image');
+  const process = config.config.process[0];
+  const newDataset = { folder_path: '/new', cache_text_embeddings: false, caption_ext: 'txt' };
+  for (const choice of [true, false]) {
+    process.datasets = [{ folder_path: '/a', cache_text_embeddings: choice }, { folder_path: '/b', cache_text_embeddings: choice }];
+    const before = structuredClone(config);
+    assert.deepEqual(entry.initializeDataset(newDataset, config), { ...newDataset, cache_text_embeddings: choice });
+    assert.equal(diskCache.getValue(config), choice);
+    assert.deepEqual(config, before);
+  }
+  process.datasets = [{ folder_path: '/a', cache_text_embeddings: true }, { folder_path: '/b', cache_text_embeddings: false }];
+  const before = structuredClone(config), newBefore = structuredClone(newDataset);
+  assert.deepEqual(entry.initializeDataset(newDataset, config), newBefore);
+  assert.equal(diskCache.getValue(config), false);
+  let result, key;
+  diskCache.onChange(true, config, (value, path) => { result = value; key = path; });
+  assert.equal(key, 'config.process[0].datasets');
+  assert.deepEqual(result, process.datasets.map(dataset => ({ ...dataset, cache_text_embeddings: true })));
+  assert.deepEqual(config, before); assert.deepEqual(newDataset, newBefore);
+  assert.equal(quantCache.getValue(config), true);
+  process.model.cache_quantized_models = false; assert.equal(quantCache.getValue(config), false);
+  quantCache.onChange(true, config, (value, path) => { result = value; key = path; });
+  assert.equal(result, true); assert.equal(key, 'config.process[0].model.cache_quantized_models');
 });

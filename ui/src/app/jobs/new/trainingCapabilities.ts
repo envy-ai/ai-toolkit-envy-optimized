@@ -4,6 +4,12 @@ export const FIBO2_WORKFLOW_PATH = 'config/comfy_templates/fibo2_lora_sample.jso
 export const FIBO2_TURBO_WORKFLOW_PATH = 'config/comfy_templates/fibo2_edit_turbo_lora_sample.json.njk';
 export const fibo2WorkflowPaths = [FIBO2_WORKFLOW_PATH, FIBO2_TURBO_WORKFLOW_PATH];
 
+/** Match BaseSDTrainProcess._normalize_network_config without rewriting saved data. */
+export function effectiveNetworkFilter(process: JobConfig['config']['process'][number], key: 'only_if_contains' | 'ignore_if_contains') {
+  const nested = process.network?.network_kwargs?.[key];
+  return nested?.length ? nested : process[key] ?? nested;
+}
+
 /** Apply graph defaults only on an explicit Turbo preview selection. */
 export function applyComfyWorkflowSelection(config: JobConfig, workflowPath: string): JobConfig {
   const process = config.config.process[0];
@@ -137,6 +143,17 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     if (process.model.arch === 'minimax_h3_image' &&
         ![undefined, 'image'].includes(process.model.model_kwargs?.partition)) {
       errors.push('MiniMax-H3-Image photo training requires the image partition.');
+    }
+    const included = effectiveNetworkFilter(process, 'only_if_contains');
+    const photoBlocks = Array.from({ length: 30 }, (_, index) => `blocks.${index + 20}.`);
+    if (included != null && (!Array.isArray(included) || new Set(included).size !== photoBlocks.length ||
+        !photoBlocks.every(block => included.includes(block)))) {
+      errors.push('MiniMax-H3 photo training requires Include modules to contain exactly blocks 20–49, or be unset. Choose Image mode (keep current settings) before using other targets.');
+    }
+    const excluded = effectiveNetworkFilter(process, 'ignore_if_contains');
+    if (excluded != null && (!Array.isArray(excluded) ||
+        (excluded.length > 0 && (new Set(excluded).size !== 2 || !excluded.includes('token_refiner') || !excluded.includes('adaln_proj'))))) {
+      errors.push('MiniMax-H3 photo training accepts no Exclude modules or both token_refiner and adaln_proj. Choose Image mode (keep current settings) before using other exclusions.');
     }
     if (['do_cfg', 'do_random_cfg', 'do_guidance_loss', 'do_differential_guidance',
       'diff_output_preservation', 'blank_prompt_preservation', 'do_prior_divergence',

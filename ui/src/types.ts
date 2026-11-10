@@ -130,6 +130,7 @@ export interface SaveConfig {
 }
 
 export interface DatasetConfig {
+  cache_text_embeddings?: boolean;
   batch_size?: number;
   folder_path: string;
   mask_path: string | null;
@@ -258,6 +259,8 @@ export interface ModelConfig {
   text_encoder_path?: string;
   te_name_or_path?: string;
   vae_path?: string;
+  cache_quantized_models?: boolean;
+  quantized_model_cache_dir?: string;
   extras_name_or_path?: string;
   inference_lora_path?: string;
   unconditional_lora_path?: string;
@@ -466,6 +469,8 @@ export interface SliderSpaceConfig {
 }
 
 export interface ProcessConfig {
+  only_if_contains?: string[];
+  ignore_if_contains?: string[];
   type: string;
   sqlite_db_path?: string;
   training_folder: string;

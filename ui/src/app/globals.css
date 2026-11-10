@@ -88,6 +88,10 @@ body {
     @apply flex w-full h-8 min-h-0 px-0 text-sm bg-gray-950 dark:bg-gray-800 border border-gray-700 rounded-sm hover:border-gray-600 items-center;
   }
 
+  .aitk-react-select-container--multiple .aitk-react-select__control {
+    @apply h-auto min-h-8;
+  }
+
   /* selected label */
   .aitk-react-select-container .aitk-react-select__single-value {
     @apply flex-1 min-w-0 truncate text-sm text-gray-200;
@@ -152,6 +156,10 @@ body {
   min-height: 26px !important;
   font-size: 12px !important;
   line-height: 1.2 !important;
+}
+.compact-form .aitk-react-select-container--multiple .aitk-react-select__control {
+  height: auto !important;
+  min-height: 26px !important;
 }
 .compact-form .aitk-react-select-container .aitk-react-select__value-container {
   padding: 0 6px !important;

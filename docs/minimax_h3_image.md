@@ -18,6 +18,65 @@ The initial training recipe uses one-frame 512-pixel buckets, batch size 1, disk
 
 The recipe preserves dataset folders and captions, sample prompt text and seeds, total training steps, model component paths, quantization, offloading, gradient checkpointing and Unload TE. It removes reference/control paths and sample size/frame/guidance overrides, and clears CFG, guidance and preservation objectives that conflict with the helper. The image model itself remains image-only whether or not the photo flag is set. The flag changes the training noise density; it does not change the official six-step inference schedule.
 
+## Advanced form settings
+
+The ordinary job form exposes the remaining test-training choices without
+editing YAML. Expand **Advanced model settings** in Model and **Advanced target
+modules** in Target by clicking the summary or focusing it with Tab and pressing
+Enter/Space. Labels above text, number and select fields focus their controls.
+Opening either section or loading an existing job does not write defaults.
+
+- **DiT path (optional)** sets `model.model_kwargs.dit_image_path`.
+- **Text encoder path (optional)** shows the active override, respecting
+  `te_name_or_path`, then `model_kwargs.text_encoder_path`, then
+  `text_encoder_path`. Editing consolidates those aliases into
+  `model.te_name_or_path`; clearing removes all three overrides.
+- **VAE path (optional)** shows `model.vae_path`, or an imported
+  `model_kwargs.image_vae_path` alias. Editing consolidates it into `vae_path`;
+  clearing removes both overrides. Blank component paths use automatic
+  resolution described above.
+- **Cache quantized models** controls `model.cache_quantized_models` (the
+  backend default is true). **Quantized cache directory (optional)** edits
+  `model.quantized_model_cache_dir`; blank retains the backend default
+  `models/.quantized_training_cache` without saving an explicit default.
+- **Caption token limit** edits `model.model_kwargs.max_text_length`. Blank
+  uses 4096, and 0 disables the caption cap. Reference vision tokens are never
+  truncated. The image text-cache identity includes this limit.
+- **Cache dataset text embeddings to disk** changes
+  `datasets[].cache_text_embeddings` for every dataset together. This disk
+  cache is separate from Training's existing **Cache Text Embeddings** switch,
+  which controls `train.cache_text_embeddings`. The backend requires every
+  dataset to enable disk text caching if any does. Mixed imported choices
+  remain unchanged until the switch is edited. Newly added datasets inherit a
+  common existing disk-cache choice.
+
+**Include modules** and **Exclude modules** edit
+`network.network_kwargs.only_if_contains` and `ignore_if_contains`. Choose
+suggested block/module chips, or type a substring and press Enter to add it.
+Numbered chips such as **#20** refer to transformer blocks; the saved filter
+remains `blocks.20.`. Compact labels keep block indices readable in narrow cards.
+Arrow keys navigate suggestions; Backspace or a chip's remove button removes
+it. Imported custom values remain visible. Clearing Include removes its key:
+the photo recipe then supplies blocks 20–49, while ordinary image mode includes
+all eligible modules. An imported explicit empty Include array matches no
+modules and is preserved until edited. Clearing Exclude saves an empty list and
+excludes nothing.
+
+Imported process-level `only_if_contains` and `ignore_if_contains` aliases are
+displayed when the corresponding nested filter is absent or empty, matching the
+backend's existing normalization. Editing a filter removes its process-level
+alias and writes the nested form in one update, so clearing cannot reactivate a
+hidden alias. Opening the form preserves both representations unchanged.
+
+While the photo recipe flag is enabled, Include must be unset or exactly blocks
+20–49, and Exclude must be empty or contain both `token_refiner` and
+`adaln_proj`. The form validates these restrictions before saving. To experiment
+with other module filters, explicitly choose **Image mode (keep current
+settings)** in Training recipe, then edit the chips. Filter edits never disable
+the photo flag automatically. Existing optimizer, learning-rate, EMA/decay,
+rank/alpha, latent-cache and layer-streaming controls remain in their usual
+cards.
+
 ## Native and ComfyUI samples
 
 Native sampling uses the official six-step PDD schedule with guidance 1 and one image frame. A new image job previews at 2048 × 2048, the official image canvas; training buckets begin at 512. These are separate settings. Native inference rejects other step counts or guidance values. The Sample card exposes up to three ordered **Reference Images** for native image editing, through the existing image-picker controls. Image references use the official plain `Picture N: ` text presentation, fixed CPU-seed-42 posterior sampling, and seeded augmentation in packed-row order. Their caches are distinct from video-reference caches. The experimental training recipe clears existing sample references when applied; you may add native preview references afterward. Large previews may need substantial memory; adjust width and height only if the native implementation and available memory permit it.

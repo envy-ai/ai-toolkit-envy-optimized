@@ -39,16 +39,32 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
 Training form model controls use `customModelSelectOptions`. Each option has a
 `label`, `getValue(config)`, `onChange(value, config, setJobConfig)`, and optional
 `doc`. The existing form renders `type: 'checkbox'` with `Checkbox`,
-`type: 'number'` with `NumberInput` (`min` and `step` optional; no blur clamping),
-and absent/`'select'` with `SelectInput` and an `options` array. These retain the
+`type: 'number'` with `NumberInput` (`min`, `step`, `allowEmpty` and `placeholder`
+optional; no blur clamping), `type: 'text'` with `TextInput`,
+`type: 'multiselect'` with `SelectInput multiple`, and absent/`'select'` with
+`SelectInput`. Selects supply an `options` array; multiselects read/write
+`string[]` and can set `allowCustomValues: true` to offer typed values as chips
+and display imported values absent from the suggestions. Text and multiselect
+options accept `placeholder`. Every option can provide `help` rendered below
+the control. These retain the
 standard mouse, Tab, arrow-key, and Space/Enter behavior of the shared controls.
 Select options may set `isDisabled: true` for a displayed status that cannot be
 selected, as the H3 photo recipe does when saved settings differ from its preset.
 Recipe actions belong in `onChange`; `getValue` must only read saved state so
 loading or importing a job never rewrites it.
-The renderer assigns a stable `id` to select and number options so their visible
+The shared `CustomModelOptions` renderer also accepts the model entry's
+`advancedModelOptions` and `advancedTargetOptions` arrays, displayed in native
+**Advanced model settings** and **Advanced target modules** details in the
+corresponding cards. Click the summary or focus it and press Enter/Space.
+The renderer assigns a stable `id` to text, select and number options so their visible
 labels focus the corresponding input. Checkbox options use the shared switch's
 own generated ID and label association.
+
+An optional `initializeDataset(dataset, config)` hook returns the configuration
+for a newly added dataset, after the form's standard initialization. It runs
+only on **Add Dataset**, never when loading/importing a job or rendering the
+form. H3 Image uses it to inherit a common dataset disk-text-cache choice;
+mixed existing choices remain untouched.
 
 `datasetControlPathListMax` exposes that many ordered reference-folder selectors
 using the existing `SelectInput`, stored as `dataset.control_path: string[]`.

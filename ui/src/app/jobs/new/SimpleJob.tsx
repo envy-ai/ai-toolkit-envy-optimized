@@ -38,6 +38,7 @@ import { Modal } from '@/components/Modal';
 import FizgigMultipointEditor, { MultipointStrengths } from './FizgigMultipointEditor';
 import SliderSpaceEditor, { SliderSpacePreview } from './SliderSpaceEditor';
 import DiffusionKTOEditor from './DiffusionKTOEditor';
+import CustomModelOptions from './CustomModelOptions';
 import { multipointNeutralPrompt, sortedPoints, strengthLabel, toggleMultipoint, updateMultipointPoints } from './fizgigMultipoint';
 import { applyComfyWorkflowSelection, FIBO2_TURBO_WORKFLOW_PATH, canonicalTrainingMode, cfgNegativeTextEnabled, effectiveFlowModel, flowTrainingModels, flowTrainingModelOptions, isSpecializedTrainingMode,
   switchSpecializedArchitecture, trainingModeVisible, trainingModeSupported } from './trainingCapabilities';
@@ -987,19 +988,8 @@ export default function SimpleJob({
                 onChange={value => setJobConfig(value, 'config.process[0].model.model_kwargs.match_target_res')}
               />
             )}
-            {modelArch?.customModelSelectOptions?.map((option, index) => option.type === 'checkbox' ? (
-              <Checkbox key={option.label} label={option.label} doc={option.doc}
-                checked={option.getValue(jobConfig)}
-                onChange={value => option.onChange(value, jobConfig, setJobConfig)} />
-            ) : option.type === 'number' ? (
-              <NumberInput key={option.label} id={`custom-model-${modelArch.name}-${index}`} label={option.label} doc={option.doc}
-                value={option.getValue(jobConfig)} min={option.min} step={option.step} clampOnBlur={false}
-                onChange={value => option.onChange(value, jobConfig, setJobConfig)} />
-            ) : (
-              <SelectInput key={option.label} id={`custom-model-${modelArch.name}-${index}`} label={option.label} doc={option.doc}
-                value={option.getValue(jobConfig) ?? ''} options={option.options}
-                onChange={value => option.onChange(value, jobConfig, setJobConfig)} />
-            ))}
+            <CustomModelOptions options={modelArch?.customModelSelectOptions} jobConfig={jobConfig}
+              setJobConfig={setJobConfig} idPrefix={`custom-model-${modelArch?.name}`} />
             {modelArch?.additionalSections?.includes('model.layer_offloading') && !isMac() && (
               <>
                 <Checkbox
@@ -1042,6 +1032,8 @@ export default function SimpleJob({
                 )}
               </>
             )}
+            <CustomModelOptions options={modelArch?.advancedModelOptions} jobConfig={jobConfig}
+              setJobConfig={setJobConfig} idPrefix={`advanced-model-${modelArch?.name}`} summary="Advanced model settings" />
           </Card>
           {disableSections.includes('model.quantize') ? null : (
             <Card title="Quantize / Compile">
@@ -1272,6 +1264,8 @@ export default function SimpleJob({
                 />
               </>
             )}
+            <CustomModelOptions options={modelArch?.advancedTargetOptions} jobConfig={jobConfig}
+              setJobConfig={setJobConfig} idPrefix={`advanced-target-${modelArch?.name}`} summary="Advanced target modules" />
           </Card>
           {!disableSections.includes('slider') && (
             <Card title="Slider">
@@ -2836,7 +2830,7 @@ export default function SimpleJob({
                 <button
                   type="button"
                   onClick={() => {
-                    const newDataset = objectCopy(defaultDatasetConfig);
+                    let newDataset = objectCopy(defaultDatasetConfig);
                     // automaticallt add the controls for a new dataset
                     const controls = isPairedImageTraining || isDiffusionKTO ? [] : (modelArch?.controls ?? []);
                     newDataset.controls = controls;
@@ -2849,6 +2843,7 @@ export default function SimpleJob({
                     if (isFizgigImageSlider && isMultipoint && multipointConfig) {
                       newDataset.multipoint_images = multipointConfig.points.map(point => ({ point_id: point.id, folder_path: '' }));
                     }
+                    newDataset = modelArch?.initializeDataset?.(newDataset, jobConfig) ?? newDataset;
                     setJobConfig([...jobConfig.config.process[0].datasets, newDataset], 'config.process[0].datasets');
                   }}
                   className="w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"

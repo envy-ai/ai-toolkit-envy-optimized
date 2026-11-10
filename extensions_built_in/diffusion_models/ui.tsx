@@ -3,6 +3,7 @@
 // see ui/src/extensions/README.md for the convention and the allowed imports.
 import Link from "next/link";
 import type { CustomModelOption, ModelArch } from "@/app/jobs/new/options";
+import { effectiveNetworkFilter } from "@/app/jobs/new/options";
 import type { JobConfig } from "@/types";
 import {
   defaultComfySampleConfig,
@@ -19,6 +20,106 @@ const h3VideoTrainingAdapter =
   "ostris/minimax_h3_training_adapter/minimax_h3_training_adapter_v3.safetensors";
 const h3PhotoBlocks = Array.from({ length: 30 }, (_, index) => `blocks.${index + 20}.`);
 const h3PhotoIgnoredModules = ["token_refiner", "adaln_proj"];
+
+/** An explicit filter edit replaces its process-level alias atomically. */
+function setH3NetworkFilter(config: JobConfig, key: "only_if_contains" | "ignore_if_contains", value: string[] | undefined,
+  set: (value: any, key: string) => void) {
+  const process = structuredClone(config.config.process[0]);
+  if (!process.network) throw new Error("Module filters require an adapter network. Select a Target Type first.");
+  delete process[key];
+  process.network = { ...process.network, network_kwargs: { ...process.network?.network_kwargs } };
+  if (value === undefined) delete process.network.network_kwargs[key];
+  else process.network.network_kwargs[key] = value;
+  set(process, "config.process[0]");
+}
+
+const h3ImageAdvancedModelOptions: CustomModelOption[] = [
+  {
+    type: "text", label: "DiT path (optional)",
+    getValue: config => config.config.process[0].model.model_kwargs?.dit_image_path,
+    onChange: (value, _config, set) => set(value.trim() || undefined, "config.process[0].model.model_kwargs.dit_image_path"),
+    placeholder: "/absolute/path/to/minimax_h3_image_pruned_int8_convrot.safetensors",
+    help: "Leave blank to resolve the official image DiT from Name or Path.",
+  },
+  {
+    type: "text", label: "Text encoder path (optional)",
+    getValue: config => {
+      const model = config.config.process[0].model;
+      return model.te_name_or_path ?? (model.model_kwargs?.text_encoder_path || model.text_encoder_path);
+    },
+    onChange: (value, config, set) => {
+      const model = structuredClone(config.config.process[0].model);
+      delete model.te_name_or_path;
+      delete model.text_encoder_path;
+      if (model.model_kwargs) delete model.model_kwargs.text_encoder_path;
+      if (value.trim()) model.te_name_or_path = value.trim();
+      set(model, "config.process[0].model");
+    },
+    placeholder: "/absolute/path/to/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    help: "Shows the active text encoder override. Editing replaces its path aliases; clearing restores automatic resolution.",
+  },
+  {
+    type: "text", label: "VAE path (optional)",
+    getValue: config => config.config.process[0].model.vae_path || config.config.process[0].model.model_kwargs?.image_vae_path,
+    onChange: (value, config, set) => {
+      const model = structuredClone(config.config.process[0].model);
+      delete model.vae_path;
+      if (model.model_kwargs) delete model.model_kwargs.image_vae_path;
+      if (value.trim()) model.vae_path = value.trim();
+      set(model, "config.process[0].model");
+    },
+    placeholder: "/absolute/path/to/minimax_h3_image_vae_fp16.safetensors",
+    help: "Leave blank to resolve the official image VAE. Editing replaces an imported image_vae_path alias.",
+  },
+  {
+    type: "checkbox", label: "Cache quantized models",
+    getValue: config => config.config.process[0].model.cache_quantized_models ?? true,
+    onChange: (value, _config, set) => set(value, "config.process[0].model.cache_quantized_models"),
+    help: "Reuse compressed model components between launches. Creating the first cache can involve substantial disk I/O.",
+  },
+  {
+    type: "text", label: "Quantized cache directory (optional)",
+    getValue: config => config.config.process[0].model.quantized_model_cache_dir,
+    onChange: (value, _config, set) => set(value.trim() || undefined, "config.process[0].model.quantized_model_cache_dir"),
+    placeholder: "models/.quantized_training_cache",
+    help: "Use a writable directory. Blank uses models/.quantized_training_cache; existing cache symlinks are not replaced.",
+  },
+  {
+    type: "number", label: "Caption token limit", min: 0, step: 1, allowEmpty: true, placeholder: "4096 (model default)",
+    getValue: config => config.config.process[0].model.model_kwargs?.max_text_length ?? null,
+    onChange: (value, _config, set) => set(value ?? undefined, "config.process[0].model.model_kwargs.max_text_length"),
+    help: "0 = unlimited. Blank uses 4096. Reference vision tokens are never truncated. Changing the limit uses a separate image text cache.",
+  },
+  {
+    type: "checkbox", label: "Cache dataset text embeddings to disk",
+    getValue: config => {
+      const datasets = config.config.process[0].datasets;
+      return datasets.length > 0 && datasets.every(dataset => dataset.cache_text_embeddings === true);
+    },
+    onChange: (value, config, set) => set(config.config.process[0].datasets.map(dataset => ({ ...dataset, cache_text_embeddings: value })),
+      "config.process[0].datasets"),
+    help: "Applies to every dataset; mixed imported choices stay unchanged until toggled. Separate from Training → Cache Text Embeddings. Newly added datasets inherit a common disk-cache choice.",
+  },
+];
+
+const h3ImageAdvancedTargetOptions: CustomModelOption[] = [
+  {
+    type: "multiselect", label: "Include modules", allowCustomValues: true,
+    options: Array.from({ length: 50 }, (_, index) => ({ value: `blocks.${index}.`, label: `#${index}` })),
+    getValue: config => effectiveNetworkFilter(config.config.process[0], "only_if_contains") ?? [],
+    onChange: (value, config, set) => setH3NetworkFilter(config, "only_if_contains", value.length ? value : undefined, set),
+    placeholder: "Add module…",
+    help: "Numbered chips refer to transformer blocks. Select a block or type a module-name substring and press Enter. Empty uses blocks 20–49 while the photo recipe is active; otherwise it includes all eligible modules. A saved empty array matches no modules and is retained until edited. Choose Image mode (keep current settings) before using other targets.",
+  },
+  {
+    type: "multiselect", label: "Exclude modules", allowCustomValues: true,
+    options: h3PhotoIgnoredModules.map(value => ({ value, label: value })),
+    getValue: config => effectiveNetworkFilter(config.config.process[0], "ignore_if_contains") ?? [],
+    onChange: (value, config, set) => setH3NetworkFilter(config, "ignore_if_contains", value, set),
+    placeholder: "Add exclusion…",
+    help: "Matches module-name substrings. Empty excludes nothing. The photo recipe accepts no exclusions or both token_refiner and adaln_proj; use Image mode for other filters. Remove a focused chip with Backspace or its × button.",
+  },
+];
 
 /** An explicit still-photo preset. Loading a job or changing model arch never calls this. */
 export function applyMinimaxH3PhotoRecipe(config: JobConfig): JobConfig {
@@ -145,8 +246,8 @@ export function getMinimaxH3TrainingRecipe(config: JobConfig): "video" | "photo"
   const train = process.train;
   const sample = process.sample;
   const networkOptions = network?.network_kwargs;
-  const exactBlocks = networkOptions?.only_if_contains;
-  const ignored = networkOptions?.ignore_if_contains;
+  const exactBlocks = effectiveNetworkFilter(process, "only_if_contains");
+  const ignored = effectiveNetworkFilter(process, "ignore_if_contains");
   const trainOptions = train as unknown as Record<string, unknown>;
   const matches =
     ["sd_trainer", "ui_trainer", "diffusion_trainer"].includes(process.type) &&
@@ -1385,6 +1486,13 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
     },
     disableSections: ["network.conv"],
     additionalSections: ["sample.multi_ctrl_imgs", "model.low_vram", "model.low_vram_layer_streaming", "model.layer_offloading", "model.assistant_lora_path"],
+    advancedModelOptions: h3ImageAdvancedModelOptions,
+    advancedTargetOptions: h3ImageAdvancedTargetOptions,
+    initializeDataset: (dataset, config) => {
+      const choices = config.config.process[0].datasets.map(item => item.cache_text_embeddings ?? false);
+      return choices.length && choices.every(choice => choice === choices[0])
+        ? { ...dataset, cache_text_embeddings: choices[0] } : dataset;
+    },
     customModelSelectOptions: [{
       label: "Training recipe",
       options: [

@@ -87,6 +87,13 @@ the shared textareas' IDs for its From/To labels. The trimming workflow uses
 these controls and the shared `Modal`; numeric validation uses
 `clampOnBlur={false}` to reject invalid values without silently changing them.
 
+`SelectInput multiple` supports `allowCustomValues` for editable string-list
+chips. It reuses react-select's creatable variant: type a value and press Enter,
+select a suggested option with arrow keys/Enter, or remove a chip using its
+remove button or Backspace. Saved values absent from the suggestions remain
+visible. Other selects keep their existing behavior.
+Multiple-select controls grow to contain wrapped chips, including in compact forms.
+
 For ordinary LoKr training, select **LoKr** under **Target Type** and enable
 **DoRA Weight Decomposition (DoKr)** beneath the LoKr factor selector. The
 shared checkbox supports clicking its label or focusing it with Tab and pressing
@@ -222,6 +229,14 @@ six-step, guidance-1 image previews. The model's **Training recipe** selector
 reapplies that recipe only when chosen; imported jobs retain their settings.
 Its own ComfyUI still-image workflow is separate from H3 video sampling. See
 [MiniMax-H3-Image training and previews](../docs/minimax_h3_image.md).
+
+For this architecture, expand **Advanced model settings** for optional component
+paths, quantized model cache controls, the caption token limit, and dataset
+text-embedding disk caching. **Advanced target modules** in Target edits include
+and exclude substring chips. Both summaries support clicking or Tab then
+Enter/Space. Existing jobs keep their saved settings until edited; the photo
+recipe's target restrictions remain enforced. New datasets inherit an existing
+common disk-text-cache choice.
 
 The Training card's **Training maps** switch is off by default. Set its positive
 integer step interval and picture count before starting/resuming a supported

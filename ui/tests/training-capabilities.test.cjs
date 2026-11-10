@@ -199,10 +199,12 @@ test('MOSS variants normalize correctly and architecture switching retains share
 test('MOSS form defaults keep negative CFG block skip and omit LoRA block-22 exclusions', () => {
   const modelUi = load('../../extensions_built_in/diffusion_models/ui.tsx', {
     'next/link': { __esModule: true, default: () => null },
+    '@/app/jobs/new/options': caps,
     '@/helpers/defaultSamples': {
       defaultComfySampleConfig: { workflow_path: 'workflow.json' },
       defaultSampleConfig: {},
       defaultIdeogramSamplesConfig: {},
+      defaultMinimaxH3ImageSampleConfig: load('../src/helpers/defaultSamples.ts').defaultMinimaxH3ImageSampleConfig,
     },
     react: { __esModule: true, default: { Fragment: Symbol.for('react.fragment') } },
     'react/jsx-runtime': {

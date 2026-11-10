@@ -1,7 +1,8 @@
 import React from 'react';
-import { GroupedSelectOption, SelectOption, JobConfig, ConfigDoc } from '@/types';
+import { GroupedSelectOption, SelectOption, JobConfig, ConfigDoc, DatasetConfig } from '@/types';
 import { activateSliderSpace, defaultDatasetConfig, defaultSliderConfig } from './jobConfig';
 import { activateDiffusionKTO } from './trainingCapabilities';
+export { effectiveNetworkFilter } from './trainingCapabilities';
 
 type Control = 'depth' | 'line' | 'pose' | 'inpaint';
 
@@ -46,34 +47,53 @@ type AdditionalSections =
 
 type ModelGroup = 'image' | 'instruction' | 'video' | 'experimental' | 'audio' | 'llm';
 
-export interface CustomModelSelectOption {
-  type?: 'select';
+interface CustomModelOptionBase {
   label: string;
+  doc?: ConfigDoc;
+  help?: React.ReactNode;
+}
+
+export interface CustomModelSelectOption extends CustomModelOptionBase {
+  type?: 'select';
   options: SelectOption[];
   getValue: (config: JobConfig) => string | undefined;
   onChange: (value: string, config: JobConfig, setJobConfig: (value: any, key: string) => void) => void;
-  doc?: ConfigDoc;
 }
 
-export interface CustomModelCheckboxOption {
+export interface CustomModelCheckboxOption extends CustomModelOptionBase {
   type: 'checkbox';
-  label: string;
   getValue: (config: JobConfig) => boolean;
   onChange: (value: boolean, config: JobConfig, setJobConfig: (value: any, key: string) => void) => void;
-  doc?: ConfigDoc;
 }
 
-export interface CustomModelNumberOption {
+export interface CustomModelNumberOption extends CustomModelOptionBase {
   type: 'number';
-  label: string;
   getValue: (config: JobConfig) => number | null;
   onChange: (value: number | null, config: JobConfig, setJobConfig: (value: any, key: string) => void) => void;
   min?: number;
   step?: number;
-  doc?: ConfigDoc;
+  allowEmpty?: boolean;
+  placeholder?: string;
 }
 
-export type CustomModelOption = CustomModelSelectOption | CustomModelCheckboxOption | CustomModelNumberOption;
+export interface CustomModelTextOption extends CustomModelOptionBase {
+  type: 'text';
+  getValue: (config: JobConfig) => string | undefined;
+  onChange: (value: string, config: JobConfig, setJobConfig: (value: any, key: string) => void) => void;
+  placeholder?: string;
+}
+
+export interface CustomModelMultiSelectOption extends CustomModelOptionBase {
+  type: 'multiselect';
+  options: SelectOption[];
+  getValue: (config: JobConfig) => string[];
+  onChange: (value: string[], config: JobConfig, setJobConfig: (value: any, key: string) => void) => void;
+  allowCustomValues?: boolean;
+  placeholder?: string;
+}
+
+export type CustomModelOption = CustomModelSelectOption | CustomModelCheckboxOption | CustomModelNumberOption |
+  CustomModelTextOption | CustomModelMultiSelectOption;
 
 export type SampleTag = {
   title: string;
@@ -132,6 +152,10 @@ export interface ModelArch {
   gateUrl?: string;
   modelNotes?: React.ReactNode;
   customModelSelectOptions?: CustomModelOption[];
+  advancedModelOptions?: CustomModelOption[];
+  advancedTargetOptions?: CustomModelOption[];
+  /** Called only when the user adds a dataset; never during job loading. */
+  initializeDataset?: (dataset: DatasetConfig, config: JobConfig) => DatasetConfig;
   /** Ordered reference folders stored in dataset.control_path, rather than numbered fields. */
   datasetControlPathListMax?: number;
 }
