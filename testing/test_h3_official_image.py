@@ -411,3 +411,19 @@ def test_downloaded_checkpoint_headers_match_meta_architectures():
         cfg = json.loads(header.metadata()['config'])['transformer']
         assert cfg['pdd_steps'] == 6
         assert cfg['pdd_sigmas'] == list(image_pipeline.PDD_SIGMAS)
+
+
+def test_image_unconditional_empty_sentinels_and_user_text():
+    import ast
+    path = ROOT / 'extensions_built_in/diffusion_models/minimax_h3_image/minimax_h3_image.py'
+    tree = ast.parse(path.read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'MinimaxH3ImageModel')
+    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'encode_unconditional_prompt')
+    class Base:
+        def encode_unconditional_prompt(self, prompt, *args, **kwargs): return prompt, args, kwargs
+    subject = ast.ClassDef(name='Subject', bases=[ast.Name(id='Base', ctx=ast.Load())], keywords=[], body=[method], decorator_list=[])
+    env = {'Base': Base}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[subject], type_ignores=[])), str(path), 'exec'), env)
+    model = env['Subject']()
+    for empty in (False, None): assert model.encode_unconditional_prompt(empty, 3, flag=True) == ('', (3,), {'flag': True})
+    assert model.encode_unconditional_prompt('avoid text') == ('avoid text', (), {})

@@ -82,6 +82,11 @@ class MiniMaxH3ImageTransformer(MiniMaxH3Transformer):
                 bias = bias + head.bias[start : start + rows]
         else:
             raise ValueError("MiniMax H3 Image needs the six published PDD heads for sampling")
+        # MemoryManager may keep the frozen output head on CPU while the block
+        # activations are on CUDA. This functional projection bypasses the
+        # module's paging hook, so stage only the selected FP32 head here.
+        weight = weight.to(device=h.device, non_blocking=True)
+        bias = bias.to(device=h.device, non_blocking=True)
         return F.linear(h.to(weight.dtype), weight, bias)
 
     def forward(

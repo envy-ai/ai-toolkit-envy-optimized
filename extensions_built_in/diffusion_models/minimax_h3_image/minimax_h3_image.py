@@ -227,6 +227,14 @@ class MinimaxH3ImageModel(MinimaxH3Model):
             gen_config.ctrl_img_3,
         ) if path is not None]
 
+    def encode_unconditional_prompt(self, prompt, *args, **kwargs):
+        # SampleConfig.neg defaults to False. The generic sample cache still
+        # encodes unconditional text even though H3 Image samples with CFG 1.
+        # Normalize only the standard empty sentinel; keep real user text.
+        if prompt is False or prompt is None:
+            prompt = ""
+        return super().encode_unconditional_prompt(prompt, *args, **kwargs)
+
     def _present_image_control(self, image: Image.Image):
         width, height = reference_size(*image.size, 1024, 1024)
         return image if image.size == (width, height) else image.resize(

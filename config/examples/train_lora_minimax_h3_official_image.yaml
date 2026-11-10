@@ -90,6 +90,7 @@ config:
         sample_steps: 6
         samples:
           - prompt: a portrait photo of a person outdoors
+            neg: ''
         comfy:
           enabled: false
           workflow_path: config/comfy_templates/minimax_h3_image_lora_sample.json.njk
