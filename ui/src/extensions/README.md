@@ -42,6 +42,13 @@ Training form model controls use `customModelSelectOptions`. Each option has a
 `type: 'number'` with `NumberInput` (`min` and `step` optional; no blur clamping),
 and absent/`'select'` with `SelectInput` and an `options` array. These retain the
 standard mouse, Tab, arrow-key, and Space/Enter behavior of the shared controls.
+Select options may set `isDisabled: true` for a displayed status that cannot be
+selected, as the H3 photo recipe does when saved settings differ from its preset.
+Recipe actions belong in `onChange`; `getValue` must only read saved state so
+loading or importing a job never rewrites it.
+The renderer assigns a stable `id` to select and number options so their visible
+labels focus the corresponding input. Checkbox options use the shared switch's
+own generated ID and label association.
 
 `datasetControlPathListMax` exposes that many ordered reference-folder selectors
 using the existing `SelectInput`, stored as `dataset.control_path: string[]`.

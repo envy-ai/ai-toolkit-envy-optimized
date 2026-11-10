@@ -127,6 +127,74 @@ def _normalize_network_config(network_config, process_config):
     return normalized_config
 
 
+def _validate_h3_photo_training(process):
+    """Keep the opt-in H3 photo density away from video and reference jobs."""
+    model = process.model_config
+    enabled = model.model_kwargs.get('h3_photo_training', False)
+    if not isinstance(enabled, bool):
+        raise ValueError('model.model_kwargs.h3_photo_training must be a boolean')
+    if not enabled:
+        return
+    if model.arch != 'minimax_h3':
+        raise ValueError('h3_photo_training requires model.arch: minimax_h3')
+    if process.get_conf('type') not in ('sd_trainer', 'ui_trainer', 'diffusion_trainer'):
+        raise ValueError('h3_photo_training requires an ordinary sd_trainer, ui_trainer, or diffusion_trainer process')
+    if model.model_kwargs.get('partition', 'fl2va_pruned') not in ('fl2va', 'fl2va_pruned'):
+        raise ValueError('h3_photo_training requires an FL2VA partition')
+    if model.model_kwargs.get('image_refs_as_video', False):
+        raise ValueError('h3_photo_training does not support reference video inputs')
+    if not model.assistant_lora_path:
+        raise ValueError('h3_photo_training requires a frozen photo training adapter')
+
+    train = process.train_config
+    network = process.network_config
+    if network is None or network.type.lower() != 'lora' or not network.transformer_only:
+        raise ValueError('h3_photo_training requires a transformer-only LoRA network')
+    if network.all_layers or network.network_kwargs.get('full_if_contains'):
+        raise ValueError('h3_photo_training does not support full-weight network layers')
+    expected_blocks = [f'blocks.{i}.' for i in range(20, 50)]
+    configured_blocks = network.network_kwargs.get('only_if_contains')
+    if configured_blocks is None:
+        network.network_kwargs['only_if_contains'] = expected_blocks
+    elif set(configured_blocks) != set(expected_blocks):
+        raise ValueError('h3_photo_training requires only_if_contains for H3 blocks 20-49')
+    ignored = network.network_kwargs.get('ignore_if_contains') or []
+    if set(ignored) not in (set(), {'token_refiner', 'adaln_proj'}):
+        raise ValueError('h3_photo_training only permits token_refiner and adaln_proj exclusions')
+    if (train.batch_size != 1 or not train.train_unet or train.train_text_encoder
+            or train.train_refiner):
+        raise ValueError('h3_photo_training requires batch_size: 1 and transformer-only LoRA training')
+    if train.noise_scheduler != 'flowmatch' or train.timestep_type != 'shift':
+        raise ValueError('h3_photo_training requires flowmatch noise_scheduler and shift timestep_type')
+    if (train.content_or_style != 'balanced' or train.content_or_style_reg != 'balanced'
+            or train.linear_timesteps or train.linear_timesteps2
+            or train.first_timestep_chance != 0
+            or train.min_denoising_steps != 0 or train.max_denoising_steps != 999
+            or train.num_train_timesteps != 1000):
+        raise ValueError('h3_photo_training requires uniform sampling across the full 1000-step shifted schedule')
+    if train.loss_target != 'noise':
+        raise ValueError('h3_photo_training requires loss_target: noise')
+    if (train.do_guidance_loss or train.do_differential_guidance
+            or train.do_cfg or train.do_random_cfg
+            or train.blank_prompt_preservation or train.frequency_loss_enabled
+            or train.diff_output_preservation or train.do_prior_divergence
+            or train.train_turbo or train.inverted_mask_prior or train.correct_pred_norm):
+        raise ValueError('h3_photo_training does not support auxiliary training losses')
+    if process.adapter_config is not None or process.guidance_config is not None:
+        raise ValueError('h3_photo_training does not support additional training adapters or guidance')
+
+    if not process.dataset_configs:
+        raise ValueError('h3_photo_training requires a still-image dataset')
+    for dataset in process.dataset_configs:
+        if (dataset.type != 'image' or dataset.num_frames != 1
+                or dataset.auto_frame_count or dataset.batch_size not in (None, 1)
+                or dataset.do_i2v or dataset.do_audio):
+            raise ValueError('h3_photo_training requires image datasets with num_frames: 1 and no video or audio')
+        if (dataset.h3_v2v_path or dataset.h3_reference_path or dataset.control_path
+                or dataset.control_from_same_folder or dataset.controls):
+            raise ValueError('h3_photo_training does not support video, reference, or control inputs')
+
+
 def _log_cuda_training_oom(error: BaseException, step: int, device: torch.device):
     """Keep the original failure and allocator state before OOM cleanup runs."""
     print_acc(f"CUDA out of memory during training step {step}: {error}")
@@ -356,6 +424,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.ema: ExponentialMovingAverage = None
         
         validate_configs(self.train_config, self.model_config, self.save_config, self.dataset_configs)
+        _validate_h3_photo_training(self)
         
         do_profiler = self.get_conf('torch_profiler', False)
         self.torch_profiler = None if not do_profiler else torch.profiler.profile(

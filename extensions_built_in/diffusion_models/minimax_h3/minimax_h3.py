@@ -181,6 +181,9 @@ class MinimaxH3Model(BaseModel):
     arch = "minimax_h3"
     # video flow shift; audio stays on AUDIO_SIGMA_SHIFT, remapped from this
     video_sigma_shift = packing.VIDEO_SIGMA_SHIFT
+    # Shifted-uniform training density for the opt-in still-photo recipe:
+    # P(sigma < 0.5) = 1 / (1 + shift) = 0.6.
+    photo_training_sigma_shift = 2.0 / 3.0
     # hub repo for missing files when name_or_path isn't an org/repo id
     comfy_repo = COMFY_REPO
     use_old_lokr_format = False
@@ -221,9 +224,9 @@ class MinimaxH3Model(BaseModel):
         )
 
     @classmethod
-    def get_train_scheduler(cls):
+    def get_train_scheduler(cls, shift: Optional[float] = None):
         return CustomFlowMatchEulerDiscreteScheduler(
-            **{**scheduler_config, "shift": cls.video_sigma_shift}
+            **{**scheduler_config, "shift": cls.video_sigma_shift if shift is None else shift}
         )
 
     def get_bucket_divisibility(self):
@@ -279,6 +282,17 @@ class MinimaxH3Model(BaseModel):
             )
         return f"dit_{partition}"
 
+    def convert_assistant_lora_weights_before_load(self, state_dict):
+        """Map the photo helper's Comfy prefix to the native H3 module root."""
+        converted = {}
+        for key, value in state_dict.items():
+            if key.startswith("diffusion_model."):
+                key = "transformer." + key[len("diffusion_model."):]
+            if key in converted:
+                raise ValueError(f"Duplicate H3 training-adapter key after normalization: {key}")
+            converted[key] = value
+        return converted
+
     def load_training_adapter(self, transformer: MiniMaxH3Transformer):
         """Load an assistant LoRA (e.g. a de-distillation adapter) as a LIVE
         module: active during training, deactivated by the sampler. It is
@@ -323,6 +337,19 @@ class MinimaxH3Model(BaseModel):
                         f"Failed to download assistant LoRA from {lora_path}: {e}"
                     )
             self.model_config.assistant_lora_path = lora_path
+
+        # The photo helper uses PEFT-style dotted names and includes the token
+        # refiner. Reuse the strict importer so every factor must match its
+        # actual target, while leaving the existing video helper path intact.
+        if self.model_config.model_kwargs.get("h3_photo_training", False):
+            from toolkit.assistant_lora import load_assistant_lora_from_path
+
+            self.model = transformer
+            self.assistant_lora = load_assistant_lora_from_path(
+                lora_path, self, strict=True, is_ara=True
+            )
+            self.invert_assistant_lora = False
+            return
 
         # load the adapter; it stays a live module (never merged) and the
         # sampler toggles it off for previews
@@ -661,7 +688,12 @@ class MinimaxH3Model(BaseModel):
         vae_bundle = self._load_vaes()
         vae_bundle.to("cpu")
 
-        self.noise_scheduler = self.get_train_scheduler()
+        # This scheduler is consumed by the trainer's timestep draw. The H3
+        # sampler builds its own 12/3 video/audio schedules for previews.
+        photo_training = self.model_config.model_kwargs.get("h3_photo_training", False)
+        self.noise_scheduler = self.get_train_scheduler(
+            self.photo_training_sigma_shift if photo_training else None
+        )
         self.vae = vae_bundle
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer

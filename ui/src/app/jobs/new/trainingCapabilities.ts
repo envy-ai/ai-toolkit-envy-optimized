@@ -121,6 +121,25 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     if ((process.model && effectiveFlowModel(process.model).model_kwargs?.edit) || process.train?.train_text_encoder)
       errors.push('Training maps require text-to-image training with a frozen text encoder.');
   }
+  const h3PhotoFlag = process.model?.model_kwargs?.h3_photo_training;
+  if (h3PhotoFlag !== undefined && typeof h3PhotoFlag !== 'boolean') {
+    errors.push('MiniMax-H3 photo training flag must be true or false.');
+  }
+  if (h3PhotoFlag === true) {
+    if (process.model.arch !== 'minimax_h3' || !['sd_trainer', 'ui_trainer', 'diffusion_trainer'].includes(mode)) {
+      errors.push('MiniMax-H3 photo training requires an ordinary MiniMax-H3 training job.');
+    }
+    if (!['fl2va', 'fl2va_pruned'].includes(process.model.model_kwargs?.partition ?? 'fl2va_pruned')) {
+      errors.push('MiniMax-H3 photo training requires the fl2va or fl2va_pruned base partition.');
+    }
+    if (['do_cfg', 'do_random_cfg', 'do_guidance_loss', 'do_differential_guidance',
+      'diff_output_preservation', 'blank_prompt_preservation', 'do_prior_divergence',
+      'train_turbo', 'inverted_mask_prior', 'correct_pred_norm'].some(key =>
+      !!(process.train as unknown as Record<string, unknown>)[key]) ||
+      (process.train.frequency_loss_type ?? 'none') !== 'none') {
+      errors.push('MiniMax-H3 photo training cannot combine CFG, guidance or preservation objectives with the image training adapter.');
+    }
+  }
   if (process.model?.arch === 'krea2_edit') errors.push(...validateKrea2Edit(config));
   if (process.model?.arch === 'fibo2') {
     const kwargs = process.model.model_kwargs ?? {};

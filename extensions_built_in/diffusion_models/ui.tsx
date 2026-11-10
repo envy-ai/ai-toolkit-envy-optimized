@@ -12,6 +12,194 @@ import {
 
 const defaultNameOrPath = "";
 const defaultLinearRank = 32;
+const h3PhotoTrainingAdapter =
+  "circlestone-labs/MiniMax-H3-Image-Training-Adapter/minimax_h3_image_training_adapter.safetensors";
+const h3VideoTrainingAdapter =
+  "ostris/minimax_h3_training_adapter/minimax_h3_training_adapter_v3.safetensors";
+const h3PhotoBlocks = Array.from({ length: 30 }, (_, index) => `blocks.${index + 20}.`);
+const h3PhotoIgnoredModules = ["token_refiner", "adaln_proj"];
+
+/** An explicit still-photo preset. Loading a job or changing model arch never calls this. */
+export function applyMinimaxH3PhotoRecipe(config: JobConfig): JobConfig {
+  const next = structuredClone(config);
+  const process = next.config.process[0];
+  if (process.model.arch !== "minimax_h3" ||
+      !["sd_trainer", "ui_trainer", "diffusion_trainer"].includes(process.type) ||
+      !process.network) {
+    throw new Error("MiniMax-H3 photo training requires an ordinary MiniMax-H3 LoRA job.");
+  }
+  if (!["fl2va", "fl2va_pruned"].includes(process.model.model_kwargs?.partition ?? "fl2va_pruned")) {
+    throw new Error("MiniMax-H3 photo training requires the fl2va or fl2va_pruned base partition; choose that base before applying the recipe.");
+  }
+  process.model.model_kwargs = {
+    ...(process.model.model_kwargs ?? {}),
+    h3_photo_training: true,
+    image_refs_as_video: false,
+  };
+  process.model.assistant_lora_path = h3PhotoTrainingAdapter;
+  Object.assign(process.network, {
+    type: "lora",
+    linear: 8,
+    linear_alpha: 8,
+    transformer_only: true,
+    network_kwargs: {
+      ...(process.network.network_kwargs ?? {}),
+      only_if_contains: [...h3PhotoBlocks],
+      ignore_if_contains: [...h3PhotoIgnoredModules],
+    },
+  });
+  delete (process.network as unknown as Record<string, unknown>).all_layers;
+  delete (process.network as unknown as Record<string, unknown>).full_if_contains;
+  delete process.network.network_kwargs.full_if_contains;
+  Object.assign(process.train, {
+    batch_size: 1,
+    gradient_accumulation: 1,
+    train_unet: true,
+    train_text_encoder: false,
+    train_refiner: false,
+    noise_scheduler: "flowmatch",
+    timestep_type: "shift",
+    content_or_style: "balanced",
+    content_or_style_reg: "balanced",
+    linear_timesteps: false,
+    linear_timesteps2: false,
+    first_timestep_chance: 0,
+    min_denoising_steps: 0,
+    max_denoising_steps: 999,
+    num_train_timesteps: 1000,
+    min_snr_gamma: 0,
+    snr_gamma: 0,
+    loss_type: "mse",
+    loss_target: "noise",
+    frequency_loss_type: "none",
+    optimizer: "automagic3",
+    lr: 1e-6,
+    lr_scheduler: "constant",
+    cache_text_embeddings: true,
+    audio_loss_multiplier: 0,
+    do_cfg: false,
+    do_random_cfg: false,
+    do_guidance_loss: false,
+    do_differential_guidance: false,
+    diff_output_preservation: false,
+    blank_prompt_preservation: false,
+    do_prior_divergence: false,
+    train_turbo: false,
+    learnable_snr_gos: false,
+    inverted_mask_prior: false,
+    correct_pred_norm: false,
+    ema_config: { ...(process.train.ema_config ?? {}), use_ema: true, ema_decay: 0.98 },
+  });
+  for (const dataset of process.datasets) {
+    Object.assign(dataset, {
+      batch_size: 1,
+      resolution: [512],
+      native_resolution: false,
+      buckets: true,
+      num_frames: 1,
+      auto_frame_count: false,
+      do_i2v: false,
+      do_audio: false,
+      cache_latents_to_disk: true,
+      cache_text_embeddings: true,
+      caption_dropout_rate: 0.05,
+      controls: [],
+    });
+    for (const key of ["control_path", "control_path_1", "control_path_2", "control_path_3", "anchor_path", "multipoint_images",
+      "h3_reference_path", "h3_v2v_path", "control_from_same_folder"] as const) {
+      delete (dataset as unknown as Record<string, unknown>)[key];
+    }
+  }
+  Object.assign(process.sample, {
+    sampler: "flowmatch",
+    width: 512,
+    height: 512,
+    num_frames: 1,
+    fps: 1,
+    guidance_scale: 1,
+    sample_steps: 20,
+  });
+  process.sample.samples = process.sample.samples.map(sample => {
+    const nextSample = { ...sample };
+    for (const key of ["ctrl_img", "ctrl_img_1", "ctrl_img_2", "ctrl_img_3", "ctrl_idx",
+      "width", "height", "num_frames", "fps", "duration", "guidance_scale", "sample_steps"] as const) {
+      delete nextSample[key];
+    }
+    return nextSample;
+  });
+  if (process.sample.comfy) process.sample.comfy.enabled = false;
+  return next;
+}
+
+/** Report actual saved settings; a modified photo job never claims to match the preset. */
+export function getMinimaxH3TrainingRecipe(config: JobConfig): "video" | "photo" | "custom_photo" {
+  const process = config.config.process[0];
+  if (process.model.model_kwargs?.h3_photo_training !== true) return "video";
+  const network = process.network;
+  const train = process.train;
+  const sample = process.sample;
+  const networkOptions = network?.network_kwargs;
+  const exactBlocks = networkOptions?.only_if_contains;
+  const ignored = networkOptions?.ignore_if_contains;
+  const trainOptions = train as unknown as Record<string, unknown>;
+  const matches =
+    ["sd_trainer", "ui_trainer", "diffusion_trainer"].includes(process.type) &&
+    ["fl2va", "fl2va_pruned"].includes(process.model.model_kwargs?.partition ?? "fl2va_pruned") &&
+    !process.model.model_kwargs?.image_refs_as_video &&
+    network?.type === "lora" && network.linear === 8 && network.linear_alpha === 8 &&
+    network.transformer_only === true &&
+    !(network as unknown as Record<string, unknown>).all_layers &&
+    !(network as unknown as Record<string, unknown>).full_if_contains &&
+    !networkOptions?.full_if_contains &&
+    Array.isArray(exactBlocks) && exactBlocks.length === h3PhotoBlocks.length &&
+    exactBlocks.every((block, index) => block === h3PhotoBlocks[index]) &&
+    Array.isArray(ignored) && ignored.length === h3PhotoIgnoredModules.length &&
+    ignored.every((module, index) => module === h3PhotoIgnoredModules[index]) &&
+    process.model.assistant_lora_path === h3PhotoTrainingAdapter &&
+    train.batch_size === 1 && train.gradient_accumulation === 1 &&
+    train.train_unet === true && train.train_text_encoder === false &&
+    trainOptions.train_refiner === false &&
+    train.noise_scheduler === "flowmatch" && train.timestep_type === "shift" &&
+    train.content_or_style === "balanced" && trainOptions.content_or_style_reg === "balanced" &&
+    train.min_snr_gamma === 0 && trainOptions.snr_gamma === 0 &&
+    trainOptions.linear_timesteps === false && trainOptions.linear_timesteps2 === false &&
+    trainOptions.first_timestep_chance === 0 && trainOptions.min_denoising_steps === 0 &&
+    train.max_denoising_steps === 999 && trainOptions.num_train_timesteps === 1000 &&
+    trainOptions.loss_target === "noise" &&
+    train.loss_type === "mse" && train.frequency_loss_type === "none" &&
+    train.audio_loss_multiplier === 0 &&
+    train.optimizer === "automagic3" && train.lr === 1e-6 &&
+    trainOptions.lr_scheduler === "constant" &&
+    train.cache_text_embeddings === true && train.ema_config?.use_ema === true &&
+    train.ema_config.ema_decay === 0.98 &&
+    !train.do_cfg && !train.do_random_cfg && !train.do_guidance_loss &&
+    !train.do_differential_guidance && !train.diff_output_preservation &&
+    !train.blank_prompt_preservation && !trainOptions.do_prior_divergence &&
+    !trainOptions.train_turbo && !trainOptions.inverted_mask_prior &&
+    !trainOptions.correct_pred_norm && !trainOptions.learnable_snr_gos &&
+    sample.sampler === "flowmatch" && sample.width === 512 && sample.height === 512 &&
+    sample.num_frames === 1 && sample.fps === 1 &&
+    sample.guidance_scale === 1 && sample.sample_steps === 20 &&
+    !sample.comfy?.enabled &&
+    sample.samples.every(item => !item.width && !item.height && !item.num_frames &&
+      !item.fps && !item.duration && !item.guidance_scale && !item.sample_steps &&
+      !item.ctrl_img && !item.ctrl_img_1 && !item.ctrl_img_2 && !item.ctrl_img_3 &&
+      item.ctrl_idx == null) &&
+    process.datasets.every(dataset =>
+      (dataset.batch_size ?? 1) === 1 &&
+      dataset.resolution?.length === 1 && dataset.resolution[0] === 512 &&
+      (dataset as unknown as Record<string, unknown>).buckets === true &&
+      (dataset as unknown as Record<string, unknown>).cache_text_embeddings === true &&
+      !dataset.native_resolution && dataset.num_frames === 1 && !dataset.auto_frame_count &&
+      !dataset.do_i2v && !dataset.do_audio && dataset.cache_latents_to_disk === true &&
+      dataset.caption_dropout_rate === 0.05 && !dataset.controls?.length &&
+      !(dataset as unknown as Record<string, unknown>).h3_reference_path &&
+      !(dataset as unknown as Record<string, unknown>).h3_v2v_path &&
+      !(dataset as unknown as Record<string, unknown>).control_from_same_folder &&
+      !dataset.control_path &&
+      !dataset.control_path_1 && !dataset.control_path_2 && !dataset.control_path_3);
+  return matches ? "photo" : "custom_photo";
+}
 
 // MOSS-Image edit LoRAs need the companion custom nodes in ComfyUI
 const mossImageEditNotes = (
@@ -1182,6 +1370,34 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
     ],
     customModelSelectOptions: [
       {
+        label: "Training recipe",
+        options: [
+          { value: "video", label: "Video mode (keep current settings)" },
+          { value: "photo", label: "Apply still-photo recipe" },
+          { value: "custom_photo", label: "Photo mode — customized settings", isDisabled: true },
+        ],
+        getValue: getMinimaxH3TrainingRecipe,
+        onChange: (value, config, setJobConfig) => {
+          if (value === "photo") {
+            setJobConfig(applyMinimaxH3PhotoRecipe(config).config.process[0], "config.process[0]");
+          } else if (value === "video") {
+            // This changes the H3 training schedule; existing user choices stay as they are.
+            setJobConfig(false, "config.process[0].model.model_kwargs.h3_photo_training");
+          }
+        },
+        doc: {
+          title: "MiniMax-H3 training recipe",
+          description: (
+            <div className="space-y-2">
+              <p>Apply still-photo recipe is an explicit action. Opening a job or choosing MiniMax-H3 leaves its saved video settings alone.</p>
+              <p>The recipe sets 512-pixel stills, rank/alpha 8 LoRA on blocks 20–49, excludes the token refiner and AdaLN projection, and selects the Circlestone image training adapter. It uses Automagic v3 at 1e-6 with constant LR, EMA 0.98, 5% caption dropout, and a single-image native sample at guidance 1.</p>
+              <p>It keeps dataset folders and captions, sample prompts, total steps, model component paths, quantization, and memory settings. It clears image/video references and incompatible guidance or preservation objectives, and turns off ComfyUI sampling because the supplied H3 graph is for video. The saved ComfyUI workflow remains available if you later configure an image-compatible graph.</p>
+              <p>The disabled “customized settings” entry reports that a photo-mode config differs from this recipe. Choosing Video mode changes the H3 schedule back to video behavior while retaining the other current settings.</p>
+            </div>
+          ),
+        },
+      },
+      {
         label: "Distillation Handling Method",
         options: [
           { value: "cg", label: "Contrastive Guidance" },
@@ -1231,13 +1447,13 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
               "config.process[0].train.guidance_loss_target",
             );
             setJobConfig(
-              "ostris/minimax_h3_training_adapter/minimax_h3_training_adapter_v3.safetensors",
+              config.config.process[0].model.model_kwargs?.h3_photo_training ? h3PhotoTrainingAdapter : h3VideoTrainingAdapter,
               "config.process[0].model.assistant_lora_path",
             );
           } else if (value === "both") {
             setJobConfig(true, "config.process[0].train.do_guidance_loss");
             setJobConfig(
-              "ostris/minimax_h3_training_adapter/minimax_h3_training_adapter_v3.safetensors",
+              config.config.process[0].model.model_kwargs?.h3_photo_training ? h3PhotoTrainingAdapter : h3VideoTrainingAdapter,
               "config.process[0].model.assistant_lora_path",
             );
             if (!config?.config?.process?.[0]?.train?.guidance_loss_target) {

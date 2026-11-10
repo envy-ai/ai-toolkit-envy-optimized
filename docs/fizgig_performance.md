@@ -20,6 +20,10 @@ than replacing its model implementations or memory manager.
   Existing jobs and new-job AdamW8bit defaults are unchanged.
 - [Training maps](training_maps.md), an opt-in diagnostic for supported ordinary
   image LoRA/DoRA jobs.
+- [MiniMax-H3 still-photo training](h3_photo_training.md), an explicit recipe
+  using the existing H3 architecture, a frozen Circlestone training adapter,
+  selected transformer blocks and a clean-end training density. Existing video
+  jobs keep their saved settings until the recipe is selected.
 
 No text-encoder batching, lower-precision adapter arithmetic, new checkpoint
 placement or automatic optimizer/preset change is part of these ports. The

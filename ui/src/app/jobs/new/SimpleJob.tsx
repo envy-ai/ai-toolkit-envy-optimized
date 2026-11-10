@@ -983,16 +983,16 @@ export default function SimpleJob({
                 onChange={value => setJobConfig(value, 'config.process[0].model.model_kwargs.match_target_res')}
               />
             )}
-            {modelArch?.customModelSelectOptions?.map(option => option.type === 'checkbox' ? (
+            {modelArch?.customModelSelectOptions?.map((option, index) => option.type === 'checkbox' ? (
               <Checkbox key={option.label} label={option.label} doc={option.doc}
                 checked={option.getValue(jobConfig)}
                 onChange={value => option.onChange(value, jobConfig, setJobConfig)} />
             ) : option.type === 'number' ? (
-              <NumberInput key={option.label} label={option.label} doc={option.doc}
+              <NumberInput key={option.label} id={`custom-model-${modelArch.name}-${index}`} label={option.label} doc={option.doc}
                 value={option.getValue(jobConfig)} min={option.min} step={option.step} clampOnBlur={false}
                 onChange={value => option.onChange(value, jobConfig, setJobConfig)} />
             ) : (
-              <SelectInput key={option.label} label={option.label} doc={option.doc}
+              <SelectInput key={option.label} id={`custom-model-${modelArch.name}-${index}`} label={option.label} doc={option.doc}
                 value={option.getValue(jobConfig) ?? ''} options={option.options}
                 onChange={value => option.onChange(value, jobConfig, setJobConfig)} />
             ))}

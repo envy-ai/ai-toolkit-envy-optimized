@@ -597,6 +597,7 @@ export interface ConfigDoc {
 export interface SelectOption {
   readonly value: string;
   readonly label: string;
+  readonly isDisabled?: boolean;
 }
 export interface GroupedSelectOption {
   readonly label: string;
