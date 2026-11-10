@@ -260,6 +260,83 @@ def _pip_uninstall(packages, dry_run=False):
     run(cmd, check=False, env=clean_env())
 
 
+def _installed_distributions(packages):
+    """Names installed in the managed venv, without importing binary modules."""
+    if not packages or not venv_exists():
+        return []
+    script = (
+        "import importlib.metadata as md, sys\n"
+        "for name in sys.argv[1:]:\n"
+        "    try: md.version(name)\n"
+        "    except md.PackageNotFoundError: continue\n"
+        "    print(name)\n"
+    )
+    result = subprocess.run(
+        [venv_python(), "-c", script] + list(packages),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        env=clean_env(),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Could not inspect incompatible packages in the managed environment: %s"
+            % result.stderr.decode("utf-8", errors="replace").strip()
+        )
+    return result.stdout.decode("utf-8", errors="replace").splitlines()
+
+
+def required_packages_match(spec):
+    """Check exact profile extras as well as the Torch trio at sync boundaries."""
+    required = getattr(spec, "required_packages", {})
+    if not required:
+        return True
+    if not venv_exists():
+        return False
+    script = (
+        "import importlib.metadata as md, json, sys\n"
+        "versions = {}\n"
+        "for name in sys.argv[1:]:\n"
+        "    try: versions[name] = md.version(name)\n"
+        "    except md.PackageNotFoundError: versions[name] = None\n"
+        "print(json.dumps(versions))\n"
+    )
+    try:
+        result = subprocess.run(
+            [venv_python(), "-c", script] + sorted(required),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            env=clean_env(),
+        )
+        if result.returncode != 0:
+            return False
+        installed = json.loads(result.stdout.decode("utf-8"))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return all(installed.get(name) == version for name, version in required.items())
+
+
+def _remove_incompatible_packages(spec, dry_run=False):
+    incompatible = getattr(spec, "incompatible_packages", [])
+    installed = _installed_distributions(incompatible)
+    if not installed:
+        return
+    info("Removing incompatible binary packages: %s" % ", ".join(installed))
+    _pip_uninstall(installed, dry_run=dry_run)
+    if not dry_run:
+        remaining = _installed_distributions(installed)
+        if remaining:
+            raise RuntimeError(
+                "Incompatible binary packages remain installed: %s"
+                % ", ".join(remaining)
+            )
+
+
+def incompatible_packages_absent(spec):
+    return not _installed_distributions(getattr(spec, "incompatible_packages", []))
+
+
 def venv_python_version():
     """'3.12' etc. from the venv interpreter, or None."""
     if not venv_exists():
@@ -543,7 +620,7 @@ def _filter_extras(extras):
 
 
 def ensure_requirements(spec, dry_run=False, force=False):
-    if not force and requirements_in_sync(spec):
+    if not force and requirements_in_sync(spec) and required_packages_match(spec):
         ok("Requirements already in sync.")
         return False
     # force git-pinned deps (diffusers) onto a newly pinned commit — pip won't
@@ -602,6 +679,10 @@ def ensure_requirements(spec, dry_run=False, force=False):
         if code != 0:
             warn("No-deps package failed to install (continuing): %s" % pkg)
     _verify_torch(spec, dry_run=dry_run)
+    if not dry_run and not required_packages_match(spec):
+        raise RuntimeError(
+            "Required Torch-profile packages do not match their pinned versions."
+        )
     if not dry_run:
         state = load_state()
         state["req_hash"] = requirements_hash(spec)
@@ -689,7 +770,7 @@ def write_sitecustomize(dry_run=False, spec=None):
     target = os.path.join(site_packages, "sitecustomize.py")
     dll_dirs = [ffmpeg.bin_dir()] + list(getattr(spec, "runtime_dll_dirs", []) or [])
     runtime_env = dict(getattr(spec, "runtime_env", {}) or {})
-    if getattr(spec, "backend", None) == "cu134":
+    if getattr(spec, "spark_native", False):
         # triton's runtime launcher JIT needs the MSVC environment
         msvc_env, msvc_bins = _msvc_runtime_env()
         runtime_env.update(msvc_env)
@@ -737,13 +818,25 @@ def sync(spec, detection, dry_run=False, force=False):
         warn(note)
     uvbin.ensure_uv(dry_run=dry_run)
     gitwin.ensure_git(dry_run=dry_run)
-    if spec.backend == "cu134":
+    if getattr(spec, "spark_native", False):
         # native Spark stack: provision CUDA/cuDNN/APL runtime DLLs, VC
         # redist, and (best-effort) MSVC for triton's kernel launcher JIT
         from . import sparkdeps
 
         sparkdeps.ensure_spark_runtime(dry_run=dry_run)
     ensure_venv(spec, dry_run=dry_run)
+    minimum_python = getattr(spec, "min_python_version", None)
+    if minimum_python and venv_exists():
+        actual = venv_python_version()
+        minimum = tuple(int(part) for part in minimum_python.split("."))
+        if actual is None or tuple(int(part) for part in actual.split(".")) < minimum:
+            raise RuntimeError(
+                "The selected Torch profile requires environment Python %s+, "
+                "but the existing venv uses %s. Recreate the venv with a "
+                "supported Python before syncing."
+                % (minimum_python, actual or "an unknown version")
+            )
+    _remove_incompatible_packages(spec, dry_run=dry_run)
     # sitecustomize must exist BEFORE any torch import check below: on Spark
     # the torch wheel is unbundled and only imports once the CUDA/cuDNN/BLAS
     # DLL dirs from the spec are exposed to the interpreter
@@ -751,6 +844,7 @@ def sync(spec, detection, dry_run=False, force=False):
     changed_torch = ensure_torch(spec, dry_run=dry_run)
     # a torch reinstall can clobber pinned deps; force req pass afterwards
     ensure_requirements(spec, dry_run=dry_run, force=force or changed_torch)
+    _remove_incompatible_packages(spec, dry_run=dry_run)
     ffmpeg.ensure_ffmpeg(detection, dry_run=dry_run, spec=spec)
     nodejs.ensure_node(detection, dry_run=dry_run)
     nodejs.ensure_ui_deps(dry_run=dry_run)

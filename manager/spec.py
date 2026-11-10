@@ -1,7 +1,7 @@
 """Maps detected hardware to an environment spec.
 
 This is the single source of truth for "what does this machine need to run
-this commit of AI Toolkit". One universal torch version across all platforms;
+this commit of AI Toolkit". One default torch version across all platforms;
 per-platform accelerator extras (flash-attn, NATTEN, triton) wherever prebuilt
 wheels exist. **Update the pins below together with the README install
 instructions and run_mac.zsh.**
@@ -57,6 +57,11 @@ from .util import REPO_ROOT
 
 TORCH = {"torch": "2.13.0", "torchvision": "0.28.0", "torchaudio": "2.11.0"}
 TORCH_TAG = "2.13"  # as it appears in flash-attn / natten wheel names
+
+# Opt-in Linux x86_64 trial. Keep the fleet default above until each platform
+# and its optional binary accelerators have been qualified separately.
+TORCH215 = {"torch": "2.15.0", "torchvision": "0.29.2", "torchaudio": "2.11.1"}
+TORCH215_PROFILE = "torch215"
 
 TORCHCODEC = "torchcodec==0.15.0"
 TRITON_WINDOWS = "triton-windows>=3.7,<3.8"
@@ -147,6 +152,10 @@ class EnvSpec(object):
         torch_links=None,
         no_deps_packages=None,
         runtime_dll_dirs=None,
+        spark_native=False,
+        min_python_version=None,
+        incompatible_packages=None,
+        required_packages=None,
     ):
         self.backend = backend  # cu134 / cu130 / cu126 / rocm7.1 / mps / cpu
         self.torch_packages = torch_packages  # {name: version}
@@ -171,6 +180,10 @@ class EnvSpec(object):
         # extra DLL dirs the venv needs at runtime (unbundled CUDA/cuDNN/BLAS
         # on Spark); baked into sitecustomize.py, missing dirs skipped
         self.runtime_dll_dirs = runtime_dll_dirs or []
+        self.spark_native = spark_native
+        self.min_python_version = min_python_version
+        self.incompatible_packages = incompatible_packages or []
+        self.required_packages = required_packages or {}
         # env vars every venv python needs (sitecustomize setdefault)
         self.runtime_env = {}
 
@@ -183,7 +196,7 @@ class EnvSpec(object):
         return args
 
     def torch_constraints(self):
-        """Exact pins for the torch trio, carrying the backend local tag.
+        """Exact pins for the torch trio and profile extras.
 
         Written to a constraints file and passed to every install pass after
         torch itself, so nothing in requirements.txt (or a prebuilt accelerator
@@ -195,9 +208,13 @@ class EnvSpec(object):
         that is no longer there.
         """
         tag = "+%s" % self.backend if self.torch_index else ""
-        return [
+        constraints = [
             "%s==%s%s" % (k, v, tag) for k, v in sorted(self.torch_packages.items())
         ]
+        constraints += [
+            "%s==%s" % (k, v) for k, v in sorted(self.required_packages.items())
+        ]
+        return constraints
 
     def torch_find_links(self):
         """Per-package wheel pages making the constrained pins resolvable.
@@ -216,7 +233,7 @@ class EnvSpec(object):
         return os.path.join(REPO_ROOT, self.requirements_file)
 
     def as_dict(self):
-        return {
+        result = {
             "backend": self.backend,
             "torch_packages": self.torch_packages,
             "torch_index": self.torch_index,
@@ -232,6 +249,13 @@ class EnvSpec(object):
             "runtime_dll_dirs": self.runtime_dll_dirs,
             "runtime_env": self.runtime_env,
         }
+        if self.min_python_version:
+            result["min_python_version"] = self.min_python_version
+        if self.incompatible_packages:
+            result["incompatible_packages"] = self.incompatible_packages
+        if self.required_packages:
+            result["required_packages"] = self.required_packages
+        return result
 
 
 def _flash_attn_url(flavor, os_name, arch, python_version):
@@ -337,6 +361,51 @@ def _cuda_spec(detection):
     )
 
 
+def _torch215_spec(detection):
+    """Explicit CUDA 13.4 wheel trial on Linux x86_64 only."""
+    if (detection.get("os"), detection.get("arch"), detection.get("backend")) != (
+        "linux", "x86_64", "cuda"
+    ):
+        raise RuntimeError(
+            "AI_TOOLKIT_TORCH_PROFILE=torch215 requires Linux x86_64 with an NVIDIA GPU."
+        )
+    nvidia = detection.get("nvidia") or {}
+    try:
+        driver = tuple(int(part) for part in nvidia["driver"].split(".")[:2])
+        cuda = tuple(int(part) for part in nvidia["cuda_version"].split(".")[:2])
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError(
+            "AI_TOOLKIT_TORCH_PROFILE=torch215 requires a detected NVIDIA "
+            "driver version and CUDA capability."
+        )
+    if driver < (580, 0) or cuda < (13, 0):
+        raise RuntimeError(
+            "AI_TOOLKIT_TORCH_PROFILE=torch215 requires NVIDIA driver 580+ "
+            "with CUDA 13.x minor-version compatibility."
+        )
+    return EnvSpec(
+        "cu134",
+        TORCH215,
+        torch_index=PYTORCH_INDEX + "cu134",
+        python_version="3.12",
+        min_python_version="3.11",
+        # Torch itself requires Triton 3.9, and these exact extras prevent a
+        # later requirements pass from drifting to a different tested stack.
+        extra_packages=[TORCHCODEC, "triton==3.9.0", "bitsandbytes==0.50.2"],
+        optional_packages=[FLA],
+        incompatible_packages=["flash-attn", "natten"],
+        required_packages={
+            "triton": "3.9.0",
+            "bitsandbytes": "0.50.2",
+            "torchcodec": "0.15.0",
+        },
+        notes=[
+            "Opt-in PyTorch 2.15 CUDA 13.4 profile for Linux x86_64. "
+            "FlashAttention and NATTEN torch-2.13 binary wheels are omitted."
+        ],
+    )
+
+
 def _spark_spec(detection, wheels_source):
     """Native win_arm64 CUDA 13.4 stack from self-built wheels (RTX Spark)."""
     from . import sparkdeps
@@ -384,11 +453,20 @@ def _make_spark_spec(detection, wheels_source, dll_dirs):
         torch_links=[wheels_source],
         no_deps_packages=["tensorboard"],
         runtime_dll_dirs=dll_dirs,
+        spark_native=True,
     )
 
 
 def build_spec(detection, allow_cpu=False):
     """Returns EnvSpec, or raises RuntimeError with a user-facing message."""
+    profile = os.environ.get("AI_TOOLKIT_TORCH_PROFILE", "").strip()
+    if profile:
+        if profile != TORCH215_PROFILE:
+            raise RuntimeError(
+                "Unknown AI_TOOLKIT_TORCH_PROFILE %r; supported value: %s."
+                % (profile, TORCH215_PROFILE)
+            )
+        return _torch215_spec(detection)
     if (
         detection["os"] == "windows"
         and detection["arch"] == "aarch64"

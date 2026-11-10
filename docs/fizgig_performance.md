@@ -30,9 +30,9 @@ placement or automatic optimizer/preset change is part of these ports. The
 existing low-memory per-prompt encoding, quantization, layer offloading and
 preview memory recovery remain authoritative.
 
-## PyTorch 2.15 trial
+## PyTorch 2.15 qualification
 
-The active `ai-toolkit` Conda environment was inspected as Python 3.11.13,
+The initial `ai-toolkit` Conda baseline was inspected as Python 3.11.13,
 PyTorch 2.7.0+cu126, torchvision 0.22.0+cu126, Triton 3.3.0 and bitsandbytes
 0.47.0. The driver reported 580.105.08 on an RTX 4090. The repository manager
 documents a newer stack than that active environment.
@@ -44,16 +44,28 @@ torchao 0.10.0 and optimum-quanto 0.2.4. The old torchaudio binary could not loa
 against this Torch version (undefined `torch::autograd::deleteNode` symbol);
 installing torchaudio 2.11.1+cu134 in the overlay resolved that mismatch.
 Resolver metadata is in ignored `tmp/fizgig-port/torch215-resolution.json`.
-No installed package in the active Conda environment was changed.
+The overlay was initially isolated. After the subsequent GPU qualification,
+the tested stack (including torchaudio 2.11.1 and torchcodec 0.15) was installed
+into the launcher's actual `ai-toolkit` Conda environment. Package inventories,
+the full rollback copy and qualification logs are recorded in
+[PyTorch 2.15 qualification](torch215_qualification.md).
 
 Fizgig's large reported memory reduction concerns checkpointing inside compiled
 blocks compared with its earlier Torch 2.10 path. This fork keeps checkpointing
 outside compiled Krea/MOSS blocks, so those numbers are not a measured benefit
-here. CUDA compilation, full training, memory peaks and quality still need
-qualification before adopting the new stack. The production manager pins and
-installation instructions remain unchanged until that qualification.
+here. GPU compilation, quantized kernels, the production MOSS block at reduced
+dimensions, and native SD1.5 training/sampling/resume passed qualification.
+The short SD1.5 comparison did not establish a speed gain; full pretrained MOSS
+throughput and likeness remain unmeasured. An opt-in Linux x86_64 CUDA 13.4
+manager profile is available; the manager default and other platforms retain
+their existing pins. The ordinary Conda launcher uses its installed packages
+and needs no overlay or profile environment variable.
 
-## Verification limits
+## Initial port verification and limits
+
+The later Torch 2.15 regression run passed 38 cases plus 12 subtests, including
+the training-map assertions left unverified by the initial timeouts below.
+See the qualification record for subsequent GPU and installed-prefix results.
 
 Focused CPU checks exercise Muon equations, grouping and resume, dynamic block
 hints and gradients, attention mask dispatch, quantized layer offload, and

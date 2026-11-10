@@ -81,7 +81,9 @@ def cmd_check(args):
         "venv": env.venv_exists(),
         "deps_in_sync": env.venv_exists()
         and env.torch_matches(s)
-        and env.requirements_in_sync(s),
+        and env.requirements_in_sync(s)
+        and env.required_packages_match(s)
+        and env.incompatible_packages_absent(s),
         "backend": s.backend,
     }
     data["update_available"] = bool(behind) or not data["deps_in_sync"]

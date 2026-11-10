@@ -161,6 +161,16 @@ python3 -m manager launch    # start the UI
 python3 -m manager doctor    # diagnose problems
 ```
 
+An opt-in [PyTorch 2.15 CUDA 13.4 profile](manager/README.md#opt-in-pytorch-215-cuda-profile)
+is available for Linux x86_64 hosts with a compatible NVIDIA driver. Set
+`AI_TOOLKIT_TORCH_PROFILE=torch215` for **every** manager command to keep that
+profile selected. The default install and manual
+commands below retain their existing Torch pins; see the linked qualification
+notes for its tested scope.
+This manager setting does not change the separate Conda environment used by
+this fork's `run.sh`; that launcher uses whichever packages are installed in
+`ai-toolkit`.
+
 ### Manual installation
 
 Requirements:

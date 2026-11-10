@@ -12,14 +12,39 @@ python3 -m manager launch      # start the web UI (http://localhost:8675)
 python3 -m manager doctor      # diagnose problems
 ```
 
+### Opt-in PyTorch 2.15 CUDA profile
+
+On Linux x86_64 with an NVIDIA driver 580 or newer reporting CUDA 13.x,
+the `torch215` profile selects PyTorch `2.15.0+cu134`, torchvision
+`0.29.2+cu134`, torchaudio `2.11.1+cu134`, Triton `3.9.0`,
+bitsandbytes `0.50.2`, and torchcodec `0.15.0`. The manager requests Python
+3.12 for a new environment and rejects an existing environment below 3.11.
+Keep the variable set for every manager command so a later sync does not
+switch back to the default stack:
+
+```bash
+export AI_TOOLKIT_TORCH_PROFILE=torch215
+python3 -m manager install
+python3 -m manager launch
+```
+
+The profile removes existing FlashAttention and NATTEN binary installs from
+the managed environment and omits their default prebuilt wheels, which target
+Torch 2.13. Its Torch trio, Triton, bitsandbytes, and torchcodec pins remain
+constrained through requirements and extras installation; `manager check`
+also verifies those versions and the absence of the old binary extensions.
+See [PyTorch 2.15 qualification](../docs/torch215_qualification.md)
+for GPU training, resume, compilation and offloading evidence and its limits. Other platforms
+and installations without the variable keep the existing Torch pins.
+
 ## Design
 
 - **The install logic lives in the repo it installs.** Every commit knows how
   to install itself; external frontends (the desktop launcher, `install.sh`,
   `install.ps1`) just shell out to this CLI and stay dumb. Machine-readable
   output via `check --json` / `detect --json`.
-- **Hardware → spec mapping** is in [spec.py](spec.py). One universal torch
-  pin (2.13.0 / torchvision 0.28.0 / torchaudio 2.11.0) on every platform:
+- **Hardware → spec mapping** is in [spec.py](spec.py). The default torch
+  pin (2.13.0 / torchvision 0.28.0 / torchaudio 2.11.0) applies on every platform:
   cu130 wheels when the driver supports CUDA 13 (cu126 fallback for older
   drivers, refused outright on Blackwell GPUs which need cu130), the same
   stack on Linux aarch64 (DGX Spark / Grace), PyPI wheels on Mac,
