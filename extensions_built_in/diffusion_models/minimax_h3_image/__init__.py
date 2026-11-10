@@ -1,0 +1,1 @@
+from .minimax_h3_image import MinimaxH3ImageModel

@@ -73,6 +73,27 @@ export const defaultSampleConfig: SampleConfig = {
   comfy: { ...defaultComfySampleConfig },
 }
 
+// MiniMax-H3-Image uses the official six-step PDD image schedule. Training
+// resolution is configured separately from these native preview dimensions.
+export const defaultMinimaxH3ImageSampleConfig: SampleConfig = {
+  ...defaultSampleConfig,
+  width: 2048,
+  height: 2048,
+  num_frames: 1,
+  fps: 1,
+  guidance_scale: 1,
+  sample_steps: 6,
+  comfy: {
+    ...defaultComfySampleConfig,
+    workflow_path: 'config/comfy_templates/minimax_h3_image_lora_sample.json.njk',
+    model: 'minimax_h3_image_pruned_int8_convrot.safetensors',
+    vae: 'minimax_h3_image_vae_fp16.safetensors',
+    text_encoder: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors',
+    sampler: 'euler',
+    scheduler: 'simple',
+  },
+};
+
 export const defaultAudioSampleConfig: SampleConfig = {
   sampler: 'flowmatch',
   sample_every: 250,

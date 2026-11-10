@@ -2,7 +2,7 @@
 
 The `minimax_h3` training form has a **Training recipe** selector. Choose **Apply still-photo recipe** to change the current job. The action sets `model.model_kwargs.h3_photo_training: true`; opening or importing a job and selecting MiniMax-H3 do not apply the recipe. A photo job whose settings differ from the recipe displays **Photo mode — customized settings**. Choosing **Video mode (keep current settings)** clears the photo flag, which restores the ordinary H3 training noise schedule while leaving the other settings as they are.
 
-This is the standard H3 architecture and training process. It does not use a separate image model or reference-distillation objective. For a complete starting config, see [`config/examples/train_lora_minimax_h3_image.yaml`](../config/examples/train_lora_minimax_h3_image.yaml). Replace the dataset path and review the model paths and training length before running it.
+This is the video-base H3 architecture and training process, used with still-image datasets. It is separate from the [official MiniMax-H3-Image architecture](minimax_h3_image.md) and does not use reference distillation. For a complete starting config, see [`config/examples/train_lora_minimax_h3_image.yaml`](../config/examples/train_lora_minimax_h3_image.yaml). Replace the dataset path and review the model paths and training length before running it.
 
 ## What the action changes
 

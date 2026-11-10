@@ -49,7 +49,7 @@ def get_safe_dataloader_num_workers(dataset_config_list, sd) -> int:
     if (
         configured_workers > 0
         and sd is not None
-        and (getattr(sd, "arch", None) == "minimax_h3"
+        and (getattr(sd, "arch", None) in ("minimax_h3", "minimax_h3_image")
              or getattr(sd, "disable_dataloader_workers", False))
     ):
         print_acc(
@@ -423,6 +423,16 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         self.source_configs: List['DatasetConfig'] = list(source_configs) if source_configs else [dataset_config]
         self.is_pooled = len(self.source_configs) > 1
         self.dataset_config = dataset_config
+        if sd is not None and sd.arch == "minimax_h3_image":
+            if batch_size != 1:
+                raise ValueError("MiniMax-H3-Image training requires dataset batch_size: 1.")
+            for config in self.source_configs:
+                if (config.type != 'image' or config.num_frames != 1
+                        or config.auto_frame_count or config.do_audio or config.do_i2v):
+                    raise ValueError("MiniMax-H3-Image requires still-image datasets without audio or I2V.")
+                if (config.h3_v2v_path or config.h3_reference_path or config.control_path
+                        or config.control_from_same_folder or config.controls):
+                    raise ValueError("MiniMax-H3-Image currently supports text-to-image training without reference datasets.")
         if sd is not None and sd.arch == "minimax_h3":
             is_h3_video = dataset_config.auto_frame_count or dataset_config.num_frames > 1
             if batch_size != 1:

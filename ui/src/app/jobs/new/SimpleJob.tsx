@@ -124,6 +124,10 @@ const comfyWorkflowOptions: SelectOption[] = [
     value: 'config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk',
     label: 'MiniMax H3 T2V / FL2V LoRA video',
   },
+  {
+    value: 'config/comfy_templates/minimax_h3_image_lora_sample.json.njk',
+    label: 'MiniMax-H3-Image LoRA still image',
+  },
 ];
 
 const neutralPromptForEntry = (entry: FizgigPromptEntry | undefined): string | undefined =>
@@ -3058,7 +3062,7 @@ export default function SimpleJob({
                   onChange={value => setJobConfig(value, 'config.process[0].sample.comfy.api_url')}
                   placeholder="http://127.0.0.1:8188"
                 />
-                {modelArch?.name !== 'minimax_h3' && (
+                {!['minimax_h3', 'minimax_h3_image'].includes(modelArch?.name ?? '') && (
                   <TextAreaInput
                     label="Negative Prompt"
                     value={comfyConfig?.negative_prompt || ''}
@@ -3394,13 +3398,16 @@ export default function SimpleJob({
                           />}
                         </div>
                       </div>
-                      {modelArch?.additionalSections?.includes('datasets.multi_control_paths') && (
-                        <FormGroup label="Control Images" className="pt-2 ml-4">
+                      {(modelArch?.additionalSections?.includes('datasets.multi_control_paths') ||
+                        modelArch?.additionalSections?.includes('sample.multi_ctrl_imgs')) && (
+                        <FormGroup label={modelArch?.additionalSections?.includes('sample.multi_ctrl_imgs') ? 'Reference Images' : 'Control Images'} className="pt-2 ml-4">
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-2 mt-2">
                             {(isQwenFlowDPO ? ['ctrl_img_1', 'ctrl_img_2'] : ['ctrl_img_1', 'ctrl_img_2', 'ctrl_img_3']).map((ctrlKey, ctrl_idx) => (
                               <SampleControlImage
                                 key={ctrlKey}
-                                instruction={isQwenFlowDPO ? `Add Edit Source ${ctrl_idx + 1}` : `Add Control Image ${ctrl_idx + 1}`}
+                                instruction={isQwenFlowDPO ? `Add Edit Source ${ctrl_idx + 1}` :
+                                  modelArch?.additionalSections?.includes('sample.multi_ctrl_imgs')
+                                    ? `Add Reference Image ${ctrl_idx + 1}` : `Add Control Image ${ctrl_idx + 1}`}
                                 className=""
                                 src={sample[ctrlKey as keyof typeof sample] as string}
                                 onNewImageSelected={imagePath => {

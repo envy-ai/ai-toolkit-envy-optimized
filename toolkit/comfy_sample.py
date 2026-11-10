@@ -46,6 +46,9 @@ DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH = (
 DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH = (
     "config/comfy_templates/minimax_h3_fl2v_lora_sample.json.njk"
 )
+DEFAULT_COMFY_MINIMAX_H3_IMAGE_WORKFLOW_PATH = (
+    "config/comfy_templates/minimax_h3_image_lora_sample.json.njk"
+)
 DEFAULT_COMFY_ANIMA_WORKFLOW_PATH = 'config/comfy_templates/anima_lora_sample.json.njk'
 DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH = 'config/comfy_templates/ideogram4_lora_sample.json.njk'
 DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH = 'config/comfy_templates/moss_image_lora_sample.json.njk'
@@ -475,6 +478,15 @@ def get_workflow_for_sample(
     request: ComfySampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if workflow_path == DEFAULT_COMFY_MINIMAX_H3_IMAGE_WORKFLOW_PATH:
+        if request.model_arch != 'minimax_h3_image':
+            raise ValueError('The MiniMax-H3-Image workflow requires the minimax_h3_image model.')
+        if request.control_image or request.control_image_2 or request.control_image_3:
+            raise ValueError('The bundled MiniMax-H3-Image workflow is text-to-image only; remove sample reference images.')
+        if request.steps != 6 or request.cfg != 1 or request.num_frames != 1:
+            raise ValueError('MiniMax-H3-Image previews require six steps, guidance 1 and one frame.')
+        if request.sampler != 'euler' or request.scheduler != 'simple':
+            raise ValueError('The bundled MiniMax-H3-Image workflow requires Euler / simple sampling.')
     if os.path.basename(workflow_path.replace('\\', '/')) == os.path.basename(DEFAULT_COMFY_FIBO2_TURBO_WORKFLOW_PATH):
         if request.model_arch.split(':')[0] != 'fibo2':
             raise ValueError('The FIBO2 Edit Turbo preview workflow requires a FIBO2 training model.')
@@ -547,6 +559,17 @@ def patch_krea_edit_preview(workflow, request):
 
 def validate_model_workflow(workflow, request):
     """Reject incompatible model-specific workflow content."""
+    if request.model_arch == 'minimax_h3_image':
+        if request.control_image or request.control_image_2 or request.control_image_3:
+            raise ValueError('MiniMax-H3-Image Comfy previews are text-to-image only.')
+        if request.steps != 6 or request.cfg != 1 or request.num_frames != 1:
+            raise ValueError('MiniMax-H3-Image Comfy previews require six steps, guidance 1 and one frame.')
+        if request.sampler != 'euler' or request.scheduler != 'simple':
+            raise ValueError('MiniMax-H3-Image Comfy previews require Euler / simple sampling.')
+        if not any(node.get('class_type') == 'CLIPLoader' and node.get('inputs', {}).get('type') == 'minimax'
+                   for node in workflow.values()) or not any(
+                       node.get('class_type') == 'MiniMaxH3ImageConditioning' for node in workflow.values()):
+            raise ValueError('MiniMax-H3-Image previews require CLIPLoader type minimax and MiniMaxH3ImageConditioning.')
     if request.model_arch.split(':')[0] == 'fibo2':
         try:
             caption = json.loads(request.negative_prompt)
@@ -650,6 +673,8 @@ def get_workflow_for_samples(
     request: ComfyBatchSampleRequest,
     base_workflow: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if workflow_path == DEFAULT_COMFY_MINIMAX_H3_IMAGE_WORKFLOW_PATH:
+        raise ValueError('The MiniMax-H3-Image workflow requires individual requests; no batch workflow is provided.')
     if workflow_path == DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH:
         raise ValueError('The MOSS-Image workflow requires individual requests; no batch workflow is provided.')
     if workflow_path == DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH:

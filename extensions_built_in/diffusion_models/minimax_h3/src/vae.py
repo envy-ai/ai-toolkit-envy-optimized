@@ -225,7 +225,7 @@ class RMSNormFP32(nn.RMSNorm):
 
 
 class RotaryEmbedding3d(nn.Module):
-    """3-axis rotary table. Coordinates are length-normalized to [-1, 1) per
+    """Rotary table for 2 or 3 axes. Coordinates are length-normalized to [-1, 1) per
     axis and scaled by 2*pi; the per-axis angles are concatenated and then
     duplicated, so the first ``rope_dim_ratio * head_dim`` channels of every
     head are rotated (rotate-half convention)."""
@@ -339,6 +339,7 @@ class ViTDecoder3d(nn.Module):
         ffn_mult=4,
         rope_theta=100.0,
         rope_dim_ratio=0.75,
+        rope_axes=3,
         eps=1e-5,
     ):
         super().__init__()
@@ -347,8 +348,11 @@ class ViTDecoder3d(nn.Module):
         self.patch_size_t = patch_size_t
         self.out_channels = out_channels
         self.num_register_tokens = num_register_tokens
+        self.rope_axes = rope_axes
 
-        self.rope = RotaryEmbedding3d(int(head_dim * rope_dim_ratio), theta=rope_theta)
+        self.rope = RotaryEmbedding3d(
+            int(head_dim * rope_dim_ratio), theta=rope_theta, num_axes=rope_axes
+        )
         self.x_embedder = nn.Linear(in_channels, dim)
         self.register_tokens = nn.Parameter(torch.zeros(1, num_register_tokens, dim))
         # unused at inference; kept so the checkpoint loads strict
@@ -398,9 +402,11 @@ class ViTDecoder3d(nn.Module):
         ]
         position_ids = torch.stack(
             torch.meshgrid(*grids, indexing="ij"), dim=-1
-        ).flatten(0, 2)
+        ).flatten(0, 2)[..., -self.rope_axes :]
         position_ids = position_ids.unsqueeze(0).expand(b, -1, -1)
-        suffix_ids = position_ids.new_zeros((b, self.num_register_tokens + 1, 3))
+        suffix_ids = position_ids.new_zeros(
+            (b, self.num_register_tokens + 1, self.rope_axes)
+        )
         with torch.autocast(device_type=z.device.type, enabled=False):
             rotary_emb = self.rope(torch.cat([position_ids, suffix_ids], dim=1))
 
@@ -471,6 +477,9 @@ class MiniMaxH3VideoVAE(nn.Module, OstrisModelMixin):
         decoder_ffn_mult=4,
         rope_theta=100.0,
         rope_dim_ratio=0.75,
+        decoder_rope_axes=3,
+        decoder_patch_size_t=None,
+        post_quant_conv_2d=False,
         clip_length=17,
         token_drop=3,
         latents_mean=None,
@@ -510,12 +519,16 @@ class MiniMaxH3VideoVAE(nn.Module, OstrisModelMixin):
             norm_num_groups=norm_num_groups,
         )
         self.quant_conv = nn.Conv3d(2 * latent_channels, 2 * latent_channels, 1)
-        self.post_quant_conv = nn.Conv3d(latent_channels, latent_channels, 1)
+        post_quant_conv = nn.Conv2d if post_quant_conv_2d else nn.Conv3d
+        self.post_quant_conv = post_quant_conv(latent_channels, latent_channels, 1)
         self.decoder = ViTDecoder3d(
             in_channels=latent_channels,
             out_channels=out_channels,
             patch_size=self.spatial_compression,
-            patch_size_t=self.temporal_compression,
+            patch_size_t=(
+                self.temporal_compression
+                if decoder_patch_size_t is None else decoder_patch_size_t
+            ),
             num_layers=decoder_num_layers,
             heads=decoder_heads,
             head_dim=decoder_head_dim,
@@ -523,6 +536,7 @@ class MiniMaxH3VideoVAE(nn.Module, OstrisModelMixin):
             ffn_mult=decoder_ffn_mult,
             rope_theta=rope_theta,
             rope_dim_ratio=rope_dim_ratio,
+            rope_axes=decoder_rope_axes,
         )
 
         if latents_mean is None:
@@ -675,7 +689,7 @@ class MiniMaxH3VideoVAE(nn.Module, OstrisModelMixin):
         """Decode one temporal clip; tiles are laid out in pixel space and
         mapped back onto the latent grid, blended in pixel space."""
         if not self.use_tiling:
-            return self.decoder(self.post_quant_conv(z))
+            return self._decode_pixels(z)
 
         ratio = self.spatial_compression
         y_starts, y_lens, y_overlaps = self._split_tiles(z.shape[-2] * ratio)
@@ -689,9 +703,12 @@ class MiniMaxH3VideoVAE(nn.Module, OstrisModelMixin):
                     i_pos // ratio : (i_pos + i_len) // ratio,
                     j_pos // ratio : (j_pos + j_len) // ratio,
                 ]
-                row.append(self.decoder(self.post_quant_conv(tile)))
+                row.append(self._decode_pixels(tile))
             rows.append(row)
         return self._stitch_tiles(rows, y_overlaps, x_overlaps)
+
+    def _decode_pixels(self, z):
+        return self.decoder(self.post_quant_conv(z))
 
     # -- temporal chunking ---------------------------------------------------
 

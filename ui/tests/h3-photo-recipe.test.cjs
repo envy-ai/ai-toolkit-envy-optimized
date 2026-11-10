@@ -12,7 +12,7 @@ function load(file) {
   mod.paths = [path.resolve(__dirname, '../node_modules'), ...Module._nodeModulePaths(path.dirname(filename))];
   const original = mod.require.bind(mod);
   mod.require = id => id === 'next/link' ? () => null :
-    id === '@/helpers/defaultSamples' ? { defaultComfySampleConfig: {}, defaultSampleConfig: {}, defaultIdeogramSamplesConfig: {} } : original(id);
+    id === '@/helpers/defaultSamples' ? load('../src/helpers/defaultSamples.ts') : original(id);
   mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true },
   }).outputText, filename);

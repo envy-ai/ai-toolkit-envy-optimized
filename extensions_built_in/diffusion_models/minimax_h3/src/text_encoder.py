@@ -125,6 +125,7 @@ def encode_minimax_h3_prompt(
     max_length: Optional[
         int
     ] = None,  # cap on PROMPT tokens (vision blocks are never cut)
+    picture_label: str = "<Picture {index}>: ",
 ):
     """Encode ONE prompt (with optional keyframes) into MiniMax-H3 conditioning.
 
@@ -133,6 +134,9 @@ def encode_minimax_h3_prompt(
     also works ONLY if the final ``model.norm`` has been replaced with an
     Identity (transformers applies the final norm to the last entry of
     ``hidden_states``); the loader in minimax_h3.py does exactly that.
+
+    ``picture_label`` selects the Qwen text prefix before each image vision
+    block. Video H3 keeps ``<Picture N>: ``; official H3 Image uses ``Picture N: ``.
     """
     num_layers = text_encoder.config.text_config.num_hidden_layers
     if num_layers < TEXT_ENCODER_LAYER:
@@ -209,7 +213,7 @@ def encode_minimax_h3_prompt(
             else:
                 num_image_tokens = int(image_grid_thw[pic_idx].prod()) // merge
                 label_ids = tokenizer(
-                    f"<Picture {pic_idx + 1}>: ", add_special_tokens=False
+                    picture_label.format(index=pic_idx + 1), add_special_tokens=False
                 )["input_ids"]
                 vision_ids = (
                     [vision_start] + [image_pad] * num_image_tokens + [vision_end]

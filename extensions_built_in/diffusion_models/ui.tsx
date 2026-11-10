@@ -8,6 +8,7 @@ import {
   defaultComfySampleConfig,
   defaultSampleConfig,
   defaultIdeogramSamplesConfig,
+  defaultMinimaxH3ImageSampleConfig,
 } from "@/helpers/defaultSamples";
 
 const defaultNameOrPath = "";
@@ -23,13 +24,17 @@ const h3PhotoIgnoredModules = ["token_refiner", "adaln_proj"];
 export function applyMinimaxH3PhotoRecipe(config: JobConfig): JobConfig {
   const next = structuredClone(config);
   const process = next.config.process[0];
-  if (process.model.arch !== "minimax_h3" ||
+  const isOfficialImage = process.model.arch === "minimax_h3_image";
+  if (!["minimax_h3", "minimax_h3_image"].includes(process.model.arch) ||
       !["sd_trainer", "ui_trainer", "diffusion_trainer"].includes(process.type) ||
       !process.network) {
     throw new Error("MiniMax-H3 photo training requires an ordinary MiniMax-H3 LoRA job.");
   }
-  if (!["fl2va", "fl2va_pruned"].includes(process.model.model_kwargs?.partition ?? "fl2va_pruned")) {
+  if (!isOfficialImage && !["fl2va", "fl2va_pruned"].includes(process.model.model_kwargs?.partition ?? "fl2va_pruned")) {
     throw new Error("MiniMax-H3 photo training requires the fl2va or fl2va_pruned base partition; choose that base before applying the recipe.");
+  }
+  if (isOfficialImage && ![undefined, "image"].includes(process.model.model_kwargs?.partition)) {
+    throw new Error("MiniMax-H3-Image requires the image partition; choose the official image base before applying the recipe.");
   }
   process.model.model_kwargs = {
     ...(process.model.model_kwargs ?? {}),
@@ -112,12 +117,12 @@ export function applyMinimaxH3PhotoRecipe(config: JobConfig): JobConfig {
   }
   Object.assign(process.sample, {
     sampler: "flowmatch",
-    width: 512,
-    height: 512,
+    width: isOfficialImage ? defaultMinimaxH3ImageSampleConfig.width : 512,
+    height: isOfficialImage ? defaultMinimaxH3ImageSampleConfig.height : 512,
     num_frames: 1,
     fps: 1,
     guidance_scale: 1,
-    sample_steps: 20,
+    sample_steps: isOfficialImage ? defaultMinimaxH3ImageSampleConfig.sample_steps : 20,
   });
   process.sample.samples = process.sample.samples.map(sample => {
     const nextSample = { ...sample };
@@ -135,6 +140,7 @@ export function applyMinimaxH3PhotoRecipe(config: JobConfig): JobConfig {
 export function getMinimaxH3TrainingRecipe(config: JobConfig): "video" | "photo" | "custom_photo" {
   const process = config.config.process[0];
   if (process.model.model_kwargs?.h3_photo_training !== true) return "video";
+  const isOfficialImage = process.model.arch === "minimax_h3_image";
   const network = process.network;
   const train = process.train;
   const sample = process.sample;
@@ -144,7 +150,9 @@ export function getMinimaxH3TrainingRecipe(config: JobConfig): "video" | "photo"
   const trainOptions = train as unknown as Record<string, unknown>;
   const matches =
     ["sd_trainer", "ui_trainer", "diffusion_trainer"].includes(process.type) &&
-    ["fl2va", "fl2va_pruned"].includes(process.model.model_kwargs?.partition ?? "fl2va_pruned") &&
+    (isOfficialImage
+      ? [undefined, "image"].includes(process.model.model_kwargs?.partition)
+      : ["fl2va", "fl2va_pruned"].includes(process.model.model_kwargs?.partition ?? "fl2va_pruned")) &&
     !process.model.model_kwargs?.image_refs_as_video &&
     network?.type === "lora" && network.linear === 8 && network.linear_alpha === 8 &&
     network.transformer_only === true &&
@@ -177,9 +185,12 @@ export function getMinimaxH3TrainingRecipe(config: JobConfig): "video" | "photo"
     !train.blank_prompt_preservation && !trainOptions.do_prior_divergence &&
     !trainOptions.train_turbo && !trainOptions.inverted_mask_prior &&
     !trainOptions.correct_pred_norm && !trainOptions.learnable_snr_gos &&
-    sample.sampler === "flowmatch" && sample.width === 512 && sample.height === 512 &&
+    sample.sampler === "flowmatch" &&
+    sample.width === (isOfficialImage ? defaultMinimaxH3ImageSampleConfig.width : 512) &&
+    sample.height === (isOfficialImage ? defaultMinimaxH3ImageSampleConfig.height : 512) &&
     sample.num_frames === 1 && sample.fps === 1 &&
-    sample.guidance_scale === 1 && sample.sample_steps === 20 &&
+    sample.guidance_scale === 1 &&
+    sample.sample_steps === (isOfficialImage ? defaultMinimaxH3ImageSampleConfig.sample_steps : 20) &&
     !sample.comfy?.enabled &&
     sample.samples.every(item => !item.width && !item.height && !item.num_frames &&
       !item.fps && !item.duration && !item.guidance_scale && !item.sample_steps &&
@@ -1304,6 +1315,108 @@ export const AI_TOOLKIT_UI_MODELS: ModelArch[] = [
     },
     disableSections: ["network.conv"],
     additionalSections: ["model.low_vram", "model.layer_offloading"],
+  },
+  {
+    name: "minimax_h3_image",
+    label: "MiniMax-H3-Image",
+    group: "image",
+    generate: { model: { model_kwargs: {} }, needsControlImage: false },
+    defaults: {
+      "config.process[0].model.name_or_path": ["Comfy-Org/MiniMax-H3-Image", defaultNameOrPath],
+      "config.process[0].model.quantize": [true, false],
+      "config.process[0].model.qtype": ["convrot8", "qfloat8"],
+      "config.process[0].model.quantize_te": [true, false],
+      "config.process[0].model.qtype_te": ["nvfp4", "qfloat8"],
+      "config.process[0].model.low_vram": [true, false],
+      "config.process[0].model.low_vram_layer_streaming": [true, true],
+      "config.process[0].model.model_kwargs": [{ partition: "image", h3_photo_training: true }, {}],
+      "config.process[0].model.assistant_lora_path": [h3PhotoTrainingAdapter, undefined],
+      "config.process[0].network.type": ["lora", "lora"],
+      "config.process[0].network.linear": [8, defaultLinearRank],
+      "config.process[0].network.linear_alpha": [8, defaultLinearRank],
+      "config.process[0].network.transformer_only": [true, undefined],
+      "config.process[0].network.network_kwargs.only_if_contains": [[...h3PhotoBlocks], undefined],
+      "config.process[0].network.network_kwargs.ignore_if_contains": [[...h3PhotoIgnoredModules], []],
+      "config.process[0].train.batch_size": [1, 1],
+      "config.process[0].train.gradient_accumulation": [1, 1],
+      "config.process[0].train.train_unet": [true, true],
+      "config.process[0].train.train_text_encoder": [false, false],
+      "config.process[0].train.train_refiner": [false, undefined],
+      "config.process[0].train.noise_scheduler": ["flowmatch", "flowmatch"],
+      "config.process[0].train.timestep_type": ["shift", "sigmoid"],
+      "config.process[0].train.content_or_style": ["balanced", "balanced"],
+      "config.process[0].train.content_or_style_reg": ["balanced", undefined],
+      "config.process[0].train.linear_timesteps": [false, undefined],
+      "config.process[0].train.linear_timesteps2": [false, undefined],
+      "config.process[0].train.first_timestep_chance": [0, undefined],
+      "config.process[0].train.min_denoising_steps": [0, undefined],
+      "config.process[0].train.max_denoising_steps": [999, undefined],
+      "config.process[0].train.num_train_timesteps": [1000, undefined],
+      "config.process[0].train.min_snr_gamma": [0, 5],
+      "config.process[0].train.snr_gamma": [0, undefined],
+      "config.process[0].train.loss_type": ["mse", "mse"],
+      "config.process[0].train.loss_target": ["noise", undefined],
+      "config.process[0].train.frequency_loss_type": ["none", "none"],
+      "config.process[0].train.optimizer": ["automagic3", "adamw8bit"],
+      "config.process[0].train.lr": [1e-6, 1e-4],
+      "config.process[0].train.lr_scheduler": ["constant", undefined],
+      "config.process[0].train.cache_text_embeddings": [true, false],
+      "config.process[0].train.audio_loss_multiplier": [0, undefined],
+      "config.process[0].train.ema_config": [{ use_ema: true, ema_decay: 0.98 }, { use_ema: false, ema_decay: 0.99 }],
+      "config.process[0].datasets[x].batch_size": [1, undefined],
+      "config.process[0].datasets[x].resolution": [[512], [512, 768, 1024]],
+      "config.process[0].datasets[x].native_resolution": [false, false],
+      "config.process[0].datasets[x].buckets": [true, undefined],
+      "config.process[0].datasets[x].num_frames": [1, 1],
+      "config.process[0].datasets[x].auto_frame_count": [false, undefined],
+      "config.process[0].datasets[x].do_i2v": [false, undefined],
+      "config.process[0].datasets[x].do_audio": [false, undefined],
+      "config.process[0].datasets[x].cache_latents_to_disk": [true, false],
+      "config.process[0].datasets[x].cache_text_embeddings": [true, undefined],
+      "config.process[0].datasets[x].caption_dropout_rate": [0.05, 0.05],
+      "config.process[0].sample.sampler": ["flowmatch", "flowmatch"],
+      "config.process[0].sample.width": [defaultMinimaxH3ImageSampleConfig.width, defaultSampleConfig.width],
+      "config.process[0].sample.height": [defaultMinimaxH3ImageSampleConfig.height, defaultSampleConfig.height],
+      "config.process[0].sample.num_frames": [1, 1],
+      "config.process[0].sample.fps": [1, 1],
+      "config.process[0].sample.guidance_scale": [1, defaultSampleConfig.guidance_scale],
+      "config.process[0].sample.sample_steps": [6, defaultSampleConfig.sample_steps],
+      "config.process[0].sample.comfy": [defaultMinimaxH3ImageSampleConfig.comfy, defaultComfySampleConfig],
+    },
+    disableSections: ["network.conv"],
+    additionalSections: ["sample.multi_ctrl_imgs", "model.low_vram", "model.low_vram_layer_streaming", "model.layer_offloading", "model.assistant_lora_path"],
+    customModelSelectOptions: [{
+      label: "Training recipe",
+      options: [
+        { value: "video", label: "Image mode (keep current settings)" },
+        { value: "photo", label: "Apply experimental photo recipe" },
+        { value: "custom_photo", label: "Image photo recipe — customized settings", isDisabled: true },
+      ],
+      getValue: getMinimaxH3TrainingRecipe,
+      onChange: (value, config, setJobConfig) => {
+        if (value === "photo") {
+          setJobConfig(applyMinimaxH3PhotoRecipe(config).config.process[0], "config.process[0]");
+        } else if (value === "video") {
+          setJobConfig(false, "config.process[0].model.model_kwargs.h3_photo_training");
+        }
+      },
+      doc: {
+        title: "MiniMax-H3-Image experimental photo recipe",
+        description: (
+          <div className="space-y-2">
+            <p>The official image model samples at six PDD steps, CFG 1, with a 2048 × 2048 preview by default. Selecting the recipe changes training settings; opening a saved job does not.</p>
+            <p>Initial training settings follow the Fizgig still-photo hypothesis: 512-pixel buckets, rank/alpha 8 on blocks 20–49, frozen Circlestone helper, Automagic v3 at 1e-6, EMA 0.98 and 5% caption dropout. This has not been qualified for image quality on this official image checkpoint.</p>
+            <p>Dataset folders and captions, prompts, total steps, model component overrides, quantization and memory choices are retained. Reference controls and conflicting guidance objectives are cleared. Native sampling is selected; the separate image Comfy graph remains available in the workflow selector.</p>
+          </div>
+        ),
+      },
+    }],
+    modelNotes: (
+      <div className="space-y-2">
+        <p>Official MiniMax-H3-Image uses an audio-free image DiT and image VAE. Missing files are resolved from <code>Comfy-Org/MiniMax-H3-Image</code>; its Qwen3-VL text encoder is shared with <code>Comfy-Org/MiniMax-H3</code>.</p>
+        <p>Native previews use the fixed six-step PDD schedule at guidance 1. The 2048 × 2048 sample canvas follows the official image setting; the 512-pixel training bucket is an initial recipe assumption and can be edited.</p>
+      </div>
+    ),
   },
   {
     name: "minimax_h3",

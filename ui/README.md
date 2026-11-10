@@ -216,6 +216,13 @@ memory savings. Native Generate is unavailable for this extension. Existing
 jobs retain their saved architecture and settings. See the
 [Comfy sample workflow guide](../docs/krea2_edit_comfy_samples.md).
 
+**MiniMax-H3-Image** selects the official audio-free image architecture. New
+jobs start with an explicitly marked experimental still-photo recipe and
+six-step, guidance-1 image previews. The model's **Training recipe** selector
+reapplies that recipe only when chosen; imported jobs retain their settings.
+Its own ComfyUI still-image workflow is separate from H3 video sampling. See
+[MiniMax-H3-Image training and previews](../docs/minimax_h3_image.md).
+
 The Training card's **Training maps** switch is off by default. Set its positive
 integer step interval and picture count before starting/resuming a supported
 ordinary image LoRA/DoRA job. The job's **Training Maps** tab reuses the existing

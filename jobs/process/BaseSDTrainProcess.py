@@ -93,6 +93,7 @@ from toolkit.comfy_sample import (
     DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH,
     DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH,
     DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH,
+    DEFAULT_COMFY_MINIMAX_H3_IMAGE_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_2_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
     DEFAULT_COMFY_QWEN_IMAGE_EDIT_WORKFLOW_PATH,
@@ -127,6 +128,36 @@ def _normalize_network_config(network_config, process_config):
     return normalized_config
 
 
+def _validate_h3_image_training(process):
+    """Reject unsupported official-image training modes before loading weights."""
+    model = process.model_config
+    if model.arch != 'minimax_h3_image':
+        return
+    if process.get_conf('type') not in ('sd_trainer', 'ui_trainer', 'diffusion_trainer'):
+        raise ValueError('MiniMax-H3-Image requires an ordinary LoRA training process')
+    if model.model_kwargs.get('partition') not in (None, 'image'):
+        raise ValueError('MiniMax-H3-Image does not use FL2VA or Ref2VA video partitions')
+    train = process.train_config
+    network = process.network_config
+    if (network is None or network.type.lower() != 'lora'
+            or not train.train_unet or train.train_text_encoder or train.train_refiner):
+        raise ValueError('MiniMax-H3-Image requires transformer LoRA training with a frozen text encoder')
+    if train.batch_size != 1:
+        raise ValueError('MiniMax-H3-Image training requires batch_size: 1')
+    if process.adapter_config is not None or process.guidance_config is not None:
+        raise ValueError('MiniMax-H3-Image does not support additional training adapters or guidance')
+    if not process.dataset_configs:
+        raise ValueError('MiniMax-H3-Image requires a still-image dataset')
+    for dataset in process.dataset_configs:
+        if (dataset.type != 'image' or dataset.num_frames != 1
+                or dataset.auto_frame_count or dataset.batch_size not in (None, 1)
+                or dataset.do_i2v or dataset.do_audio):
+            raise ValueError('MiniMax-H3-Image training requires single-frame image datasets without audio or I2V')
+        if (dataset.h3_v2v_path or dataset.h3_reference_path or dataset.control_path
+                or dataset.control_from_same_folder or dataset.controls):
+            raise ValueError('MiniMax-H3-Image currently supports text-to-image training without reference or control datasets')
+
+
 def _validate_h3_photo_training(process):
     """Keep the opt-in H3 photo density away from video and reference jobs."""
     model = process.model_config
@@ -135,11 +166,12 @@ def _validate_h3_photo_training(process):
         raise ValueError('model.model_kwargs.h3_photo_training must be a boolean')
     if not enabled:
         return
-    if model.arch != 'minimax_h3':
-        raise ValueError('h3_photo_training requires model.arch: minimax_h3')
+    if model.arch not in ('minimax_h3', 'minimax_h3_image'):
+        raise ValueError('h3_photo_training requires model.arch: minimax_h3 or minimax_h3_image')
     if process.get_conf('type') not in ('sd_trainer', 'ui_trainer', 'diffusion_trainer'):
         raise ValueError('h3_photo_training requires an ordinary sd_trainer, ui_trainer, or diffusion_trainer process')
-    if model.model_kwargs.get('partition', 'fl2va_pruned') not in ('fl2va', 'fl2va_pruned'):
+    if (model.arch == 'minimax_h3'
+            and model.model_kwargs.get('partition', 'fl2va_pruned') not in ('fl2va', 'fl2va_pruned')):
         raise ValueError('h3_photo_training requires an FL2VA partition')
     if model.model_kwargs.get('image_refs_as_video', False):
         raise ValueError('h3_photo_training does not support reference video inputs')
@@ -424,6 +456,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.ema: ExponentialMovingAverage = None
         
         validate_configs(self.train_config, self.model_config, self.save_config, self.dataset_configs)
+        _validate_h3_image_training(self)
         _validate_h3_photo_training(self)
         
         do_profiler = self.get_conf('torch_profiler', False)
@@ -1042,7 +1075,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
             raise ValueError('krea2_edit previews require config/comfy_templates/krea2_edit_lora_sample.json.njk.')
         new_templates = {'anima': DEFAULT_COMFY_ANIMA_WORKFLOW_PATH,
                          'ideogram4': DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
-                         'moss_image': DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH}
+                         'moss_image': DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH,
+                         'minimax_h3_image': DEFAULT_COMFY_MINIMAX_H3_IMAGE_WORKFLOW_PATH}
         known_templates = {DEFAULT_COMFY_WORKFLOW_PATH: 'krea2', DEFAULT_COMFY_BATCH_WORKFLOW_PATH: 'krea2',
                            DEFAULT_COMFY_KREA2_EDIT_WORKFLOW_PATH: 'krea2',
                            DEFAULT_COMFY_KREA2_OSTRIS_EDIT_WORKFLOW_PATH: 'krea2',
@@ -1052,6 +1086,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                            DEFAULT_COMFY_QWEN_IMAGE_EDIT_BATCH_WORKFLOW_PATH: 'qwen_image_edit',
                            DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_WORKFLOW_PATH: 'qwen_image_edit_plus',
                            DEFAULT_COMFY_QWEN_IMAGE_EDIT_PLUS_BATCH_WORKFLOW_PATH: 'qwen_image_edit_plus',
+                           DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH: 'minimax_h3',
                            **{path: arch for arch, path in new_templates.items()}}
         if model_arch in new_templates and workflow_path in known_templates and known_templates[workflow_path] != model_arch:
             raise ValueError(f'Comfy preview workflow is for {known_templates[workflow_path]}, not {model_arch}. '
@@ -1205,6 +1240,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         is_minimax_h3_fl2v_workflow = (
             workflow_path == DEFAULT_COMFY_MINIMAX_H3_FL2V_WORKFLOW_PATH
         )
+        is_minimax_h3_image_workflow = (
+            workflow_path == DEFAULT_COMFY_MINIMAX_H3_IMAGE_WORKFLOW_PATH
+        )
 
         sample_folder = os.path.join(self.save_root, 'samples')
         self._cleanup_legacy_comfy_sample_loras(sample_folder)
@@ -1240,6 +1278,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     control_image_path = gen_config.ctrl_img_1 or gen_config.ctrl_img
                     control_image_path_2 = gen_config.ctrl_img_2
                     control_image_path_3 = gen_config.ctrl_img_3
+                    if is_minimax_h3_image_workflow and (control_image_path or control_image_path_2 or control_image_path_3):
+                        raise ValueError(f'MiniMax-H3-Image ComfyUI sample {i + 1} is text-to-image only; remove sample reference images.')
                     if is_qwen_image_2_workflow or is_krea_edit:
                         if control_image_path_2 is not None and control_image_path is None:
                             raise ValueError(
@@ -1345,7 +1385,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     )
                     patched_workflow = get_workflow_for_sample(workflow_path, request, workflow)
                     client.begin_live_progress()
-                    if workflow_path == DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH or is_krea_ostris_edit_workflow or self.model_config.arch == 'krea2_edit' or request.specialized_flow and workflow_path in (
+                    if workflow_path in (DEFAULT_COMFY_MOSS_IMAGE_WORKFLOW_PATH, DEFAULT_COMFY_MINIMAX_H3_IMAGE_WORKFLOW_PATH) or is_krea_ostris_edit_workflow or self.model_config.arch == 'krea2_edit' or request.specialized_flow and workflow_path in (
                         DEFAULT_COMFY_WORKFLOW_PATH, DEFAULT_COMFY_BATCH_WORKFLOW_PATH,
                         DEFAULT_COMFY_ANIMA_WORKFLOW_PATH, DEFAULT_COMFY_IDEOGRAM4_WORKFLOW_PATH,
                     ):
@@ -1434,6 +1474,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 "MiniMax H3 ComfyUI sampling supports optional per-prompt keyframes. "
                 "Falling back to individual prompts."
             )
+            return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
+        if workflow_path == DEFAULT_COMFY_MINIMAX_H3_IMAGE_WORKFLOW_PATH:
+            print_acc('MiniMax-H3-Image ComfyUI sampling uses individual prompts to retain each sample setting.')
             return self._render_comfy_samples(gen_img_config_list, sample_config, step=step)
         if not workflow_path_is_template(workflow_path):
             print_acc("ComfyUI prompt batching requires a .njk workflow template. Falling back to individual prompts.")

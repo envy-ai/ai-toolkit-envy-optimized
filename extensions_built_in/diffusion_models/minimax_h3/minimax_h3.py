@@ -789,6 +789,7 @@ class MinimaxH3Model(BaseModel):
                 device=self.device_torch,
                 dtype=self.torch_dtype,
                 max_length=self.max_text_length,
+                picture_label=getattr(self, "image_reference_label", "<Picture {index}>: "),
             )
             embeds_list.append(embeds)
             tags_list.append(tags)
@@ -1257,7 +1258,7 @@ class MinimaxH3Model(BaseModel):
             ):
                 v = v.to(save_dtype)
             save_dict[k] = v.clone().to("cpu")
-        meta_st = get_meta_for_safetensors(meta, name="minimax_h3")
+        meta_st = get_meta_for_safetensors(meta, name=self.get_base_model_version())
         save_file(
             save_dict,
             os.path.join(output_path, "transformer", "model.safetensors"),

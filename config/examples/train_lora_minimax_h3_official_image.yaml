@@ -1,0 +1,103 @@
+# Official MiniMax-H3-Image, with an experimental still-photo training recipe.
+# See docs/minimax_h3_image.md before starting a long run.
+---
+job: extension
+config:
+  name: my_minimax_h3_official_image_lora
+  process:
+    - type: diffusion_trainer
+      training_folder: output
+      device: cuda:0
+      network:
+        type: lora
+        linear: 8
+        linear_alpha: 8
+        transformer_only: true
+        network_kwargs:
+          only_if_contains: [blocks.20., blocks.21., blocks.22., blocks.23., blocks.24., blocks.25., blocks.26., blocks.27., blocks.28., blocks.29., blocks.30., blocks.31., blocks.32., blocks.33., blocks.34., blocks.35., blocks.36., blocks.37., blocks.38., blocks.39., blocks.40., blocks.41., blocks.42., blocks.43., blocks.44., blocks.45., blocks.46., blocks.47., blocks.48., blocks.49.]
+          ignore_if_contains: [token_refiner, adaln_proj]
+      save:
+        dtype: bfloat16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      datasets:
+        - folder_path: /path/to/image-caption-dataset
+          caption_ext: txt
+          caption_dropout_rate: 0.05
+          resolution: [512]
+          buckets: true
+          batch_size: 1
+          num_frames: 1
+          auto_frame_count: false
+          do_i2v: false
+          do_audio: false
+          cache_latents_to_disk: true
+          cache_text_embeddings: true
+      train:
+        batch_size: 1
+        gradient_accumulation: 1
+        steps: 2000
+        train_unet: true
+        train_text_encoder: false
+        train_refiner: false
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        timestep_type: shift
+        content_or_style: balanced
+        linear_timesteps: false
+        linear_timesteps2: false
+        first_timestep_chance: 0
+        min_denoising_steps: 0
+        max_denoising_steps: 999
+        num_train_timesteps: 1000
+        min_snr_gamma: 0
+        snr_gamma: 0
+        loss_type: mse
+        loss_target: noise
+        frequency_loss_type: none
+        optimizer: automagic3
+        lr: 1.0e-6
+        lr_scheduler: constant
+        cache_text_embeddings: true
+        audio_loss_multiplier: 0
+        ema_config:
+          use_ema: true
+          ema_decay: 0.98
+        dtype: bf16
+      model:
+        name_or_path: Comfy-Org/MiniMax-H3-Image
+        arch: minimax_h3_image
+        dtype: bf16
+        vae_dtype: bf16
+        te_dtype: bf16
+        quantize: true
+        qtype: convrot8
+        quantize_te: true
+        qtype_te: nvfp4
+        low_vram: true
+        low_vram_layer_streaming: true
+        assistant_lora_path: circlestone-labs/MiniMax-H3-Image-Training-Adapter/minimax_h3_image_training_adapter.safetensors
+        model_kwargs:
+          partition: image
+          h3_photo_training: true
+      sample:
+        sampler: flowmatch
+        width: 2048
+        height: 2048
+        num_frames: 1
+        fps: 1
+        guidance_scale: 1
+        sample_steps: 6
+        samples:
+          - prompt: a portrait photo of a person outdoors
+        comfy:
+          enabled: false
+          workflow_path: config/comfy_templates/minimax_h3_image_lora_sample.json.njk
+          model: minimax_h3_image_pruned_int8_convrot.safetensors
+          vae: minimax_h3_image_vae_fp16.safetensors
+          text_encoder: qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+          sampler: euler
+          scheduler: simple
+meta:
+  name: "[name]"
+  architecture: MiniMax-H3-Image

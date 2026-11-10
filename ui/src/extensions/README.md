@@ -57,6 +57,9 @@ numbered fields and sample controls. Incomplete slots stay visible while editing
 model validation determines allowed reference counts. Training-only model
 packages can set `generate: { disabled: true }` to omit their unsupported native
 pipeline from the Generate page while keeping the training selector.
+`sample.multi_ctrl_imgs` exposes three ordered per-prompt Reference Images using
+the existing sample image picker without adding dataset reference folders. Model
+entries can set `generate.needsControlImage: false` when references are optional.
 
 `handleModelArchChange` accepts an optional `{ preserveTrainingChoices: true }`
 for component changes that retain an existing training setup (used when entering
