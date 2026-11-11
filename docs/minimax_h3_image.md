@@ -17,6 +17,12 @@ quantized encoder caches retain this behavior without rebuilding the cache.
 
 Quantized component caches use `model.quantized_model_cache_dir` (default `models/.quantized_training_cache`). Set an explicit writable directory if your usual cache location is unavailable. First-time cache creation can involve substantial disk I/O. The loader does not replace an existing cache symlink.
 
+A real PyTorch 2.15 run with ConvRot weights, layer streaming and block compilation
+failed on its first training pass inside generated Inductor code with an undefined
+`stream1`. For this configuration, use `model.compile: false` and
+`model.block_compile: false`. This leaves quantization and streaming enabled;
+the compiler failure has not been repaired in external PyTorch code.
+
 The Comfy repack carries six output-head groups: the first is a complete head and the remaining groups are offsets from it. Training uses the first complete head as the initial recipe assumption; inference reconstructs each published PDD head. A converted single-file original transformer can instead retain its ordinary training head and load the official `pdd_fused_heads.safetensors` through `model.model_kwargs.pdd_fused_heads_path`, with the adjacent `pdd_config.json` or an explicit `pdd_config_path`. The loader validates the six-step metadata. Direct loading of the original sharded Diffusers directory is not supported.
 
 The initial training recipe uses one-frame 512-pixel buckets, batch size 1, disk latent and text caches, 5% caption dropout, rank/alpha 8 LoRA on blocks 20–49, and a frozen Circlestone image training adapter. It sets Automagic v3 at `1e-6`, constant learning rate, EMA 0.98 and the 60%-clean-end shifted training density (`h3_photo_training: true`). These values are adapted from the Fizgig still-photo practice on the video-base H3 family. They are **an initial training hypothesis for the official image checkpoint**, not a validated quality or speed recommendation. The image-specific DiT, VAE and six-head PDD sampler differ from the video model, so output quality and memory use require a real training run to qualify.
