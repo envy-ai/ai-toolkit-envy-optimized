@@ -386,9 +386,7 @@ export default function TrainingForm() {
           {forkNotice}
           <ErrorBoundary
             fallback={
-              <div className="flex items-center justify-center h-64 text-lg text-red-600 font-medium bg-red-100 dark:bg-red-900/20 dark:text-red-400 border border-red-300 dark:border-red-700 rounded-lg">
-                Advanced job detected. Please switch to advanced view to continue.
-              </div>
+              <p>Unable to display the job form.{!sampleOnlyMode && ' Use Show Advanced to inspect or edit the configuration.'}</p>
             }
           >
             <SimpleJob

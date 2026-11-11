@@ -9,29 +9,41 @@ interface ErrorBoundaryProps {
 }
 
 interface ErrorBoundaryState {
-  hasError: boolean;
+  error: Error | null;
+  componentStack: string;
 }
 
 class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { error: null, componentStack: '' };
   }
 
-  static getDerivedStateFromError(_: Error): ErrorBoundaryState {
-    // Update state so the next render will show the fallback UI
-    return { hasError: true };
+  static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
+    return { error };
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    // You can log the error to an error reporting service
     console.error("Error caught by ErrorBoundary:", error, errorInfo);
+    this.setState({ componentStack: errorInfo.componentStack || '' });
   }
 
   render(): ReactNode {
-    if (this.state.hasError) {
-      // You can render any custom fallback UI
-      return this.props.fallback || <div>Something went wrong.</div>;
+    const { error, componentStack } = this.state;
+    if (error) {
+      return (
+        <div role="alert" className="rounded border border-red-700 bg-red-950/40 p-4 text-red-200">
+          {this.props.fallback || <p>Unable to display this section.</p>}
+          <p className="mt-2 font-semibold whitespace-pre-wrap break-words">{error.message}</p>
+          <details className="mt-2">
+            <summary className="cursor-pointer">Error details and stack trace</summary>
+            <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words text-xs">
+              {error.stack || `${error.name}: ${error.message}`}
+              {componentStack && `\n\nComponent stack:${componentStack}`}
+            </pre>
+          </details>
+        </div>
+      );
     }
 
     return this.props.children;

@@ -79,6 +79,11 @@ and stack details, and a failed save keeps the preview for retry. Numerical
 reconstruction measurements do not predict visual quality. See
 [supported formats, scaling, and trimming limits](../docs/lora_trimming.md).
 
+If the simple training form cannot render a configuration, its persistent error
+panel shows the original
+error message and expandable error/component stacks. **Show Advanced** remains
+available to inspect or edit the configuration without changing it automatically.
+
 Shared form controls in `src/components/formInputs.tsx` supply the existing
 text, number, and searchable-select appearance. `TextInput`, `NumberInput`,
 `SelectInput`, and `TextAreaInput` accept an optional `id` that associates their
