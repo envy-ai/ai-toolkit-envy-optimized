@@ -107,12 +107,14 @@ backend's existing normalization. Editing a filter removes its process-level
 alias and writes the nested form in one update, so clearing cannot reactivate a
 hidden alias. Opening the form preserves both representations unchanged.
 
-While the photo recipe flag is enabled, Include must be unset, exactly blocks
-20–49, or exactly all 50 blocks **0–49**. Select all **#0**–**#49** chips to train
-LoRA across every transformer block while keeping the frozen helper, shifted
-photo noise density and other saved recipe settings. Unset Include defaults to
-blocks 20–49; reapplying the recipe restores that default. A saved empty array
-or partial/custom list remains invalid in photo mode. Keep `network.all_layers`
+While the photo recipe flag is enabled, Include may be any nonempty selection
+of blocks **0–49**, including contiguous ranges, scattered blocks or all 50.
+For example, **#0**, **#7** and **#49** save as
+`["blocks.0.", "blocks.7.", "blocks.49."]`. This keeps the frozen helper,
+shifted photo noise density and other saved recipe settings. Unset Include
+defaults to blocks 20–49; reapplying the recipe restores that default. A saved
+empty array, non-block module names, malformed filters and out-of-range blocks
+remain invalid in photo mode. Keep `network.all_layers`
 false and `full_if_contains` empty. Exclude must be empty or contain both
 `token_refiner` and `adaln_proj`. The form validates these restrictions before saving. To experiment
 with other module filters, explicitly choose **Image mode (keep current
@@ -121,9 +123,9 @@ the photo flag automatically. Existing optimizer, learning-rate, EMA/decay,
 rank/alpha, latent-cache and layer-streaming controls remain in their usual
 cards.
 
-The all-block option changes the number of trainable parameters. Its memory
-requirements and training quality need a real run to qualify; allowing the
-filter does not establish either result.
+Changing the block selection changes the number of trainable parameters. Its
+memory requirements and training quality need a real run to qualify; allowing
+the filter does not establish either result.
 
 ## Native and ComfyUI samples
 

@@ -49,20 +49,21 @@ def test_opt_in_filter_and_disabled_preserves_custom_settings():
 
 
 @pytest.mark.parametrize('arch', ['minimax_h3', 'minimax_h3_image'])
-@pytest.mark.parametrize('start', [20, 0])
-def test_photo_block_filter_accepts_exact_supported_ranges(arch, start):
+@pytest.mark.parametrize('filters', [[f'blocks.{i}.' for i in range(20, 50)],
+                                      [f'blocks.{i}.' for i in range(50)],
+                                      ['blocks.0.'], ['blocks.0.', 'blocks.7.', 'blocks.49.']])
+def test_photo_block_filter_accepts_canonical_subsets(arch, filters):
     p = process()
     p.model_config.arch = arch
-    filters = [f'blocks.{i}.' for i in range(start, 50)]
     p.network_config.network_kwargs['only_if_contains'] = filters.copy()
     validate(p)
     assert p.network_config.network_kwargs['only_if_contains'] == filters
 
 
 @pytest.mark.parametrize('arch', ['minimax_h3', 'minimax_h3_image'])
-@pytest.mark.parametrize('filters', [[], ['blocks.0.'], [f'blocks.{i}.' for i in range(1, 50)],
-                                      [f'blocks.{i}.' for i in range(20, 50)] + ['custom']])
-def test_photo_block_filter_rejects_empty_partial_and_custom(arch, filters):
+@pytest.mark.parametrize('filters', [[], ['blocks.50.'], ['blocks.-1.'], ['blocks.01.'],
+                                      ['blocks.7'], ['custom'], ['blocks.7.', 'custom']])
+def test_photo_block_filter_rejects_empty_malformed_and_custom(arch, filters):
     p = process()
     p.model_config.arch = arch
     p.network_config.network_kwargs['only_if_contains'] = filters
@@ -286,7 +287,7 @@ def test_differential_guidance_routing_preserves_non_h3_behavior(arch, photo, fu
     torch.testing.assert_close(apply(trainer, prediction, target), torch.tensor([8. if applies else 4.]))
 
 
-def test_h3_block_filters_select_120_or_200_lora_modules_on_tiny_model():
+def test_h3_block_filters_select_expected_lora_modules_on_tiny_model():
     from toolkit.lora_special import LoRASpecialNetwork
 
     class FakeBlock(torch.nn.Module):
@@ -301,9 +302,9 @@ def test_h3_block_filters_select_120_or_200_lora_modules_on_tiny_model():
             self.token_refiner = FakeBlock()
             self.adaln_proj = torch.nn.Linear(4, 4)
 
-    for start, expected in ((20, 120), (0, 200)):
+    for blocks, expected in ((range(20, 50), 120), (range(50), 200), ([0, 7, 49], 12)):
         network = LoRASpecialNetwork(text_encoder=None, unet=TinyH3(), train_text_encoder=False,
             train_unet=True, target_lin_modules=['FakeBlock'], transformer_only=True,
-            only_if_contains=[f'blocks.{i}.' for i in range(start, 50)],
+            only_if_contains=[f'blocks.{i}.' for i in blocks],
             ignore_if_contains=['token_refiner', 'adaln_proj'])
         assert len(network.unet_loras) == expected

@@ -80,22 +80,26 @@ test('H3 dataset cache controls preserve imports and inherit a common choice', (
   assert.equal(result, true); assert.equal(key, 'config.process[0].model.cache_quantized_models');
 });
 
-test('photo block filter accepts only default or all 50 blocks for both architectures', () => {
+test('photo block filter accepts canonical subsets for both architectures', () => {
   for (const arch of ['minimax_h3', 'minimax_h3_image']) {
     const result = ui.applyMinimaxH3PhotoRecipe(job(arch));
-    const network = result.config.process[0].network.network_kwargs;
-    for (const start of [20, 0]) {
-      network.only_if_contains = Array.from({length: 50 - start}, (_, i) => `blocks.${start + i}.`);
-      assert.deepEqual(capabilities.validateTrainingCapabilities(result), [], `${arch} from ${start}`);
+    const process = result.config.process[0], network = process.network.network_kwargs;
+    for (const filters of [Array.from({length: 30}, (_, i) => `blocks.${i + 20}.`),
+      Array.from({length: 50}, (_, i) => `blocks.${i}.`), ['blocks.0.'], ['blocks.0.', 'blocks.7.', 'blocks.49.']]) {
+      network.only_if_contains = filters;
+      assert.deepEqual(capabilities.validateTrainingCapabilities(result), [], `${arch}: ${filters}`);
     }
-    for (const filters of [[], ['blocks.0.'], Array.from({length: 49}, (_, i) => `blocks.${i + 1}.`),
-      [...Array.from({length: 30}, (_, i) => `blocks.${i + 20}.`), 'custom']]) {
+    for (const filters of [[], ['blocks.50.'], ['blocks.-1.'], ['blocks.01.'], ['blocks.7'], ['custom'], ['blocks.7.', 'custom']]) {
       network.only_if_contains = filters;
       assert.match(capabilities.validateTrainingCapabilities(result).join('\n'), /Include modules/i, `${arch}: ${filters}`);
     }
     delete network.only_if_contains;
     assert.deepEqual(capabilities.validateTrainingCapabilities(result), []);
-    network.only_if_contains = Array.from({length: 50}, (_, i) => `blocks.${i}.`);
+    process.only_if_contains = ['blocks.0.', 'blocks.7.', 'blocks.49.'];
+    network.only_if_contains = [];
+    assert.deepEqual(capabilities.validateTrainingCapabilities(result), [], 'legacy filter retains existing precedence');
+    delete process.only_if_contains;
+    network.only_if_contains = ['blocks.0.', 'blocks.7.', 'blocks.49.'];
     network.ignore_if_contains = ['custom'];
     assert.match(capabilities.validateTrainingCapabilities(result).join('\n'), /Exclude modules/i);
   }

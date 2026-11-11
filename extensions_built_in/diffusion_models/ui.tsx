@@ -109,7 +109,7 @@ const h3ImageAdvancedTargetOptions: CustomModelOption[] = [
     getValue: config => effectiveNetworkFilter(config.config.process[0], "only_if_contains") ?? [],
     onChange: (value, config, set) => setH3NetworkFilter(config, "only_if_contains", value.length ? value : undefined, set),
     placeholder: "Add module…",
-    help: "Numbered chips refer to transformer blocks. Select a block or type a module-name substring and press Enter. The photo recipe accepts exactly blocks 20–49 or all blocks 0–49. Clearing uses the default blocks 20–49 in photo mode; otherwise it includes all eligible modules. A saved empty array matches no modules and is retained until edited. Choose Image mode (keep current settings) before using other targets.",
+    help: "Numbered chips refer to transformer blocks. The photo recipe accepts any nonempty selection of blocks #0–#49, including scattered blocks. Select chips or type a canonical block filter such as blocks.7. and press Enter. Clearing uses the default blocks 20–49 in photo mode; otherwise it includes all eligible modules. A saved empty array matches no modules and is invalid in photo mode. Choose Image mode (keep current settings) before using non-block module targets.",
   },
   {
     type: "multiselect", label: "Exclude modules", allowCustomValues: true,

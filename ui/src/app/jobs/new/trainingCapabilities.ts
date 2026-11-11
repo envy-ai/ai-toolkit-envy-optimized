@@ -146,10 +146,9 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
     }
     const included = effectiveNetworkFilter(process, 'only_if_contains');
     const allBlocks = Array.from({ length: 50 }, (_, index) => `blocks.${index}.`);
-    const photoBlocks = allBlocks.slice(20);
-    if (included != null && (!Array.isArray(included) || ![photoBlocks, allBlocks].some(blocks =>
-        new Set(included).size === blocks.length && blocks.every(block => included.includes(block))))) {
-      errors.push('MiniMax-H3 photo training requires Include modules to contain exactly blocks 20–49 or 0–49, or be unset. Choose Image mode (keep current settings) before using other targets.');
+    if (included != null && (!Array.isArray(included) || included.length === 0 ||
+        included.some(block => !allBlocks.includes(block)))) {
+      errors.push('MiniMax-H3 photo training requires Include modules to contain a nonempty selection of blocks 0–49, or be unset for default blocks 20–49. Choose Image mode (keep current settings) before using other module targets.');
     }
     const excluded = effectiveNetworkFilter(process, 'ignore_if_contains');
     if (excluded != null && (!Array.isArray(excluded) ||
