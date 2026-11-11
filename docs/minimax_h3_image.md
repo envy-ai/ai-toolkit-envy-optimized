@@ -17,6 +17,32 @@ quantized encoder caches retain this behavior without rebuilding the cache.
 
 Quantized component caches use `model.quantized_model_cache_dir` (default `models/.quantized_training_cache`). Set an explicit writable directory if your usual cache location is unavailable. First-time cache creation can involve substantial disk I/O. The loader does not replace an existing cache symlink.
 
+When ComfyUI sampling is configured, new `minimax_h3` and `minimax_h3_image`
+training starts clear ComfyUI's model caches from both system RAM and VRAM
+before loading the training model or large text encoder. This also unpins
+ComfyUI model and LoRA caches. Other architectures keep their existing
+cache-preserving VRAM release, and training preview handoffs still retain
+ComfyUI's RAM cache. The shared-model provider with shared weights enabled
+continues to use its lease coordinator instead of this startup clear.
+
+H3 startup requires the installed `comfyui-cache-monitor` extension's
+`model-cache`, `model-pin`, and `lora-pin` APIs. It rejects running or queued
+ComfyUI work without interrupting prompts or clearing the queue. After removing
+pins, it requests native `POST /api/free` with `unload_models: true` and
+`free_memory: true`, then waits up to 120 seconds for the monitor's model and
+LoRA lists and RAM/VRAM model-cache byte counts to become empty. Missing APIs,
+failed requests, invalid responses, new queued work, or a timeout fail training
+startup rather than continuing with model RAM still occupied. Retry when ComfyUI
+is idle; install/enable the extension and restart ComfyUI when idle if needed.
+
+ComfyUI acknowledges `/api/free` before its worker unloads models, resets its
+executor, and collects garbage. The bounded startup check confirms observable
+model caches are empty; the native API exposes no reset/garbage-collection
+completion token. It does not promise zero process RSS or release unrelated
+custom-node caches. Other ComfyUI clients can submit work after an idle check;
+keep them idle during H3 startup because these APIs provide no exclusive queue
+reservation. Existing training processes are unaffected by this code change.
+
 A real PyTorch 2.15 run with ConvRot weights, layer streaming and block compilation
 failed on its first training pass inside generated Inductor code with an undefined
 `stream1`. For this configuration, use `model.compile: false` and

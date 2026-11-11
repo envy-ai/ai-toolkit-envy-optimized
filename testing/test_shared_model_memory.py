@@ -481,11 +481,12 @@ class TrainerAndWorkflowTests(unittest.TestCase):
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'BaseSDTrainProcess.py', 'exec'), namespace)
         config = types.SimpleNamespace(provider='aitk_shared_models', api_url='fixture')
         process = types.SimpleNamespace(_get_comfy_config_for_startup_release=lambda: config,
-            model_config=types.SimpleNamespace(shared_weights={'enabled': True}),
+            model_config=types.SimpleNamespace(arch='minimax_h3_image', shared_weights={'enabled': True}),
             accelerator=types.SimpleNamespace(is_main_process=True))
         namespace['hook_before_model_load'](process)
         self.assertEqual(calls, [])
         config.provider = 'ordinary'
+        process.model_config.arch = 'qwen_image_2'
         namespace['hook_before_model_load'](process)
         self.assertEqual(calls, ['release'])
 

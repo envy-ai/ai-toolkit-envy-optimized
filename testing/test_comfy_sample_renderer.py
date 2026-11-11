@@ -1377,6 +1377,101 @@ class ComfyApiClientTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing node 1701"):
             client.post_prompt({})
 
+    def test_h3_startup_clear_unpins_and_waits_for_empty_cache(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient()
+        calls = []
+        busy_cache = {
+            "models": [{"cache_id": "m1", "pinned": True}],
+            "loras": [{"cache_id": "l1", "pinned": True}],
+            "system_ram": {"cached_model_bytes": 10},
+            "vram": [{"cached_model_bytes": 5}],
+        }
+        empty_cache = {"models": [], "loras": [], "system_ram": {"cached_model_bytes": 0},
+                       "vram": [{"cached_model_bytes": 0}]}
+        states = iter([busy_cache, busy_cache, empty_cache])
+        def request(method, path, payload=None, **kwargs):
+            calls.append((method, path, payload))
+            if path == "/api/queue":
+                return {"queue_running": [], "queue_pending": []}
+            if path == "/comfyui-cache-monitor/model-cache":
+                return next(states)
+            if path.endswith("-pin"):
+                return {"cache_id": payload["cache_id"], "pinned": False}
+            if path == "/api/free":
+                return {}
+            raise AssertionError((method, path))
+        client._request_json = request
+        with mock.patch("toolkit.comfy_sample.time.sleep"):
+            client.clear_memory_for_training()
+        self.assertIn(("POST", "/comfyui-cache-monitor/model-pin", {"cache_id": "m1", "pinned": False}), calls)
+        self.assertIn(("POST", "/comfyui-cache-monitor/lora-pin", {"cache_id": "l1", "pinned": False}), calls)
+        free = ("POST", "/api/free", {"unload_models": True, "free_memory": True})
+        self.assertIn(free, calls)
+        self.assertGreater(calls.count(("GET", "/comfyui-cache-monitor/model-cache", None)), 2)
+        self.assertLess(calls.index(("POST", "/comfyui-cache-monitor/model-pin", {"cache_id": "m1", "pinned": False})), calls.index(free))
+
+    def test_h3_startup_clear_rejects_busy_queue_before_mutation(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        for key in ("queue_running", "queue_pending"):
+            with self.subTest(key=key):
+                client = ComfyApiClient()
+                queue = {"queue_running": [], "queue_pending": []}
+                queue[key] = [["someone-elses-job"]]
+                client._request_json = mock.Mock(return_value=queue)
+                with self.assertRaisesRegex(RuntimeError, "(?i)(busy|queue|running|pending)"):
+                    client.clear_memory_for_training()
+                self.assertEqual(client._request_json.call_count, 1)
+                self.assertEqual(client._request_json.call_args.args[:2], ("GET", "/api/queue"))
+
+    def test_h3_startup_clear_does_not_succeed_on_invalid_monitor_or_free_error(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        for response in (None, {}):
+            with self.subTest(response=response):
+                client = ComfyApiClient()
+                client._request_json = mock.Mock(side_effect=[{"queue_running": [], "queue_pending": []}, response])
+                with self.assertRaises((RuntimeError, ValueError)):
+                    client.clear_memory_for_training()
+        client = ComfyApiClient()
+        cache = {"models": [], "loras": [], "system_ram": {"cached_model_bytes": 0}, "vram": []}
+        client._request_json = mock.Mock(side_effect=[{"queue_running": [], "queue_pending": []}, cache, {"queue_running": [], "queue_pending": []}, RuntimeError("free failed")])
+        with self.assertRaisesRegex(RuntimeError, "free failed"):
+            client.clear_memory_for_training()
+
+    def test_h3_startup_clear_rejects_new_work_during_completion(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient()
+        idle = {"queue_running": [], "queue_pending": []}
+        cache = {"models": [], "loras": [], "system_ram": {"cached_model_bytes": 0}, "vram": []}
+        client._request_json = mock.Mock(side_effect=[idle, cache, idle, {},
+                                                      {"queue_running": [["other"]], "queue_pending": []}])
+        with self.assertRaisesRegex(RuntimeError, "(?i)(running|queue|busy)"):
+            client.clear_memory_for_training()
+
+    def test_h3_startup_clear_times_out_if_cache_stays_resident(self):
+        from toolkit.comfy_sample import ComfyApiClient
+
+        client = ComfyApiClient()
+        cache = {"models": [{"cache_id": "m1", "pinned": False}], "loras": [],
+                 "system_ram": {"cached_model_bytes": 100}, "vram": []}
+        def request(method, path, payload=None, **kwargs):
+            if path == "/api/queue":
+                return {"queue_running": [], "queue_pending": []}
+            if path == "/comfyui-cache-monitor/model-cache":
+                return cache
+            if path == "/api/free":
+                return {}
+            raise AssertionError((method, path))
+        client._request_json = request
+        with mock.patch("toolkit.comfy_sample.time.sleep"), \
+             mock.patch("toolkit.comfy_sample.time.monotonic", side_effect=range(100)):
+            with self.assertRaisesRegex(TimeoutError, "(?i)timed out"):
+                client.clear_memory_for_training(timeout=10)
+
     def test_unload_models_can_clear_comfy_model_cache_when_ram_is_low(self):
         from toolkit.comfy_sample import ComfyApiClient
 

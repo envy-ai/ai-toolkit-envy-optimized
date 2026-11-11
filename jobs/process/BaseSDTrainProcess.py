@@ -2310,8 +2310,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
             # out-of-band unload here could disturb a prompt that owns the GPU.
             return
         if self.accelerator.is_main_process and comfy_config is not None:
-            print_acc("Releasing ComfyUI VRAM before training model load")
-            ComfyApiClient(api_url=comfy_config.api_url, timeout=10).release_vram()
+            client = ComfyApiClient(api_url=comfy_config.api_url, timeout=10)
+            if self.model_config.arch in ('minimax_h3', 'minimax_h3_image'):
+                print_acc("Clearing ComfyUI model RAM and VRAM before H3 training model load")
+                client.clear_memory_for_training()
+            else:
+                print_acc("Releasing ComfyUI VRAM before training model load")
+                client.release_vram()
 
     def hook_after_model_load(self):
         # override in subclass

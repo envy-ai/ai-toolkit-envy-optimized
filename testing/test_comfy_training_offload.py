@@ -84,29 +84,37 @@ class ComfyTrainingOffloadTests(unittest.TestCase):
             DEFAULT_COMFY_QWEN_IMAGE_2_BATCH_WORKFLOW_PATH,
         )
 
-    def test_startup_releases_comfy_vram_before_training_model_load(self):
+    def test_startup_clears_h3_cache_and_keeps_other_architecture_release(self):
+        for arch in ("minimax_h3", "minimax_h3_image", "qwen_image_2"):
+            with self.subTest(arch=arch):
+                process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
+                process.accelerator = SimpleNamespace(is_main_process=True)
+                process.model_config = SimpleNamespace(arch=arch, shared_weights={})
+                process.sample_config = SimpleNamespace(comfy=SimpleNamespace(
+                    enabled=True, api_url="http://comfy.test:8188", run_in_background=True,
+                ))
+                process.first_sample_config = process.sample_config
+                with mock.patch("jobs.process.BaseSDTrainProcess.ComfyApiClient") as client_class:
+                    process.hook_before_model_load()
+                client_class.assert_called_once_with(api_url="http://comfy.test:8188", timeout=10)
+                client = client_class.return_value
+                if arch.startswith("minimax_h3"):
+                    client.clear_memory_for_training.assert_called_once_with()
+                    client.release_vram.assert_not_called()
+                else:
+                    client.release_vram.assert_called_once_with()
+                    client.clear_memory_for_training.assert_not_called()
+
+    def test_h3_cache_clear_failure_stops_startup(self):
         process = BaseSDTrainProcess.__new__(BaseSDTrainProcess)
         process.accelerator = SimpleNamespace(is_main_process=True)
-        process.sample_config = SimpleNamespace(
-            comfy=SimpleNamespace(
-                enabled=True,
-                api_url="http://comfy.test:8188",
-                run_in_background=True,
-            )
-        )
+        process.model_config = SimpleNamespace(arch="minimax_h3_image", shared_weights={})
+        process.sample_config = SimpleNamespace(comfy=SimpleNamespace(enabled=True, api_url="http://comfy.test:8188"))
         process.first_sample_config = process.sample_config
-
-        with mock.patch(
-            "jobs.process.BaseSDTrainProcess.ComfyApiClient"
-        ) as client_class:
-            process.hook_before_model_load()
-
-        client_class.assert_called_once_with(
-            api_url="http://comfy.test:8188",
-            timeout=10,
-        )
-        client_class.return_value.release_vram.assert_called_once_with()
-        client_class.return_value.unload_models.assert_not_called()
+        with mock.patch("jobs.process.BaseSDTrainProcess.ComfyApiClient") as client_class:
+            client_class.return_value.clear_memory_for_training.side_effect = RuntimeError("clear failed")
+            with self.assertRaisesRegex(RuntimeError, "clear failed"):
+                process.hook_before_model_load()
 
     def test_startup_release_hook_precedes_training_model_creation_and_load(self):
         import inspect

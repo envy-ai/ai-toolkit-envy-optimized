@@ -20,6 +20,7 @@ from toolkit.paths import get_path
 DEFAULT_COMFY_API_URL = "http://127.0.0.1:8188"
 DEFAULT_COMFY_PROMPT_TIMEOUT = 30 * 60
 COMFY_CACHE_MONITOR_RELEASE_PATH = "/comfyui-cache-monitor/release_vram"
+COMFY_CACHE_MONITOR_MODELS_PATH = "/comfyui-cache-monitor/model-cache"
 COMFY_LEGACY_FREE_PATH = "/api/free"
 DEFAULT_COMFY_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample.json.njk"
 DEFAULT_COMFY_BATCH_WORKFLOW_PATH = "config/comfy_templates/krea2_lora_sample_batch_easy_use.json.njk"
@@ -1025,6 +1026,96 @@ class ComfyApiClient:
         except (urllib.error.URLError, TimeoutError, RuntimeError):
             if not ignore_errors:
                 raise
+
+    def clear_memory_for_training(self, timeout: float = 120.0):
+        """Clear Comfy's model RAM/VRAM caches before loading a large trainer.
+
+        The native /free endpoint acknowledges queued work, not completion.
+        Cache Monitor supplies the observable model-cache state and the native
+        unpin operations required to keep its executor-reset hook from retaining
+        model weights. This is a bounded startup operation, never a preview
+        handoff or an instruction to cancel another client's work.
+        """
+        deadline = time.monotonic() + timeout
+
+        def request(method, path, payload=None):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out clearing ComfyUI model RAM and VRAM before training")
+            return self._request_json(method, path, payload, timeout=min(self.timeout, remaining))
+
+        def require_idle():
+            queue = request("GET", "/api/queue")
+            if (not isinstance(queue, dict)
+                    or not isinstance(queue.get("queue_running"), list)
+                    or not isinstance(queue.get("queue_pending"), list)):
+                raise RuntimeError(f"Invalid ComfyUI queue response before memory clear: {queue!r}")
+            if queue["queue_running"] or queue["queue_pending"]:
+                raise RuntimeError(
+                    "ComfyUI has running or queued work; finish it before starting H3 training. "
+                    "Its prompts were not interrupted or removed."
+                )
+
+        def cache_state():
+            try:
+                state = request("GET", COMFY_CACHE_MONITOR_MODELS_PATH)
+            except urllib.error.HTTPError as error:
+                if error.code == 404:
+                    raise RuntimeError(
+                        "H3 training requires comfyui-cache-monitor to confirm ComfyUI model RAM "
+                        "and VRAM are cleared. Install/enable it and restart ComfyUI when idle."
+                    ) from error
+                raise
+            if (not isinstance(state, dict)
+                    or not isinstance(state.get("models"), list)
+                    or not isinstance(state.get("loras"), list)
+                    or not isinstance(state.get("system_ram"), dict)
+                    or type(state["system_ram"].get("cached_model_bytes")) is not int
+                    or not isinstance(state.get("vram"), list)
+                    or any(not isinstance(device, dict)
+                           or type(device.get("cached_model_bytes")) is not int
+                           for device in state["vram"])
+                    or any(not isinstance(entry, dict)
+                           or not isinstance(entry.get("cache_id"), str)
+                           or type(entry.get("pinned")) is not bool
+                           for entry in state["models"] + state["loras"])):
+                raise RuntimeError(f"Invalid ComfyUI Cache Monitor response before memory clear: {state!r}")
+            return state
+
+        require_idle()
+        state = cache_state()
+        for collection, endpoint in (("models", "model-pin"), ("loras", "lora-pin")):
+            for entry in state[collection]:
+                if entry["pinned"]:
+                    require_idle()
+                    response = request("POST", f"/comfyui-cache-monitor/{endpoint}",
+                                       {"cache_id": entry["cache_id"], "pinned": False})
+                    if (not isinstance(response, dict) or response.get("pinned") is not False
+                            or response.get("cache_id") != entry["cache_id"]):
+                        raise RuntimeError(f"ComfyUI did not confirm cache unpinning: {response!r}")
+
+        require_idle()
+        # Reuse the native unload payload; bound its request by the same deadline.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Timed out clearing ComfyUI model RAM and VRAM before training")
+        request_timeout = self.timeout
+        try:
+            self.timeout = min(request_timeout, remaining)
+            self.unload_models(free_memory=True)
+        finally:
+            self.timeout = request_timeout
+        while True:
+            require_idle()
+            state = cache_state()
+            if (not state["models"] and not state["loras"]
+                    and state["system_ram"]["cached_model_bytes"] == 0
+                    and all(device["cached_model_bytes"] == 0 for device in state["vram"])):
+                return state
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out clearing ComfyUI model RAM and VRAM before training")
+            time.sleep(min(self.poll_interval, remaining))
 
     def release_vram(self):
         """Release ComfyUI model VRAM while retaining its resident RAM cache."""
