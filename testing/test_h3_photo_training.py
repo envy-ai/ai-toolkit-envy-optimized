@@ -28,8 +28,8 @@ def process():
     return NS(get_conf=lambda key: 'diffusion_trainer', model_config=NS(arch='minimax_h3', model_kwargs={'h3_photo_training': True}, assistant_lora_path='helper.safetensors'),
               network_config=NS(type='lora', transformer_only=True, all_layers=False, network_kwargs={}),
               train_config=NS(batch_size=1, train_unet=True, train_text_encoder=False, train_refiner=False,
-                              noise_scheduler='flowmatch', timestep_type='shift', content_or_style='balanced', content_or_style_reg='balanced', linear_timesteps=False, linear_timesteps2=False, first_timestep_chance=0, min_denoising_steps=0, max_denoising_steps=999, num_train_timesteps=1000, loss_target='noise', do_prior_divergence=False, train_turbo=False, inverted_mask_prior=False, correct_pred_norm=False, do_cfg=False, do_random_cfg=False, blank_prompt_preservation=False, do_guidance_loss=False,
-                              do_differential_guidance=False, frequency_loss_enabled=False, diff_output_preservation=False),
+                              noise_scheduler='flowmatch', timestep_type='shift', content_or_style='balanced', content_or_style_reg='balanced', linear_timesteps=False, linear_timesteps2=False, first_timestep_chance=0, min_denoising_steps=0, max_denoising_steps=999, num_train_timesteps=1000, loss_target='noise', loss_type='mse', t0_loss_target=False, do_prior_divergence=False, train_turbo=False, inverted_mask_prior=False, correct_pred_norm=False, do_cfg=False, do_random_cfg=False, blank_prompt_preservation=False, do_guidance_loss=False,
+                              do_differential_guidance=False, differential_guidance_scale=3.0, frequency_loss_enabled=False, diff_output_preservation=False),
               adapter_config=None, guidance_config=None,
               dataset_configs=[NS(type='image', num_frames=1, auto_frame_count=False, batch_size=1,
                                   do_i2v=False, do_audio=False, h3_v2v_path=None, h3_reference_path=None,
@@ -60,6 +60,50 @@ def test_invalid_photo_jobs_rejected(component, field, value):
     target = p.dataset_configs[0] if component == 'dataset' else getattr(p, component)
     setattr(target, field, value)
     with pytest.raises(ValueError, match='h3_photo_training'): validate(p)
+
+
+@pytest.mark.parametrize('arch', ['minimax_h3', 'minimax_h3_image'])
+@pytest.mark.parametrize('scale', [1., 3.])
+def test_photo_guard_accepts_standalone_differential_guidance(arch, scale):
+    p = process()
+    p.model_config.arch = arch
+    p.train_config.do_differential_guidance = True
+    p.train_config.differential_guidance_scale = scale
+    validate(p)
+
+
+@pytest.mark.parametrize('scale', [0., -1., float('nan'), float('inf'), '3', True, None])
+def test_photo_guard_rejects_invalid_differential_guidance_scale(scale):
+    p = process()
+    p.train_config.do_differential_guidance = True
+    p.train_config.differential_guidance_scale = scale
+    with pytest.raises(ValueError, match='(?i)differential guidance scale'):
+        validate(p)
+
+
+def test_photo_guard_requires_mse_only_when_differential_guidance_is_enabled():
+    p = process()
+    p.train_config.do_differential_guidance = True
+    validate(p)
+    p.train_config.loss_type = 't0'
+    with pytest.raises(ValueError, match='(?i)(mse|mean.squared)'):
+        validate(p)
+    p.train_config.loss_type = 'mse'
+    p.train_config.t0_loss_target = True
+    with pytest.raises(ValueError, match='(?i)(mse|t0)'):
+        validate(p)
+    p.train_config.do_differential_guidance = False
+    validate(p)
+
+
+@pytest.mark.parametrize('field', ['do_cfg', 'do_random_cfg', 'do_guidance_loss',
+                                    'diff_output_preservation', 'blank_prompt_preservation'])
+def test_photo_guard_still_rejects_incompatible_objectives(field):
+    p = process()
+    p.train_config.do_differential_guidance = True
+    setattr(p.train_config, field, True)
+    with pytest.raises(ValueError, match='h3_photo_training'):
+        validate(p)
 
 
 def test_scheduler_density_default_and_inference_constants():
@@ -147,3 +191,58 @@ def test_published_yaml_recipe_and_ordinary_process_types():
     with pytest.raises(ValueError, match="ordinary"): validate(p)
     p.model_config.model_kwargs['h3_photo_training'] = False
     validate(p)
+
+
+def standalone_differential_guidance_statement():
+    """Execute the actual calculate_loss statement without importing CUDA-only plugins."""
+    path = Path(__file__).resolve().parents[1] / 'extensions_built_in/sd_trainer/SDTrainer.py'
+    tree = ast.parse(path.read_text())
+    trainer = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'SDTrainer')
+    method = next(n for n in trainer.body if isinstance(n, ast.FunctionDef) and n.name == 'calculate_loss')
+    candidates = [n for n in method.body if isinstance(n, ast.If)
+                  and 'do_differential_guidance' in ast.unparse(n.test)]
+    assert len(candidates) == 1, 'DG must be applied once at the top loss level'
+    function = ast.FunctionDef(name='apply', args=ast.arguments(posonlyargs=[],
+        args=[ast.arg(arg='self'), ast.arg(arg='noise_pred'), ast.arg(arg='target')],
+        kwonlyargs=[], kw_defaults=[], defaults=[]), body=[candidates[0],
+        ast.Return(value=ast.Name(id='target', ctx=ast.Load()))], decorator_list=[])
+    code = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    scope = {'torch': torch}
+    exec(compile(code, str(path), 'exec'), scope)
+    return scope['apply']
+
+
+@pytest.mark.parametrize('scale', [1., 3.])
+def test_h3_differential_guidance_target_is_detached_and_scales_gradient_once(scale):
+    apply = standalone_differential_guidance_statement()
+    prediction = torch.tensor([2., -1.], requires_grad=True)
+    target = torch.tensor([4., 3.])
+    trainer = NS(train_config=NS(do_differential_guidance=True, differential_guidance_scale=scale,
+                                 do_guidance_loss=False),
+                 model_config=NS(arch='minimax_h3_image', model_kwargs={'h3_photo_training': True}),
+                 predict_noise=Mock(side_effect=AssertionError('extra model pass')))
+    guided = apply(trainer, prediction, target)
+    assert not guided.requires_grad
+    torch.testing.assert_close(guided, prediction.detach() + scale * (target - prediction.detach()))
+    loss = (prediction - guided).square().mean()
+    loss.backward()
+    torch.testing.assert_close(prediction.grad, scale * (prediction.detach() - target))
+    assert torch.isfinite(prediction.grad).all()
+    trainer.predict_noise.assert_not_called()
+
+
+@pytest.mark.parametrize('arch,photo,full,enabled,applies', [
+    ('minimax_h3', True, False, True, True),
+    ('minimax_h3_image', True, False, True, True),
+    ('minimax_h3', False, False, True, False),
+    ('qwen_image_2', False, False, True, False),
+    ('qwen_image_2', False, True, True, True),
+    ('minimax_h3_image', True, False, False, False),
+])
+def test_differential_guidance_routing_preserves_non_h3_behavior(arch, photo, full, enabled, applies):
+    apply = standalone_differential_guidance_statement()
+    prediction, target = torch.tensor([2.]), torch.tensor([4.])
+    trainer = NS(train_config=NS(do_differential_guidance=enabled, differential_guidance_scale=3.,
+                                 do_guidance_loss=full),
+                 model_config=NS(arch=arch, model_kwargs={'h3_photo_training': photo}))
+    torch.testing.assert_close(apply(trainer, prediction, target), torch.tensor([8. if applies else 4.]))

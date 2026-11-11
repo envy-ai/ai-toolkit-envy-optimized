@@ -155,12 +155,22 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
         (excluded.length > 0 && (new Set(excluded).size !== 2 || !excluded.includes('token_refiner') || !excluded.includes('adaln_proj'))))) {
       errors.push('MiniMax-H3 photo training accepts no Exclude modules or both token_refiner and adaln_proj. Choose Image mode (keep current settings) before using other exclusions.');
     }
-    if (['do_cfg', 'do_random_cfg', 'do_guidance_loss', 'do_differential_guidance',
+    if (process.train.do_differential_guidance) {
+      const lossType = process.train.loss_type === undefined ? 'mse' : process.train.loss_type;
+      if (lossType !== 'mse' || (process.train as unknown as Record<string, unknown>).t0_loss_target) {
+        errors.push('MiniMax-H3 photo Differential Guidance currently requires MSE loss with t0_loss_target disabled.');
+      }
+      const scale = process.train.differential_guidance_scale === undefined ? 3 : process.train.differential_guidance_scale;
+      if (typeof scale !== 'number' || !Number.isFinite(scale) || scale <= 0) {
+        errors.push('MiniMax-H3 photo Differential Guidance Scale must be a finite positive number.');
+      }
+    }
+    if (['do_cfg', 'do_random_cfg', 'do_guidance_loss',
       'diff_output_preservation', 'blank_prompt_preservation', 'do_prior_divergence',
       'train_turbo', 'inverted_mask_prior', 'correct_pred_norm'].some(key =>
       !!(process.train as unknown as Record<string, unknown>)[key]) ||
       (process.train.frequency_loss_type ?? 'none') !== 'none') {
-      errors.push('MiniMax-H3 photo training cannot combine CFG, guidance or preservation objectives with the image training adapter.');
+      errors.push('MiniMax-H3 photo training cannot combine CFG, full guidance loss or preservation objectives with the image training adapter. Standalone Differential Guidance is supported.');
     }
   }
   if (process.model?.arch === 'minimax_h3_image' && process.sample?.comfy?.enabled) {

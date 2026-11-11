@@ -402,3 +402,35 @@ test('imports and both selectors/save paths use shared checks; server protects o
   assert.ok(api.includes('validateTrainingCapabilities(job_config)'));
   assert.ok(api.includes('mergeSampleOnlyJobConfig(existingConfig, job_config)'));
 });
+
+test('H3 photo standalone differential guidance is accepted while conflicting objectives and invalid scales are rejected', () => {
+  for (const arch of ['minimax_h3', 'minimax_h3_image']) {
+    const job = config(arch, 'diffusion_trainer');
+    const p = job.config.process[0];
+    p.model.model_kwargs.h3_photo_training = true;
+    p.train.do_differential_guidance = true;
+    for (const scale of [1, 3]) {
+      p.train.differential_guidance_scale = scale;
+      assert.deepEqual(caps.validateTrainingCapabilities(job), [], `${arch} scale ${scale}`);
+    }
+    for (const scale of [0, -1, NaN, Infinity, '3', true, null]) {
+      p.train.differential_guidance_scale = scale;
+      assert.match(caps.validateTrainingCapabilities(job).join('\n'), /Differential Guidance Scale/i);
+    }
+    p.train.differential_guidance_scale = 3;
+    p.train.loss_type = 't0';
+    assert.match(caps.validateTrainingCapabilities(job).join('\n'), /(?:MSE|mean.squared)/i);
+    p.train.do_differential_guidance = false;
+    assert.deepEqual(caps.validateTrainingCapabilities(job), []);
+    p.train.loss_type = 'mse';
+    p.train.do_differential_guidance = true;
+    p.train.t0_loss_target = true;
+    assert.match(caps.validateTrainingCapabilities(job).join('\n'), /(?:MSE|t0)/i);
+    p.train.t0_loss_target = false;
+    for (const key of ['do_cfg', 'do_random_cfg', 'do_guidance_loss', 'diff_output_preservation', 'blank_prompt_preservation']) {
+      p.train[key] = true;
+      assert.match(caps.validateTrainingCapabilities(job).join('\n'), /photo training.*(?:CFG|guidance|preservation)/i, key);
+      p.train[key] = false;
+    }
+  }
+});

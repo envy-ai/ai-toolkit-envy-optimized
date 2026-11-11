@@ -206,8 +206,14 @@ def _validate_h3_photo_training(process):
         raise ValueError('h3_photo_training requires uniform sampling across the full 1000-step shifted schedule')
     if train.loss_target != 'noise':
         raise ValueError('h3_photo_training requires loss_target: noise')
-    if (train.do_guidance_loss or train.do_differential_guidance
-            or train.do_cfg or train.do_random_cfg
+    if train.do_differential_guidance:
+        if train.loss_type != 'mse' or train.t0_loss_target:
+            raise ValueError('h3_photo_training differential guidance currently requires MSE loss with t0_loss_target disabled')
+        scale = train.differential_guidance_scale
+        if (isinstance(scale, bool) or not isinstance(scale, (int, float))
+                or not 0 < scale < float('inf')):
+            raise ValueError('h3_photo_training differential guidance scale must be a finite positive number')
+    if (train.do_guidance_loss or train.do_cfg or train.do_random_cfg
             or train.blank_prompt_preservation or train.frequency_loss_enabled
             or train.diff_output_preservation or train.do_prior_divergence
             or train.train_turbo or train.inverted_mask_prior or train.correct_pred_norm):

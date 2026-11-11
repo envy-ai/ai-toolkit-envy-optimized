@@ -1075,10 +1075,18 @@ class SDTrainer(BaseSDTrainProcess):
                         audio_uncond + audio_guidance_scale * (a_target - audio_uncond)
                     ).to(a_dtype).detach()
 
-            if self.train_config.do_differential_guidance:
-                with torch.no_grad():
-                    guidance_scale = self.train_config.differential_guidance_scale
-                    target = noise_pred + guidance_scale * (target - noise_pred)
+        # H3 photo training also supports this native target extrapolation on
+        # its ordinary noise-minus-clean flow target. It needs no unconditional
+        # prediction and leaves the frozen image helper active. Other models
+        # retain their existing requirement for do_guidance_loss.
+        if self.train_config.do_differential_guidance and (
+            self.train_config.do_guidance_loss
+            or (self.model_config.arch in ('minimax_h3', 'minimax_h3_image')
+                and self.model_config.model_kwargs.get('h3_photo_training', False))
+        ):
+            with torch.no_grad():
+                guidance_scale = self.train_config.differential_guidance_scale
+                target = noise_pred + guidance_scale * (target - noise_pred)
             
         if target is None:
             target = noise

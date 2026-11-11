@@ -565,6 +565,13 @@ const docs: { [key: string]: ConfigDoc } = {
         guidance and sampling CFG. Changes take effect when training starts or resumes.
         <br />
         <br />
+        MiniMax-H3 and MiniMax-H3-Image photo recipes also support this switch on the ordinary flow target,
+        with the frozen image helper active and no extra forward pass. Their scale must be finite and greater
+        than 0. Use MSE loss with t0_loss_target disabled; other loss modes are unsupported for H3 photo
+        Differential Guidance. Keep CFG, full Guidance Loss and preservation objectives off. Normalized optimizers such as
+        Muon may cancel much of a uniform gradient rescaling; training quality still needs comparison.
+        <br />
+        <br />
         <img src="/imgs/diff_guidance.png" alt="Differential Guidance Diagram" className="max-w-full mx-auto" />
       </>
     ),
