@@ -90,7 +90,7 @@ def test_photo_block_filter_unset_defaults_and_other_guards_remain(arch):
 @pytest.mark.parametrize('component,field,value', [
     ('train_config', 'batch_size', 2), ('train_config', 'train_refiner', True),
     ('train_config', 'content_or_style', 'style'), ('train_config', 'timestep_type', 'linear'), ('network_config', 'type', 'lokr'),
-    ('model_config', 'arch', 'qwen_image_2'), ('model_config', 'assistant_lora_path', None),
+    ('model_config', 'arch', 'qwen_image_2'),
     ('dataset', 'num_frames', 17), ('dataset', 'h3_reference_path', '/reference'),
     ('dataset', 'do_audio', True), ('dataset', 'control_path', '/control'),
 ])
@@ -156,6 +156,55 @@ def test_scheduler_density_default_and_inference_constants():
     assert model.video_sigma_shift == 12
     assert H3_MODULE.packing.AUDIO_SIGMA_SHIFT == 3
     assert (regular.timesteps < 500).float().mean().item() < .1
+
+
+
+@pytest.mark.parametrize('arch', ['minimax_h3', 'minimax_h3_image'])
+@pytest.mark.parametrize('helper', [None, '', '   \t'])
+def test_photo_helper_is_optional_and_blank_is_normalized(arch, helper):
+    from toolkit.config_modules import ModelConfig
+    config = ModelConfig(arch=arch, name_or_path='/fixture', assistant_lora_path=helper)
+    assert config.assistant_lora_path is None
+    p = process()
+    p.model_config.arch = arch
+    p.model_config.assistant_lora_path = config.assistant_lora_path
+    validate(p)
+
+
+@pytest.mark.parametrize('arch', ['minimax_h3', 'minimax_h3_image'])
+@pytest.mark.parametrize('helper_kwargs', [{}, {'assistant_lora_path': None}, {'assistant_lora_path': ''}, {'assistant_lora_path': '  \t'}])
+def test_optional_photo_helper_skips_h3_model_load(arch, helper_kwargs):
+    from toolkit.config_modules import ModelConfig
+    from testing.test_h3_quant_cache import FakeModule, FakeQuantizedTextEncoder, H3QuantizedCacheTests
+    config = ModelConfig(arch=arch, name_or_path='/fixture', **helper_kwargs)
+    assert config.assistant_lora_path is None
+    model = make_h3_model()
+    model.model_config.assistant_lora_path = config.assistant_lora_path
+    model.model_config.model_kwargs['h3_photo_training'] = True
+    model.load_quantized_module_cache = Mock(side_effect=[FakeModule(), FakeQuantizedTextEncoder()])
+    model._load_transformer = Mock()
+    model._load_text_encoder = Mock()
+    model._load_tokenizer_processor = Mock(return_value=('tokenizer', 'processor'))
+    H3QuantizedCacheTests()._load_model(model)
+    model.load_training_adapter.assert_not_called()
+
+
+@pytest.mark.parametrize('arch', ['minimax_h3', 'minimax_h3_image'])
+def test_config_preserves_nonblank_helper_path_and_other_arch_blank(arch):
+    from toolkit.config_modules import ModelConfig
+    path = ' /fixture/helper.safetensors '
+    assert ModelConfig(arch=arch, name_or_path='/fixture', assistant_lora_path=path).assistant_lora_path == path
+    assert ModelConfig(arch='qwen_image_2', name_or_path='/fixture', assistant_lora_path='  ').assistant_lora_path == '  '
+
+
+def test_photo_invalid_nonblank_helper_fails_loudly():
+    model = make_h3_model()
+    del model.load_training_adapter
+    model.model_config.assistant_lora_path = 'missing-photo-helper.safetensors'
+    model.model_config.model_kwargs['h3_photo_training'] = True
+    with patch.object(H3_MODULE, 'find_file_recursive', return_value=None), \
+         pytest.raises(ValueError, match='Assistant LoRA path'):
+        model.load_training_adapter(torch.nn.Linear(2, 2))
 
 
 def test_photo_loader_requires_strict_frozen_helper(tmp_path):

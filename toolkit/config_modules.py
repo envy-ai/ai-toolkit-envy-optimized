@@ -871,6 +871,13 @@ class ModelConfig:
             if ':' in self.arch:
                 self.arch = self.arch.split(':')[0]
 
+        # H3 photo helpers are optional. Normalize blank YAML/UI values before
+        # loaders and sampling use the shared None-based adapter lifecycle.
+        if (self.arch in ('minimax_h3', 'minimax_h3_image')
+                and isinstance(self.assistant_lora_path, str)
+                and not self.assistant_lora_path.strip()):
+            self.assistant_lora_path = None
+
         if self.arch == "flex1":
             self.arch = "flux"
 

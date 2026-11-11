@@ -175,9 +175,6 @@ def _validate_h3_photo_training(process):
         raise ValueError('h3_photo_training requires an FL2VA partition')
     if model.model_kwargs.get('image_refs_as_video', False):
         raise ValueError('h3_photo_training does not support reference video inputs')
-    if not model.assistant_lora_path:
-        raise ValueError('h3_photo_training requires a frozen photo training adapter')
-
     train = process.train_config
     network = process.network_config
     if network is None or network.type.lower() != 'lora' or not network.transformer_only:
