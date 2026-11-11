@@ -145,10 +145,11 @@ export function validateTrainingCapabilities(config: JobConfig): string[] {
       errors.push('MiniMax-H3-Image photo training requires the image partition.');
     }
     const included = effectiveNetworkFilter(process, 'only_if_contains');
-    const photoBlocks = Array.from({ length: 30 }, (_, index) => `blocks.${index + 20}.`);
-    if (included != null && (!Array.isArray(included) || new Set(included).size !== photoBlocks.length ||
-        !photoBlocks.every(block => included.includes(block)))) {
-      errors.push('MiniMax-H3 photo training requires Include modules to contain exactly blocks 20–49, or be unset. Choose Image mode (keep current settings) before using other targets.');
+    const allBlocks = Array.from({ length: 50 }, (_, index) => `blocks.${index}.`);
+    const photoBlocks = allBlocks.slice(20);
+    if (included != null && (!Array.isArray(included) || ![photoBlocks, allBlocks].some(blocks =>
+        new Set(included).size === blocks.length && blocks.every(block => included.includes(block))))) {
+      errors.push('MiniMax-H3 photo training requires Include modules to contain exactly blocks 20–49 or 0–49, or be unset. Choose Image mode (keep current settings) before using other targets.');
     }
     const excluded = effectiveNetworkFilter(process, 'ignore_if_contains');
     if (excluded != null && (!Array.isArray(excluded) ||

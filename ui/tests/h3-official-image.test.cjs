@@ -79,3 +79,24 @@ test('H3 dataset cache controls preserve imports and inherit a common choice', (
   quantCache.onChange(true, config, (value, path) => { result = value; key = path; });
   assert.equal(result, true); assert.equal(key, 'config.process[0].model.cache_quantized_models');
 });
+
+test('photo block filter accepts only default or all 50 blocks for both architectures', () => {
+  for (const arch of ['minimax_h3', 'minimax_h3_image']) {
+    const result = ui.applyMinimaxH3PhotoRecipe(job(arch));
+    const network = result.config.process[0].network.network_kwargs;
+    for (const start of [20, 0]) {
+      network.only_if_contains = Array.from({length: 50 - start}, (_, i) => `blocks.${start + i}.`);
+      assert.deepEqual(capabilities.validateTrainingCapabilities(result), [], `${arch} from ${start}`);
+    }
+    for (const filters of [[], ['blocks.0.'], Array.from({length: 49}, (_, i) => `blocks.${i + 1}.`),
+      [...Array.from({length: 30}, (_, i) => `blocks.${i + 20}.`), 'custom']]) {
+      network.only_if_contains = filters;
+      assert.match(capabilities.validateTrainingCapabilities(result).join('\n'), /Include modules/i, `${arch}: ${filters}`);
+    }
+    delete network.only_if_contains;
+    assert.deepEqual(capabilities.validateTrainingCapabilities(result), []);
+    network.only_if_contains = Array.from({length: 50}, (_, i) => `blocks.${i}.`);
+    network.ignore_if_contains = ['custom'];
+    assert.match(capabilities.validateTrainingCapabilities(result).join('\n'), /Exclude modules/i);
+  }
+});

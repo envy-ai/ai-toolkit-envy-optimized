@@ -48,6 +48,44 @@ def test_opt_in_filter_and_disabled_preserves_custom_settings():
     assert p == before
 
 
+@pytest.mark.parametrize('arch', ['minimax_h3', 'minimax_h3_image'])
+@pytest.mark.parametrize('start', [20, 0])
+def test_photo_block_filter_accepts_exact_supported_ranges(arch, start):
+    p = process()
+    p.model_config.arch = arch
+    filters = [f'blocks.{i}.' for i in range(start, 50)]
+    p.network_config.network_kwargs['only_if_contains'] = filters.copy()
+    validate(p)
+    assert p.network_config.network_kwargs['only_if_contains'] == filters
+
+
+@pytest.mark.parametrize('arch', ['minimax_h3', 'minimax_h3_image'])
+@pytest.mark.parametrize('filters', [[], ['blocks.0.'], [f'blocks.{i}.' for i in range(1, 50)],
+                                      [f'blocks.{i}.' for i in range(20, 50)] + ['custom']])
+def test_photo_block_filter_rejects_empty_partial_and_custom(arch, filters):
+    p = process()
+    p.model_config.arch = arch
+    p.network_config.network_kwargs['only_if_contains'] = filters
+    with pytest.raises(ValueError, match='only_if_contains'):
+        validate(p)
+
+
+@pytest.mark.parametrize('arch', ['minimax_h3', 'minimax_h3_image'])
+def test_photo_block_filter_unset_defaults_and_other_guards_remain(arch):
+    p = process()
+    p.model_config.arch = arch
+    validate(p)
+    assert p.network_config.network_kwargs['only_if_contains'] == [f'blocks.{i}.' for i in range(20, 50)]
+    p.network_config.network_kwargs['only_if_contains'] = [f'blocks.{i}.' for i in range(50)]
+    p.network_config.network_kwargs['ignore_if_contains'] = ['custom']
+    with pytest.raises(ValueError, match='exclusions'):
+        validate(p)
+    p.network_config.network_kwargs['ignore_if_contains'] = ['token_refiner', 'adaln_proj']
+    p.network_config.network_kwargs['full_if_contains'] = ['blocks.0.']
+    with pytest.raises(ValueError, match='full-weight'):
+        validate(p)
+
+
 @pytest.mark.parametrize('component,field,value', [
     ('train_config', 'batch_size', 2), ('train_config', 'train_refiner', True),
     ('train_config', 'content_or_style', 'style'), ('train_config', 'timestep_type', 'linear'), ('network_config', 'type', 'lokr'),
@@ -246,3 +284,26 @@ def test_differential_guidance_routing_preserves_non_h3_behavior(arch, photo, fu
                                  do_guidance_loss=full),
                  model_config=NS(arch=arch, model_kwargs={'h3_photo_training': photo}))
     torch.testing.assert_close(apply(trainer, prediction, target), torch.tensor([8. if applies else 4.]))
+
+
+def test_h3_block_filters_select_120_or_200_lora_modules_on_tiny_model():
+    from toolkit.lora_special import LoRASpecialNetwork
+
+    class FakeBlock(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.projections = torch.nn.ModuleList([torch.nn.Linear(4, 4) for _ in range(4)])
+
+    class TinyH3(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.blocks = torch.nn.ModuleList([FakeBlock() for _ in range(50)])
+            self.token_refiner = FakeBlock()
+            self.adaln_proj = torch.nn.Linear(4, 4)
+
+    for start, expected in ((20, 120), (0, 200)):
+        network = LoRASpecialNetwork(text_encoder=None, unet=TinyH3(), train_text_encoder=False,
+            train_unet=True, target_lin_modules=['FakeBlock'], transformer_only=True,
+            only_if_contains=[f'blocks.{i}.' for i in range(start, 50)],
+            ignore_if_contains=['token_refiner', 'adaln_proj'])
+        assert len(network.unet_loras) == expected

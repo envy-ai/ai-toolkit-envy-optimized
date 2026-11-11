@@ -188,8 +188,8 @@ def _validate_h3_photo_training(process):
     configured_blocks = network.network_kwargs.get('only_if_contains')
     if configured_blocks is None:
         network.network_kwargs['only_if_contains'] = expected_blocks
-    elif set(configured_blocks) != set(expected_blocks):
-        raise ValueError('h3_photo_training requires only_if_contains for H3 blocks 20-49')
+    elif set(configured_blocks) not in (set(expected_blocks), {f'blocks.{i}.' for i in range(50)}):
+        raise ValueError('h3_photo_training requires only_if_contains for exactly H3 blocks 20-49 or 0-49')
     ignored = network.network_kwargs.get('ignore_if_contains') or []
     if set(ignored) not in (set(), {'token_refiner', 'adaln_proj'}):
         raise ValueError('h3_photo_training only permits token_refiner and adaln_proj exclusions')
