@@ -10,6 +10,11 @@ The loader resolves `minimax_h3_image_pruned_int8_convrot.safetensors` and `mini
 
 The example keeps the DiT's released int8 ConvRot weights (`quantize: true`, `qtype: convrot8`) and the encoder's NVFP4 quantization. Its BF16 dtype settings configure floating-point computation; the shipped compressed weights retain their quantized representation.
 
+Compatible single-file Qwen3-VL encoder overrides can also carry int8 embeddings
+with either one tensor-wide scale or one scale per vocabulary row. The native
+importer preserves both layouts and dequantizes only the selected rows. Existing
+quantized encoder caches retain this behavior without rebuilding the cache.
+
 Quantized component caches use `model.quantized_model_cache_dir` (default `models/.quantized_training_cache`). Set an explicit writable directory if your usual cache location is unavailable. First-time cache creation can involve substantial disk I/O. The loader does not replace an existing cache symlink.
 
 The Comfy repack carries six output-head groups: the first is a complete head and the remaining groups are offsets from it. Training uses the first complete head as the initial recipe assumption; inference reconstructs each published PDD head. A converted single-file original transformer can instead retain its ordinary training head and load the official `pdd_fused_heads.safetensors` through `model.model_kwargs.pdd_fused_heads_path`, with the adjacent `pdd_config.json` or an explicit `pdd_config_path`. The loader validates the six-step metadata. Direct loading of the original sharded Diffusers directory is not supported.

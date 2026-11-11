@@ -16,7 +16,7 @@ and converts the matching submodules in place:
     per-tensor scale and an optional AWQ ``pre_quant_scale`` — attached to
     the nvfp4 backend (toolkit/util/nvfp4_quant.py).
   - an int8 marker on an ``nn.Embedding`` swaps in :class:`Int8Embedding`
-    (per-row scales, dequantized per lookup).
+    (a tensor-wide scale or per-row scales, dequantized per lookup).
 
 Linears become OstrisLinear (class swap in place, like
 convert_linear_to_ostris), so LoRA attachment, memory management and the
@@ -41,9 +41,28 @@ def parse_comfy_quant_blob(blob: torch.Tensor) -> dict:
     return json.loads(bytes(blob.cpu().tolist()).decode("utf-8"))
 
 
+def _embedding_scale_storage(scales: torch.Tensor, num_embeddings: int) -> torch.Tensor:
+    if scales.numel() not in (1, num_embeddings):
+        raise ValueError(
+            f"Int8 embedding requires one tensor-wide scale or {num_embeddings} "
+            f"per-row scales, got {scales.numel()}"
+        )
+    # Byte storage preserves FP32 scales when a containing model changes dtype.
+    return scales.detach().float().reshape(-1).contiguous().view(torch.uint8)
+
+
+def _embedding_scales_for_ids(storage: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+    scales = storage.view(torch.float32)
+    # Comfy int8_tensorwise permits a scalar; only per-row scales use token IDs.
+    # Inspect the stored buffer so previously cached embeddings work unchanged.
+    return scales if scales.numel() == 1 else scales.index_select(0, ids)
+
+
 class Int8Embedding(torch.nn.Module):
-    """An embedding table stored as per-row symmetric int8. Rows are
-    dequantized per lookup, so the full-precision table never materializes."""
+    """Symmetric int8 embeddings with a tensor-wide or per-row scale.
+
+    Rows are dequantized per lookup, so the full-precision table never materializes.
+    """
 
     def __init__(self, qweight: torch.Tensor, scales: torch.Tensor, dtype: torch.dtype):
         super().__init__()
@@ -52,7 +71,7 @@ class Int8Embedding(torch.nn.Module):
         self.register_buffer("qweight", qweight.contiguous(), persistent=False)
         self.register_buffer(
             "scales",
-            scales.detach().float().reshape(-1).contiguous().view(torch.uint8),
+            _embedding_scale_storage(scales, self.num_embeddings),
             persistent=False,
         )
 
@@ -67,15 +86,16 @@ class Int8Embedding(torch.nn.Module):
         # the (tiny) lookup on the table's device, return on the caller's
         flat = input_ids.reshape(-1).to(self.qweight.device)
         rows = self.qweight.index_select(0, flat).float()
-        scales = self.scales.view(torch.float32).index_select(0, flat)
+        scales = _embedding_scales_for_ids(self.scales, flat)
         out = (rows * scales.unsqueeze(1)).to(self.output_dtype)
         return out.to(input_ids.device).reshape(*input_ids.shape, self.embedding_dim)
 
 
 class ConvRotInt8Embedding(torch.nn.Module):
-    """Per-row int8 embedding whose rows are stored in the ConvRot-rotated basis (the
+    """Int8 embedding whose rows are stored in the ConvRot-rotated basis (the
     storage of a comfy convrot int8 linear). Rows are gathered, dequantized and rotated
-    back per lookup, so neither the full table nor an unrotated copy materializes."""
+    back per lookup using a tensor-wide or per-row scale, so neither the full table
+    nor an unrotated copy materializes."""
 
     def __init__(self, qweight: torch.Tensor, scales: torch.Tensor, rot_size: int, dtype: torch.dtype):
         super().__init__()
@@ -85,7 +105,7 @@ class ConvRotInt8Embedding(torch.nn.Module):
         self.register_buffer("qweight", qweight.contiguous(), persistent=False)
         self.register_buffer(
             "scales",
-            scales.detach().float().reshape(-1).contiguous().view(torch.uint8),
+            _embedding_scale_storage(scales, self.num_embeddings),
             persistent=False,
         )
 
@@ -96,7 +116,7 @@ class ConvRotInt8Embedding(torch.nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         flat = input_ids.reshape(-1).to(self.qweight.device)
         rows = self.qweight.index_select(0, flat).float()
-        scales = self.scales.view(torch.float32).index_select(0, flat)
+        scales = _embedding_scales_for_ids(self.scales, flat)
         out = rotate(rows * scales.unsqueeze(1), self.rot_size).to(self.output_dtype)
         return out.to(input_ids.device).reshape(*input_ids.shape, self.embedding_dim)
 
